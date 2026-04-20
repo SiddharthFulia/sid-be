@@ -32,6 +32,8 @@ export const getNasa = async (req, res) => {
     res.json(data);
   } catch (err) {
     logger.error(`NASA PROXY FAIL | ${req.params.endpoint}`, err.message);
-    error(res, err.message);
+    // Pass through 429 status so FE can show countdown
+    const status = err.message.includes('429') ? 429 : 500;
+    error(res, err.message, status);
   }
 };

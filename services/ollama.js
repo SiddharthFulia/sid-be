@@ -6,7 +6,7 @@ const SYSTEM_PROMPTS = {
   creative: 'You are a creative writing assistant. Be imaginative but concise.',
 };
 
-export async function chat(message, history = [], model = 'llama3.2:1b', context = 'general') {
+export async function chat(message, history = [], model = 'phi3:mini', context = 'general') {
   const systemPrompt = SYSTEM_PROMPTS[context] || SYSTEM_PROMPTS.general;
 
   const messages = [
@@ -32,7 +32,7 @@ export async function chat(message, history = [], model = 'llama3.2:1b', context
   };
 }
 
-export async function rawQuery(messages, model = 'llama3.2:3b', options = {}) {
+export async function rawQuery(messages, model = 'phi3:mini', options = {}) {
   const { system, maxTokens, temperature } = options;
 
   const body = {
