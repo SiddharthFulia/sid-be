@@ -1,9 +1,9 @@
 import { OLLAMA_URL } from '../helpers/constants.js';
 
 const SYSTEM_PROMPTS = {
-  general: 'You are a helpful, concise AI assistant on Siddharth\'s portfolio website. Keep responses brief and professional.',
-  code: 'You are a senior software engineer. Provide concise, correct code solutions. Use modern best practices.',
-  creative: 'You are a creative writing assistant. Be imaginative but concise.',
+  general: 'You are a helpful AI assistant. Answer in 2-3 sentences max. Be direct, no filler.',
+  code: 'You are a senior engineer. Give short, correct code. No explanations unless asked.',
+  creative: 'You are creative but concise. Max 3 sentences.',
 };
 
 export async function chat(message, history = [], model = 'phi3:mini', context = 'general') {
@@ -18,7 +18,7 @@ export async function chat(message, history = [], model = 'phi3:mini', context =
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: false }),
+    body: JSON.stringify({ model, messages, stream: false, options: { num_predict: 150 } }),
   });
 
   if (!res.ok) throw new Error(`Ollama error: ${res.status}`);
