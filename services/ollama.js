@@ -1,4 +1,23 @@
 import { OLLAMA_URL } from '../helpers/constants.js';
+import logger from '../helpers/logger.js';
+
+// Preload models into memory on startup (avoids cold start on first request)
+const PRELOAD_MODELS = ['phi3:mini', 'llama3.2:1b'];
+
+export async function preloadModels() {
+  for (const model of PRELOAD_MODELS) {
+    try {
+      await fetch(`${OLLAMA_URL}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, prompt: 'hi', options: { num_predict: 1 }, keep_alive: '30m' }),
+      });
+      logger.info(`Model preloaded: ${model}`);
+    } catch (err) {
+      logger.warn(`Failed to preload ${model}: ${err.message}`);
+    }
+  }
+}
 
 const SYSTEM_PROMPTS = {
   general: 'You are a helpful AI assistant. Answer in 2-3 sentences max. Be direct, no filler.',
@@ -11,14 +30,14 @@ export async function chat(message, history = [], model = 'phi3:mini', context =
 
   const messages = [
     { role: 'system', content: systemPrompt },
-    ...history.slice(-10),
+    ...history.slice(-4),
     { role: 'user', content: message },
   ];
 
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: false, options: { num_predict: 150 } }),
+    body: JSON.stringify({ model, messages, stream: false, keep_alive: '30m', options: { num_predict: 100, temperature: 0.7 } }),
   });
 
   if (!res.ok) throw new Error(`Ollama error: ${res.status}`);

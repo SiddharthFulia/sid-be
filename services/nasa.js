@@ -150,14 +150,15 @@ const PROXY_ROUTES = {
 
 export async function proxyNasa(endpoint, query = {}) {
   // Check if it's a third-party proxy route
-  const proxyFn = PROXY_ROUTES[endpoint];
+  // Try with and without 'proxy/' prefix (supports both /nasa/proxy/* and /proxy/*)
+  const proxyFn = PROXY_ROUTES[endpoint] || PROXY_ROUTES[`proxy/${endpoint}`];
   if (proxyFn) {
     const url = proxyFn(query);
     const cacheKey = `proxy:${url}`;
 
     // Skip cache for random/fresh endpoints
     const noCacheEndpoints = ['proxy/iss', 'proxy/randomdog', 'proxy/dogbreed', 'proxy/quotes', 'proxy/foodish', 'proxy/mtg'];
-    const shouldCache = !noCacheEndpoints.includes(endpoint);
+    const shouldCache = !noCacheEndpoints.includes(endpoint) && !noCacheEndpoints.includes(`proxy/${endpoint}`);
 
     if (shouldCache) {
       const cached = getCached(cacheKey);
