@@ -3,13 +3,13 @@ import { GROQ_API_KEY } from '../helpers/constants.js';
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 const MODELS = {
-  'llama-3.3-70b': 'llama-3.3-70b-versatile',
   'llama-3.1-8b': 'llama-3.1-8b-instant',
+  'llama-3.1-70b': 'llama-3.1-70b-versatile',
+  'llama-3.3-70b': 'llama-3.3-70b-versatile',
   'mixtral-8x7b': 'mixtral-8x7b-32768',
-  'gemma2-9b': 'gemma2-9b-it',
 };
 
-export async function chatGroq(message, history = [], model = 'llama-3.3-70b', options = {}) {
+export async function chatGroq(message, history = [], model = 'llama-3.1-8b', options = {}) {
   if (!GROQ_API_KEY) throw new Error('Groq API key not configured');
 
   const modelId = MODELS[model] || model;
