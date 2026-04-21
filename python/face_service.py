@@ -29,7 +29,7 @@ print("MediaPipe Face Mesh + Detection loaded")
 
 # MediaPipe 468 → dlib 68 mapping (exactly 68 points)
 MP_TO_68 = [
-    # Jaw 0-16 (17 points)
+    # Jaw 0-16 (17 points): ear to ear along jawline
     234, 93, 132, 58, 172, 136, 150, 149, 176, 148, 152, 377, 400, 378, 365, 288, 323,
     # Left eyebrow 17-21 (5 points)
     70, 63, 105, 66, 107,
@@ -43,11 +43,15 @@ MP_TO_68 = [
     33, 160, 158, 133, 153, 144,
     # Right eye 42-47 (6 points)
     362, 385, 387, 263, 373, 380,
-    # Outer lip 48-59 (12 points)
-    61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375,
-    # Inner lip 60-67 (8 points)
-    78, 191, 80, 81, 82, 13, 312, 311,
+    # Outer lip 48-59 (12 points): full loop around outer lip
+    61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 321,
+    # Inner lip 60-67 (8 points): full loop around inner lip
+    78, 82, 13, 312, 308, 317, 14, 87,
 ]
+
+# Full lip contours for better FE rendering (sent separately)
+OUTER_LIP_LOOP = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
+INNER_LIP_LOOP = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191]
 
 # For mood/feature detection
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
@@ -197,6 +201,12 @@ def analyze():
                 mouth_right = lm[291].x * w
                 mouth_open_ratio = abs(mouth_bottom - mouth_top) / max(abs(mouth_right - mouth_left), 1)
 
+                # Full contour points for better rendering
+                outer_lip_pts = [{'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)} for idx in OUTER_LIP_LOOP]
+                inner_lip_pts = [{'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)} for idx in INNER_LIP_LOOP]
+                left_eye_pts = [{'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)} for idx in LEFT_EYE]
+                right_eye_pts = [{'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)} for idx in RIGHT_EYE]
+
                 faces.append({
                     'boundingBox': {
                         'x': max(0, x1), 'y': max(0, y1),
@@ -205,7 +215,12 @@ def analyze():
                     'confidence': round(float(confidence), 2),
                     'landmarks': {
                         'points': points_68,
-                        'groups': {},
+                        'groups': {
+                            'outerLip': outer_lip_pts,
+                            'innerLip': inner_lip_pts,
+                            'leftEye': left_eye_pts,
+                            'rightEye': right_eye_pts,
+                        },
                     },
                     'mood': mood,
                     'moodConfidence': round(mood_conf, 2),
