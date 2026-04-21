@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getHealth, getStats } from '../../controllers/v1/health.js';
-import { postChat, postAI } from '../../controllers/v1/ai.js';
+import { postChat, postAI, postGroqChat } from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 
@@ -10,9 +10,12 @@ const router = Router();
 router.get('/health', getHealth);
 router.get('/stats', getStats);
 
-// AI (Ollama)
+// AI (Ollama local)
 router.post('/chat', postChat);
 router.post('/ai', postAI);
+
+// AI (Groq cloud — fast inference)
+router.post('/groq', postGroqChat);
 
 // Face Detection
 router.post('/face-analyze', postFaceAnalyze);
