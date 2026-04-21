@@ -11,6 +11,16 @@ export async function analyzeFace(imageData) {
   return res.json();
 }
 
+export async function detectObjects(imageData, threshold = 0.5) {
+  const res = await fetch(`${FACE_SERVICE_URL}/detect-objects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image: imageData, threshold }),
+  });
+  if (!res.ok) throw new Error(`Object detection error: ${res.status}`);
+  return res.json();
+}
+
 export async function checkHealth() {
   const res = await fetch(`${FACE_SERVICE_URL}/health`, { signal: AbortSignal.timeout(3000) });
   return res.ok;
