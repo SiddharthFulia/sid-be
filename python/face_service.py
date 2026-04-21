@@ -1,4 +1,4 @@
-"""Face detection service using dlib + OpenCV — ported from Amrita BE."""
+"""Face detection service using dlib + OpenCV."""
 
 import os
 import base64
@@ -42,11 +42,21 @@ def decode_image(image_data):
         image_data = image_data.split(',')[1]
     img_bytes = base64.b64decode(image_data)
     arr = np.frombuffer(img_bytes, dtype=np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    # Force uint8 BGR — fixes ARM/Linux compatibility
+    if img.dtype != np.uint8:
+        img = img.astype(np.uint8)
+    if len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
 
 
 def detect_mood(landmarks, face_rect):
-    """Mood detection — exact Amrita logic with normalized face height."""
+    """Mood detection with normalized face height."""
     try:
         pts = landmarks
 
@@ -72,7 +82,7 @@ def detect_mood(landmarks, face_rect):
         eye_center_y = (pts[37][1] + pts[43][1]) / 2
         brow_raise = (eye_center_y - (left_brow + right_brow) / 2) / face_h
 
-        # Decision tree (same as Amrita)
+        # Decision tree
         if mouth_ratio > 0.35:
             return 'surprised', min(0.5 + mouth_ratio, 0.95)
         elif smile_score > 0.02:
@@ -116,15 +126,8 @@ def analyze():
         if img is None:
             return jsonify({'error': 'Invalid image'}), 400
 
-        # Handle RGBA (4 channel) images from browser canvas
-        if len(img.shape) == 2:
-            gray = img
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        elif img.shape[2] == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # img is already guaranteed BGR uint8 from decode_image
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         h, w = img.shape[:2]
 
         # Detect faces
@@ -155,7 +158,7 @@ def analyze():
                     'groups': {k: [{'x': points[i][0], 'y': points[i][1]} for i in v] for k, v in LANDMARK_GROUPS.items()},
                 }
 
-                # Mood (Amrita logic)
+                # Mood
                 mood, conf = detect_mood(points, face_rect)
                 result['mood'] = mood
                 result['moodConfidence'] = round(conf, 2)
