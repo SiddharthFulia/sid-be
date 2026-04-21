@@ -116,7 +116,15 @@ def analyze():
         if img is None:
             return jsonify({'error': 'Invalid image'}), 400
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Handle RGBA (4 channel) images from browser canvas
+        if len(img.shape) == 2:
+            gray = img
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         h, w = img.shape[:2]
 
         # Detect faces
