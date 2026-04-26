@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { getHealth, getStats } from '../../controllers/v1/health.js';
-import { postChat, postAI, postGroqChat } from '../../controllers/v1/ai.js';
+import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision } from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
+import { postImageGen, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 
 const router = Router();
 
@@ -16,6 +17,15 @@ router.post('/ai', postAI);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);
+
+// AI (Gemini — Google, multimodal)
+router.post('/gemini', postGeminiChat);
+router.post('/gemini/vision', postGeminiVision);
+
+// AI Tools (image gen, TTS, summarize)
+router.post('/generate-image', postImageGen);
+router.post('/tts', postTTS);
+router.post('/summarize', postSummarize);
 
 // Face Detection
 router.post('/face-analyze', postFaceAnalyze);

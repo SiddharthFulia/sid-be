@@ -6,3 +6,6 @@ export const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL || 'http://localhos
 export const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 export const WEATHER_API_KEY = process.env.WEATHER_API_KEY || '';
 export const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+export const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+export const HF_TOKEN = process.env.HF_TOKEN || '';
+export const GOOGLE_TTS_KEY = process.env.GOOGLE_TTS_KEY || '';
