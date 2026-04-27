@@ -3,9 +3,9 @@ import { GEMINI_API_KEY } from '../helpers/constants.js';
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 const MODELS = {
-  'gemini-flash': 'gemini-2.0-flash',
-  'gemini-pro': 'gemini-1.5-pro',
-  'gemini-flash-lite': 'gemini-2.0-flash-lite',
+  'gemini-flash': 'gemini-2.5-flash',
+  'gemini-pro': 'gemini-2.5-pro',
+  'gemini-flash-lite': 'gemini-2.5-flash-lite',
 };
 
 /**
