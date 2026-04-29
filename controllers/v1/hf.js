@@ -1,22 +1,50 @@
 import { success, error } from '../../helpers/res_helper.js';
-import { generateImage, summarizeText, textToSpeech } from '../../services/huggingface.js';
+import { summarizeText, textToSpeech } from '../../services/huggingface.js';
+import { generateImage, PROVIDERS } from '../../services/imageGen/index.js';
+import { editImage } from '../../services/imageGen/imageEdit.js';
 import logger from '../../helpers/logger.js';
 
 export const postImageGen = async (req, res) => {
   try {
-    const { prompt, model } = req.body;
+    const { prompt, model, provider = 'cloudflare' } = req.body;
     if (!prompt) return error(res, 'Prompt is required', 400);
+    if (!PROVIDERS.includes(provider.toLowerCase())) {
+      return error(res, `Invalid provider. Use one of: ${PROVIDERS.join(', ')}`, 400);
+    }
 
     const start = Date.now();
-    logger.info(`HF IMAGE REQ | prompt="${prompt.slice(0, 60)}..."`);
+    logger.info(`IMAGE REQ | provider=${provider} | prompt="${prompt.slice(0, 60)}..."`);
 
-    const result = await generateImage(prompt, model);
+    const result = await generateImage(prompt, { provider, model });
 
-    logger.info(`HF IMAGE RES | ${Date.now() - start}ms`);
+    logger.info(`IMAGE RES | ${Date.now() - start}ms | provider=${result.provider}`);
     success(res, result);
   } catch (err) {
     logger.error('Image gen failed', err.message);
-    error(res, err.message, err.message.includes('loading') ? 503 : 500);
+    const status = err.message.includes('loading') ? 503
+      : err.message.includes('depleted') || err.message.includes('limit') ? 402
+      : 500;
+    error(res, err.message, status);
+  }
+};
+
+export const postImageEdit = async (req, res) => {
+  try {
+    const { image, prompt, strength, steps } = req.body;
+    if (!image) return error(res, 'Image is required', 400);
+    if (!prompt) return error(res, 'Prompt is required', 400);
+
+    const start = Date.now();
+    logger.info(`IMAGE EDIT REQ | prompt="${prompt.slice(0, 60)}..." | strength=${strength}`);
+
+    const result = await editImage(image, prompt, { strength, steps });
+
+    logger.info(`IMAGE EDIT RES | ${Date.now() - start}ms`);
+    success(res, result);
+  } catch (err) {
+    logger.error('Image edit failed', err.message);
+    const status = err.message.includes('limit') ? 402 : 500;
+    error(res, err.message, status);
   }
 };
 

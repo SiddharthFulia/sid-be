@@ -3,7 +3,7 @@ import { getHealth, getStats } from '../../controllers/v1/health.js';
 import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision } from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
-import { postImageGen, postTTS, postSummarize } from '../../controllers/v1/hf.js';
+import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 
 const router = Router();
 
@@ -22,8 +22,9 @@ router.post('/groq', postGroqChat);
 router.post('/gemini', postGeminiChat);
 router.post('/gemini/vision', postGeminiVision);
 
-// AI Tools (image gen, TTS, summarize)
+// AI Tools (image gen, edit, TTS, summarize)
 router.post('/generate-image', postImageGen);
+router.post('/image-edit', postImageEdit);
 router.post('/tts', postTTS);
 router.post('/summarize', postSummarize);
 

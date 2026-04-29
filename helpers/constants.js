@@ -9,3 +9,5 @@ export const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 export const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 export const HF_TOKEN = process.env.HF_TOKEN || '';
 export const GOOGLE_TTS_KEY = process.env.GOOGLE_TTS_KEY || '';
+export const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID || '';
+export const CF_API_TOKEN = process.env.CF_API_TOKEN || '';

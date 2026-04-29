@@ -2,41 +2,9 @@ import { HF_TOKEN, GOOGLE_TTS_KEY } from '../helpers/constants.js';
 
 const HF_API = 'https://router.huggingface.co/hf-inference/models';
 
-/**
- * Generate image from text prompt using FLUX.1-schnell (fast, free)
- */
-export async function generateImage(prompt, model = 'black-forest-labs/FLUX.1-schnell') {
-  if (!HF_TOKEN) throw new Error('Hugging Face token not configured');
-
-  const res = await fetch(`${HF_API}/${model}`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${HF_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      inputs: prompt,
-      parameters: {
-        seed: Math.floor(Math.random() * 2147483647),
-        num_inference_steps: 4,
-      },
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    if (res.status === 503) throw new Error('Model is loading, try again in 30 seconds');
-    throw new Error(err.error || `HF API error: ${res.status}`);
-  }
-
-  const buffer = await res.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString('base64');
-  return {
-    image: `data:image/png;base64,${base64}`,
-    model,
-    provider: 'huggingface',
-  };
-}
+// Image generation moved to ./imageGen/* (multi-provider). Re-export for any
+// legacy imports — prefer importing from services/imageGen/index.js.
+export { generateImage } from './imageGen/huggingface.js';
 
 /**
  * Summarize text using BART
