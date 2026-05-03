@@ -11,3 +11,7 @@ export const HF_TOKEN = process.env.HF_TOKEN || '';
 export const GOOGLE_TTS_KEY = process.env.GOOGLE_TTS_KEY || '';
 export const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID || '';
 export const CF_API_TOKEN = process.env.CF_API_TOKEN || '';
+export const GPU_WORKER_URL = process.env.GPU_WORKER_URL || '';
+export const GPU_WORKER_TOKEN = process.env.GPU_WORKER_TOKEN || '';
+export const ZSKY_API_KEY = process.env.ZSKY_API_KEY || '';
+export const ZSKY_API_URL = process.env.ZSKY_API_URL || 'https://zsky.ai/api/v1/video/generate';

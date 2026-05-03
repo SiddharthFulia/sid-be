@@ -4,6 +4,7 @@ import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision } from
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
+import { postGenerateVideo, getTodayVideo, getVideoList, getVideoProviders } from '../../controllers/v1/aiVideo.js';
 
 const router = Router();
 
@@ -27,6 +28,12 @@ router.post('/generate-image', postImageGen);
 router.post('/image-edit', postImageEdit);
 router.post('/tts', postTTS);
 router.post('/summarize', postSummarize);
+
+// AI Video generation (free + open-source models)
+router.post('/ai-video/generate', postGenerateVideo);
+router.get('/ai-video/today', getTodayVideo);
+router.get('/ai-video/list', getVideoList);
+router.get('/ai-video/providers', getVideoProviders);
 
 // Face Detection
 router.post('/face-analyze', postFaceAnalyze);
