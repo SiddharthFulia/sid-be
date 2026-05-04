@@ -1,25 +1,20 @@
-import { generateVideoHF, HF_MODELS } from './huggingface.js';
 import { generateVideoWorker, WORKER_MODELS } from './gpuWorker.js';
 import { generateZskyVideo, ZSKY_MODELS } from './zsky.js';
 
-export const VIDEO_PROVIDERS = ['auto', 'zsky', 'hf', 'comfyui'];
+export const VIDEO_PROVIDERS = ['auto', 'zsky', 'comfyui'];
 
 export const VIDEO_MODELS_BY_PROVIDER = {
   auto: ['auto'],
   zsky: Object.keys(ZSKY_MODELS),
-  hf: Object.keys(HF_MODELS),
   comfyui: Object.keys(WORKER_MODELS),
 };
 
-const AUTO_FALLBACK_ORDER = ['zsky', 'hf', 'comfyui'];
+const AUTO_FALLBACK_ORDER = ['zsky', 'comfyui'];
 
 async function dispatchSingle(providerName, prompt, opts) {
   switch (providerName) {
     case 'zsky':
       return generateZskyVideo(prompt, opts);
-    case 'hf':
-    case 'huggingface':
-      return generateVideoHF(prompt, opts);
     case 'comfyui':
     case 'worker':
     case 'gpu':

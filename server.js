@@ -4,6 +4,7 @@ import app from './app.js';
 import { PORT, OLLAMA_URL } from './helpers/constants.js';
 import logger from './helpers/logger.js';
 import { preloadModels } from './services/ollama.js';
+import { startJobProcessor } from './services/aiVideo/jobProcessor.js';
 
 const server = http.createServer(app);
 
@@ -14,4 +15,7 @@ server.listen(PORT, () => {
 
   // Preload AI models into memory (non-blocking)
   preloadModels();
+
+  // Start the in-process video job processor (handles ZSky/HF/auto)
+  startJobProcessor();
 });
