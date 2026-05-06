@@ -22,21 +22,22 @@ def _ltx_frames(duration: int) -> int:
 
 def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float,
                        resolution: str = "720p") -> dict[str, Any]:
-    """LTX-Video — modern ComfyUI workflow with explicit UNET/CLIP/VAE loaders.
-    Resolution-aware: 720p maps to LTX's native sweet spot (768x1280 for 9:16);
-    1080p pushes to 1024x1792 for crisper output (uses ~10 GB VRAM extra)."""
+    """LTX-Video 0.9 — uses the model's native training resolution (480x832 for 9:16)
+    and known-working sampler (euler/normal). Higher res / dpmpp_2m_sde produces
+    pink/empty videos with v0.9 + recent ComfyUI."""
     res = (resolution or "720p").lower()
+    # LTX v0.9's training resolution. 1080p path uses 768x1280 which is the
+    # outer limit before quality collapses; only safe with LTX 0.9.5+.
     if aspect == "9:16":
-        width, height = (1024, 1792) if res == "1080p" else (768, 1280)
+        width, height = (768, 1280) if res == "1080p" else (480, 832)
     elif aspect == "16:9":
-        width, height = (1792, 1024) if res == "1080p" else (1280, 768)
+        width, height = (1280, 768) if res == "1080p" else (832, 480)
     else:
-        width, height = (1024, 1024) if res == "1080p" else (768, 768)
+        width, height = (768, 768) if res == "1080p" else (640, 640)
     frames = _ltx_frames(duration)
     seed = random.randint(1, 1_000_000_000)
-    # Quality defaults: more steps + slightly higher CFG = sharper, more on-prompt
-    steps = max(steps, 40)
-    cfg = max(cfg, 4.0)
+    steps = max(steps, 30)
+    cfg = max(cfg, 3.0)
     return {
         "1": {"class_type": "CheckpointLoaderSimple",
               "inputs": {"ckpt_name": "ltx-video-2b-v0.9.safetensors"}},
@@ -54,7 +55,7 @@ def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg
               "inputs": {"positive": ["4", 0], "negative": ["5", 0], "frame_rate": 25}},
         "8": {"class_type": "KSampler",
               "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
-                         "sampler_name": "dpmpp_2m_sde", "scheduler": "karras", "denoise": 1,
+                         "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
                          "model": ["3", 0],
                          "positive": ["7", 0], "negative": ["7", 1],
                          "latent_image": ["6", 0]}},
@@ -109,18 +110,19 @@ def _wan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: 
 
 def _ltx_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: int,
                       steps: int, cfg: float, resolution: str = "720p") -> dict[str, Any]:
-    """LTX-Video image-to-video: extends a still photo into an animated clip."""
+    """LTX-Video image-to-video: extends a still photo into an animated clip.
+    Uses LTX 0.9's native resolution + euler/normal (matches T2V config)."""
     res = (resolution or "720p").lower()
     if aspect == "9:16":
-        width, height = (1024, 1792) if res == "1080p" else (768, 1280)
+        width, height = (768, 1280) if res == "1080p" else (480, 832)
     elif aspect == "16:9":
-        width, height = (1792, 1024) if res == "1080p" else (1280, 768)
+        width, height = (1280, 768) if res == "1080p" else (832, 480)
     else:
-        width, height = (1024, 1024) if res == "1080p" else (768, 768)
+        width, height = (768, 768) if res == "1080p" else (640, 640)
     frames = _ltx_frames(duration)
     seed = random.randint(1, 1_000_000_000)
-    steps = max(steps, 40)
-    cfg = max(cfg, 4.0)
+    steps = max(steps, 30)
+    cfg = max(cfg, 3.0)
     return {
         "1": {"class_type": "CheckpointLoaderSimple",
               "inputs": {"ckpt_name": "ltx-video-2b-v0.9.safetensors"}},
@@ -145,7 +147,7 @@ def _ltx_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: i
               "inputs": {"positive": ["6", 0], "negative": ["6", 1], "frame_rate": 25}},
         "8": {"class_type": "KSampler",
               "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
-                         "sampler_name": "dpmpp_2m_sde", "scheduler": "karras", "denoise": 1,
+                         "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
                          "model": ["3", 0],
                          "positive": ["7", 0], "negative": ["7", 1],
                          "latent_image": ["6", 2]}},
