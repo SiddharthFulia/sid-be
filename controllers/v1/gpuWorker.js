@@ -61,6 +61,7 @@ export const getNextJob = async (req, res) => {
   return success(res, {
     jobId: job.videoId,
     prompt: job.prompt,
+    model: job.model || 'ltx-video',
     duration: job.duration,
     resolution: job.resolution,
     aspectRatio: job.aspectRatio,

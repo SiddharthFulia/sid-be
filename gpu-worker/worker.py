@@ -122,13 +122,21 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     duration = int(job.get("duration") or 5)
     aspect = job.get("aspectRatio") or "9:16"
 
+    model = job.get("model") or "ltx-video"
+    resolution = job.get("resolution") or "720p"
+    image_url = (job.get("imageUrl") or "").strip() or None
+    if image_url:
+        print(f"[i2v] using source image → {image_url[:80]}")
     try:
         mp4_bytes = asyncio.run(comfyui_client.generate(
             prompt=styled_prompt,
+            model=model,
             aspect=aspect,
             duration=duration,
             steps=30,
             cfg=3.0,
+            resolution=resolution,
+            image_url=image_url,
         ))
     except TimeoutError as e:
         report_failed(client, job_id, f"ComfyUI timed out: {e}")

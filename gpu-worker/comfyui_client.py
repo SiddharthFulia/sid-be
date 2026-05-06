@@ -13,16 +13,23 @@ POLL_INTERVAL = 2.5
 POLL_TIMEOUT = 8 * 60  # seconds
 
 
-def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float) -> dict[str, Any]:
+def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float,
+                       resolution: str = "720p") -> dict[str, Any]:
     """LTX-Video — modern ComfyUI workflow with explicit UNET/CLIP/VAE loaders.
-    Newer ComfyUI versions don't extract CLIP from the LTX safetensors anymore;
-    needs t5xxl text encoder + LTX VAE as separate files in:
-      models/text_encoders/t5xxl_fp8_e4m3fn.safetensors
-      models/vae/ltx-video-2b-v0.9_vae.safetensors  (extracted from the checkpoint, OR fallback to ckpt's VAE via second loader)
-    """
-    width, height = (480, 832) if aspect == "9:16" else (832, 480) if aspect == "16:9" else (640, 640)
+    Resolution-aware: 720p maps to LTX's native sweet spot (768x1280 for 9:16);
+    1080p pushes to 1024x1792 for crisper output (uses ~10 GB VRAM extra)."""
+    res = (resolution or "720p").lower()
+    if aspect == "9:16":
+        width, height = (1024, 1792) if res == "1080p" else (768, 1280)
+    elif aspect == "16:9":
+        width, height = (1792, 1024) if res == "1080p" else (1280, 768)
+    else:
+        width, height = (1024, 1024) if res == "1080p" else (768, 768)
     frames = max(25, min(duration * 25, 257))
     seed = random.randint(1, 1_000_000_000)
+    # Quality defaults: more steps + slightly higher CFG = sharper, more on-prompt
+    steps = max(steps, 40)
+    cfg = max(cfg, 4.0)
     return {
         "1": {"class_type": "CheckpointLoaderSimple",
               "inputs": {"ckpt_name": "ltx-video-2b-v0.9.safetensors"}},
@@ -40,7 +47,7 @@ def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg
               "inputs": {"positive": ["4", 0], "negative": ["5", 0], "frame_rate": 25}},
         "8": {"class_type": "KSampler",
               "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
-                         "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
+                         "sampler_name": "dpmpp_2m_sde", "scheduler": "karras", "denoise": 1,
                          "model": ["3", 0],
                          "positive": ["7", 0], "negative": ["7", 1],
                          "latent_image": ["6", 0]}},
@@ -93,12 +100,227 @@ def _wan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: 
     }
 
 
-def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: int, cfg: float) -> dict[str, Any]:
+def _ltx_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: int,
+                      steps: int, cfg: float, resolution: str = "720p") -> dict[str, Any]:
+    """LTX-Video image-to-video: extends a still photo into an animated clip."""
+    res = (resolution or "720p").lower()
+    if aspect == "9:16":
+        width, height = (1024, 1792) if res == "1080p" else (768, 1280)
+    elif aspect == "16:9":
+        width, height = (1792, 1024) if res == "1080p" else (1280, 768)
+    else:
+        width, height = (1024, 1024) if res == "1080p" else (768, 768)
+    frames = max(25, min(duration * 25, 257))
+    seed = random.randint(1, 1_000_000_000)
+    steps = max(steps, 40)
+    cfg = max(cfg, 4.0)
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "ltx-video-2b-v0.9.safetensors"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "ltxv"}},
+        "3": {"class_type": "ModelSamplingLTXV",
+              "inputs": {"model": ["1", 0], "max_shift": 2.05, "base_shift": 0.95}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "low quality, blurry, distorted, watermark", "clip": ["2", 0]}},
+        "11": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+        "6": {"class_type": "LTXVImgToVideo",
+              "inputs": {
+                  "positive": ["4", 0], "negative": ["5", 0],
+                  "vae": ["1", 2], "image": ["11", 0],
+                  "width": width, "height": height,
+                  "length": frames, "batch_size": 1,
+                  "image_noise_scale": 0.15,
+              }},
+        "7": {"class_type": "LTXVConditioning",
+              "inputs": {"positive": ["6", 0], "negative": ["6", 1], "frame_rate": 25}},
+        "8": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
+                         "sampler_name": "dpmpp_2m_sde", "scheduler": "karras", "denoise": 1,
+                         "model": ["3", 0],
+                         "positive": ["7", 0], "negative": ["7", 1],
+                         "latent_image": ["6", 2]}},
+        "9": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["8", 0], "vae": ["1", 2]}},
+        "10": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["9", 0], "frame_rate": 25,
+                          "filename_prefix": "ai_video_i2v", "format": "video/h264-mp4",
+                          "pix_fmt": "yuv420p", "crf": 19,
+                          "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+
+
+def _wan_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: int,
+                      steps: int, cfg: float) -> dict[str, Any]:
+    """Wan 2.1 I2V 14B — image conditioned via CLIPVisionEncode + WanImageToVideo."""
+    width, height = (480, 832) if aspect == "9:16" else (832, 480) if aspect == "16:9" else (640, 640)
+    fps = 16
+    desired = max(17, min((duration or 5) * fps + 1, 161))
+    frames = ((desired - 1) // 4) * 4 + 1
+    seed = random.randint(1, 1_000_000_000)
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "wan2.1_i2v_480p_14B_fp16.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+        "4": {"class_type": "CLIPVisionLoader",
+              "inputs": {"clip_name": "clip_vision_h.safetensors"}},
+        "5": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+        "6": {"class_type": "CLIPVisionEncode",
+              "inputs": {"clip_vision": ["4", 0], "image": ["5", 0], "crop": "none"}},
+        "7": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "8": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "low quality, blurry, distorted, watermark, deformed",
+                         "clip": ["2", 0]}},
+        "9": {"class_type": "WanImageToVideo",
+              "inputs": {"positive": ["7", 0], "negative": ["8", 0],
+                         "vae": ["3", 0], "clip_vision_output": ["6", 0],
+                         "start_image": ["5", 0],
+                         "width": width, "height": height,
+                         "length": frames, "batch_size": 1}},
+        "10": {"class_type": "KSampler",
+               "inputs": {"seed": seed, "steps": max(steps, 30), "cfg": max(cfg, 6.0),
+                          "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
+                          "model": ["1", 0],
+                          "positive": ["9", 0], "negative": ["9", 1],
+                          "latent_image": ["9", 2]}},
+        "11": {"class_type": "VAEDecode",
+               "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
+        "12": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["11", 0], "frame_rate": fps,
+                          "filename_prefix": "wan_i2v", "format": "video/h264-mp4",
+                          "pix_fmt": "yuv420p", "crf": 19,
+                          "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+
+
+def _wan22_workflow(prompt: str, image_filename: str | None, aspect: str, duration: int,
+                    steps: int, cfg: float) -> dict[str, Any]:
+    """Wan 2.2 5B — supports both T2V (image_filename=None) and I2V via the same node graph.
+    Uses Wan 2.2's native loader; fps native is 24."""
+    width, height = (704, 1280) if aspect == "9:16" else (1280, 704) if aspect == "16:9" else (960, 960)
+    fps = 24
+    desired = max(25, min((duration or 5) * fps + 1, 193))
+    frames = ((desired - 1) // 4) * 4 + 1
+    seed = random.randint(1, 1_000_000_000)
+    is_i2v = bool(image_filename)
+    unet_name = "wan2.2_i2v_5B_fp16.safetensors" if is_i2v else "wan2.2_t2v_5B_fp16.safetensors"
+    graph: dict[str, Any] = {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+        "7": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "8": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "low quality, blurry, distorted, watermark",
+                         "clip": ["2", 0]}},
+    }
+    if is_i2v:
+        graph["4"] = {"class_type": "CLIPVisionLoader",
+                      "inputs": {"clip_name": "clip_vision_h.safetensors"}}
+        graph["5"] = {"class_type": "LoadImage", "inputs": {"image": image_filename}}
+        graph["6"] = {"class_type": "CLIPVisionEncode",
+                      "inputs": {"clip_vision": ["4", 0], "image": ["5", 0], "crop": "none"}}
+        graph["9"] = {"class_type": "WanImageToVideo",
+                      "inputs": {"positive": ["7", 0], "negative": ["8", 0],
+                                 "vae": ["3", 0], "clip_vision_output": ["6", 0],
+                                 "start_image": ["5", 0],
+                                 "width": width, "height": height,
+                                 "length": frames, "batch_size": 1}}
+        latent_in = ["9", 2]; pos = ["9", 0]; neg = ["9", 1]
+    else:
+        graph["6"] = {"class_type": "EmptyHunyuanLatentVideo",
+                      "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}}
+        latent_in = ["6", 0]; pos = ["7", 0]; neg = ["8", 0]
+    graph["10"] = {"class_type": "KSampler",
+                   "inputs": {"seed": seed, "steps": max(steps, 30), "cfg": max(cfg, 5.5),
+                              "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
+                              "model": ["1", 0], "positive": pos, "negative": neg,
+                              "latent_image": latent_in}}
+    graph["11"] = {"class_type": "VAEDecode",
+                   "inputs": {"samples": ["10", 0], "vae": ["3", 0]}}
+    graph["12"] = {"class_type": "VHS_VideoCombine",
+                   "inputs": {"images": ["11", 0], "frame_rate": fps,
+                              "filename_prefix": "wan22", "format": "video/h264-mp4",
+                              "pix_fmt": "yuv420p", "crf": 19,
+                              "loop_count": 0, "pingpong": False, "save_output": True}}
+    return graph
+
+
+def _svd_xt_workflow(image_filename: str, aspect: str, steps: int, cfg: float) -> dict[str, Any]:
+    """SVD-XT 1.1 — image-only (no prompt). Native 25 frames at 1024x576 / 576x1024."""
+    if aspect == "9:16":
+        width, height = 576, 1024
+    elif aspect == "16:9":
+        width, height = 1024, 576
+    else:
+        width, height = 768, 768
+    frames = 25
+    fps = 10
+    seed = random.randint(1, 1_000_000_000)
+    return {
+        "1": {"class_type": "ImageOnlyCheckpointLoader",
+              "inputs": {"ckpt_name": "svd_xt_1_1.safetensors"}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+        "3": {"class_type": "ImageScale",
+              "inputs": {"image": ["2", 0], "upscale_method": "lanczos",
+                         "width": width, "height": height, "crop": "center"}},
+        "4": {"class_type": "SVD_img2vid_Conditioning",
+              "inputs": {"clip_vision": ["1", 1], "init_image": ["3", 0],
+                         "vae": ["1", 2], "width": width, "height": height,
+                         "video_frames": frames, "motion_bucket_id": 127,
+                         "fps": fps, "augmentation_level": 0.0}},
+        "5": {"class_type": "VideoLinearCFGGuidance",
+              "inputs": {"model": ["1", 0], "min_cfg": 1.0}},
+        "6": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": max(steps, 20), "cfg": max(cfg, 2.5),
+                         "sampler_name": "euler", "scheduler": "karras", "denoise": 1.0,
+                         "model": ["5", 0],
+                         "positive": ["4", 0], "negative": ["4", 1],
+                         "latent_image": ["4", 2]}},
+        "7": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
+        "8": {"class_type": "VHS_VideoCombine",
+              "inputs": {"images": ["7", 0], "frame_rate": fps,
+                         "filename_prefix": "svd_video", "format": "video/h264-mp4",
+                         "pix_fmt": "yuv420p", "crf": 19,
+                         "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+
+
+def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: int, cfg: float,
+                   resolution: str = "720p", image_filename: str | None = None) -> dict[str, Any]:
     m = (model or "ltx-video").lower()
+    # SVD is image-only (no prompt) — accept either name
+    if m in ("svd", "svd-xt", "svd_xt"):
+        if not image_filename:
+            raise RuntimeError("SVD-XT requires an input image (this model is image-only).")
+        return _svd_xt_workflow(image_filename, aspect, steps or 25, cfg or 2.5)
+    # Wan 2.2 (5B) — supports both T2V and I2V via same dispatch
+    if m in ("wan-2.2", "wan2.2", "wan22"):
+        return _wan22_workflow(prompt, image_filename, aspect, duration, steps or 30, cfg or 6.0)
+    # Wan 2.1 I2V 14B — explicit I2V variant (different model file)
+    if m in ("wan-2.1-i2v", "wan21-i2v", "wan-2.1-image", "wan-i2v"):
+        if not image_filename:
+            raise RuntimeError("Wan 2.1 I2V requires an input image.")
+        return _wan_i2v_workflow(prompt, image_filename, aspect, duration, steps or 30, cfg or 6.0)
+    # I2V branch (existing models)
+    if image_filename:
+        # LTX is the default I2V path — uses same checkpoint as T2V
+        return _ltx_i2v_workflow(prompt, image_filename, aspect, duration, steps or 40, cfg or 4.0, resolution)
+    # T2V branch
     if m in ("wan-2.1", "wan2.1", "wan21", "wan"):
         return _wan_t2v_workflow(prompt, aspect, duration, steps or 30, cfg or 6.0)
-    # Default: LTX-Video
-    return _ltx_video_workflow(prompt, aspect, duration, steps or 30, cfg or 3.0)
+    # Default: LTX-Video T2V
+    return _ltx_video_workflow(prompt, aspect, duration, steps or 30, cfg or 3.0, resolution)
 
 
 async def _queue_prompt(client: httpx.AsyncClient, workflow: dict[str, Any]) -> str:
@@ -159,6 +381,27 @@ async def _download(client: httpx.AsyncClient, file: dict[str, str]) -> bytes:
     return r.content
 
 
+async def _download_image(client: httpx.AsyncClient, url: str) -> bytes:
+    r = await client.get(url, timeout=30)
+    r.raise_for_status()
+    ct = r.headers.get("content-type", "")
+    if not ct.startswith("image/"):
+        raise RuntimeError(f"image_url returned non-image content-type: {ct}")
+    return r.content
+
+
+async def _upload_image_to_comfy(client: httpx.AsyncClient, image_bytes: bytes,
+                                 filename: str = "input.png") -> str:
+    """POST the image to ComfyUI's /upload/image endpoint, return the saved name."""
+    files = {"image": (filename, image_bytes, "image/png")}
+    r = await client.post(f"{COMFYUI_URL}/upload/image", files=files,
+                          data={"overwrite": "true"}, timeout=60)
+    if r.status_code >= 400:
+        raise RuntimeError(f"ComfyUI image upload failed ({r.status_code}): {r.text[:300]}")
+    data = r.json()
+    return data.get("name") or filename
+
+
 async def health() -> bool:
     try:
         async with httpx.AsyncClient() as c:
@@ -169,9 +412,14 @@ async def health() -> bool:
 
 
 async def generate(prompt: str, model: str = "ltx-video", aspect: str = "9:16",
-                   duration: int = 5, steps: int = 30, cfg: float = 3.0) -> bytes:
-    workflow = build_workflow(model, prompt, aspect, duration, steps, cfg)
+                   duration: int = 5, steps: int = 30, cfg: float = 3.0,
+                   resolution: str = "720p", image_url: str | None = None) -> bytes:
     async with httpx.AsyncClient() as client:
+        image_filename = None
+        if image_url:
+            img_bytes = await _download_image(client, image_url)
+            image_filename = await _upload_image_to_comfy(client, img_bytes)
+        workflow = build_workflow(model, prompt, aspect, duration, steps, cfg, resolution, image_filename)
         prompt_id = await _queue_prompt(client, workflow)
         entry = await _poll_history(client, prompt_id)
         file = _find_video_file(entry)
