@@ -13,6 +13,13 @@ POLL_INTERVAL = 2.5
 POLL_TIMEOUT = 8 * 60  # seconds
 
 
+def _ltx_frames(duration: int) -> int:
+    """LTX latent constraint: (frames - 1) must be divisible by 8.
+    Round down to the nearest valid count so the user's duration isn't exceeded."""
+    raw = max(9, min((duration or 5) * 25, 257))
+    return ((raw - 1) // 8) * 8 + 1
+
+
 def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float,
                        resolution: str = "720p") -> dict[str, Any]:
     """LTX-Video — modern ComfyUI workflow with explicit UNET/CLIP/VAE loaders.
@@ -25,7 +32,7 @@ def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg
         width, height = (1792, 1024) if res == "1080p" else (1280, 768)
     else:
         width, height = (1024, 1024) if res == "1080p" else (768, 768)
-    frames = max(25, min(duration * 25, 257))
+    frames = _ltx_frames(duration)
     seed = random.randint(1, 1_000_000_000)
     # Quality defaults: more steps + slightly higher CFG = sharper, more on-prompt
     steps = max(steps, 40)
@@ -110,7 +117,7 @@ def _ltx_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: i
         width, height = (1792, 1024) if res == "1080p" else (1280, 768)
     else:
         width, height = (1024, 1024) if res == "1080p" else (768, 768)
-    frames = max(25, min(duration * 25, 257))
+    frames = _ltx_frames(duration)
     seed = random.randint(1, 1_000_000_000)
     steps = max(steps, 40)
     cfg = max(cfg, 4.0)
@@ -296,6 +303,137 @@ def _svd_xt_workflow(image_filename: str, aspect: str, steps: int, cfg: float) -
     }
 
 
+def _hunyuan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float) -> dict[str, Any]:
+    """HunyuanVideo T2V — Tencent's video model.
+    Uses DualCLIPLoader (clip_l + llava_llama3) + ModelSamplingSD3 + FluxGuidance.
+    Native 720p, 24 fps; latent length must be 4n+1."""
+    width, height = (720, 1280) if aspect == "9:16" else (1280, 720) if aspect == "16:9" else (960, 960)
+    fps = 24
+    desired = max(25, min((duration or 5) * fps + 1, 129))
+    frames = ((desired - 1) // 4) * 4 + 1
+    seed = random.randint(1, 1_000_000_000)
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "hunyuan_video_t2v_720p_bf16.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "DualCLIPLoader",
+              "inputs": {"clip_name1": "clip_l.safetensors",
+                         "clip_name2": "llava_llama3_fp8_scaled.safetensors",
+                         "type": "hunyuan_video"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "hunyuan_video_vae_bf16.safetensors"}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "", "clip": ["2", 0]}},
+        "6": {"class_type": "FluxGuidance",
+              "inputs": {"conditioning": ["4", 0], "guidance": 6.0}},
+        "7": {"class_type": "ModelSamplingSD3",
+              "inputs": {"model": ["1", 0], "shift": 7.0}},
+        "8": {"class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}},
+        "9": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": max(steps, 20), "cfg": 1.0,
+                         "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                         "model": ["7", 0],
+                         "positive": ["6", 0], "negative": ["5", 0],
+                         "latent_image": ["8", 0]}},
+        "10": {"class_type": "VAEDecode",
+               "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
+        "11": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["10", 0], "frame_rate": fps,
+                          "filename_prefix": "hunyuan_t2v", "format": "video/h264-mp4",
+                          "pix_fmt": "yuv420p", "crf": 19,
+                          "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+
+
+def _hunyuan_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: int,
+                          steps: int, cfg: float) -> dict[str, Any]:
+    """HunyuanVideo I2V — image-conditioned variant. Uses HunyuanImageToVideo node
+    similar to WanImageToVideo (positive, vae, start_image → cond + latent)."""
+    width, height = (720, 1280) if aspect == "9:16" else (1280, 720) if aspect == "16:9" else (960, 960)
+    fps = 24
+    desired = max(25, min((duration or 5) * fps + 1, 129))
+    frames = ((desired - 1) // 4) * 4 + 1
+    seed = random.randint(1, 1_000_000_000)
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "hunyuan_video_i2v_720p_bf16.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "DualCLIPLoader",
+              "inputs": {"clip_name1": "clip_l.safetensors",
+                         "clip_name2": "llava_llama3_fp8_scaled.safetensors",
+                         "type": "hunyuan_video"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "hunyuan_video_vae_bf16.safetensors"}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "6": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "", "clip": ["2", 0]}},
+        "7": {"class_type": "FluxGuidance",
+              "inputs": {"conditioning": ["5", 0], "guidance": 6.0}},
+        "8": {"class_type": "HunyuanImageToVideo",
+              "inputs": {"positive": ["7", 0], "vae": ["3", 0],
+                         "start_image": ["4", 0],
+                         "width": width, "height": height,
+                         "length": frames, "batch_size": 1,
+                         "guidance_type": "v1 (concat)"}},
+        "9": {"class_type": "ModelSamplingSD3",
+              "inputs": {"model": ["1", 0], "shift": 7.0}},
+        "10": {"class_type": "KSampler",
+               "inputs": {"seed": seed, "steps": max(steps, 20), "cfg": 1.0,
+                          "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                          "model": ["9", 0],
+                          "positive": ["8", 0], "negative": ["6", 0],
+                          "latent_image": ["8", 1]}},
+        "11": {"class_type": "VAEDecode",
+               "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
+        "12": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["11", 0], "frame_rate": fps,
+                          "filename_prefix": "hunyuan_i2v", "format": "video/h264-mp4",
+                          "pix_fmt": "yuv420p", "crf": 19,
+                          "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+
+
+def _mochi_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float) -> dict[str, Any]:
+    """Mochi 1 (Genmo, Apache-2). Native 848x480, 24 fps; latent length is 6n+1."""
+    width, height = (480, 848) if aspect == "9:16" else (848, 480) if aspect == "16:9" else (640, 640)
+    fps = 24
+    desired = max(25, min((duration or 5) * fps + 1, 163))
+    frames = ((desired - 1) // 6) * 6 + 1
+    seed = random.randint(1, 1_000_000_000)
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "mochi_preview_dit_bf16.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "mochi"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "mochi_preview_vae_decoder_bf16.safetensors"}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "low quality, blurry, distorted, watermark", "clip": ["2", 0]}},
+        "6": {"class_type": "ModelSamplingSD3",
+              "inputs": {"model": ["1", 0], "shift": 6.0}},
+        "7": {"class_type": "EmptyMochiLatentVideo",
+              "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}},
+        "8": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": max(steps, 30), "cfg": max(cfg, 4.5),
+                         "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                         "model": ["6", 0],
+                         "positive": ["4", 0], "negative": ["5", 0],
+                         "latent_image": ["7", 0]}},
+        "9": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+        "10": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["9", 0], "frame_rate": fps,
+                          "filename_prefix": "mochi_video", "format": "video/h264-mp4",
+                          "pix_fmt": "yuv420p", "crf": 19,
+                          "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+
+
 def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: int, cfg: float,
                    resolution: str = "720p", image_filename: str | None = None) -> dict[str, Any]:
     m = (model or "ltx-video").lower()
@@ -304,6 +442,19 @@ def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: i
         if not image_filename:
             raise RuntimeError("SVD-XT requires an input image (this model is image-only).")
         return _svd_xt_workflow(image_filename, aspect, steps or 25, cfg or 2.5)
+    # Mochi
+    if m in ("mochi", "mochi-1", "mochi1"):
+        return _mochi_workflow(prompt, aspect, duration, steps or 30, cfg or 4.5)
+    # Hunyuan I2V (explicit, separate model file)
+    if m in ("hunyuan-i2v", "hunyuan_i2v"):
+        if not image_filename:
+            raise RuntimeError("HunyuanVideo I2V requires an input image.")
+        return _hunyuan_i2v_workflow(prompt, image_filename, aspect, duration, steps or 20, cfg or 6.0)
+    # Hunyuan T2V (auto-switches to I2V when image provided)
+    if m in ("hunyuan", "hunyuan-video", "hunyuanvideo"):
+        if image_filename:
+            return _hunyuan_i2v_workflow(prompt, image_filename, aspect, duration, steps or 20, cfg or 6.0)
+        return _hunyuan_t2v_workflow(prompt, aspect, duration, steps or 20, cfg or 6.0)
     # Wan 2.2 (5B) — supports both T2V and I2V via same dispatch
     if m in ("wan-2.2", "wan2.2", "wan22"):
         return _wan22_workflow(prompt, image_filename, aspect, duration, steps or 30, cfg or 6.0)
