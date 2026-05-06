@@ -216,7 +216,8 @@ def _wan22_workflow(prompt: str, image_filename: str | None, aspect: str, durati
     frames = ((desired - 1) // 4) * 4 + 1
     seed = random.randint(1, 1_000_000_000)
     is_i2v = bool(image_filename)
-    unet_name = "wan2.2_i2v_5B_fp16.safetensors" if is_i2v else "wan2.2_t2v_5B_fp16.safetensors"
+    # Wan 2.2 5B is a single TI2V model that handles both T2V and I2V
+    unet_name = "wan2.2_ti2v_5B_fp16.safetensors"
     graph: dict[str, Any] = {
         "1": {"class_type": "UNETLoader",
               "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
@@ -358,7 +359,7 @@ def _hunyuan_i2v_workflow(prompt: str, image_filename: str, aspect: str, duratio
     seed = random.randint(1, 1_000_000_000)
     return {
         "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": "hunyuan_video_i2v_720p_bf16.safetensors", "weight_dtype": "default"}},
+              "inputs": {"unet_name": "hunyuan_video_image_to_video_720p_bf16.safetensors", "weight_dtype": "default"}},
         "2": {"class_type": "DualCLIPLoader",
               "inputs": {"clip_name1": "clip_l.safetensors",
                          "clip_name2": "llava_llama3_fp8_scaled.safetensors",
@@ -405,11 +406,11 @@ def _mochi_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: fl
     seed = random.randint(1, 1_000_000_000)
     return {
         "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": "mochi_preview_dit_bf16.safetensors", "weight_dtype": "default"}},
+              "inputs": {"unet_name": "mochi_preview_bf16.safetensors", "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader",
               "inputs": {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "mochi"}},
         "3": {"class_type": "VAELoader",
-              "inputs": {"vae_name": "mochi_preview_vae_decoder_bf16.safetensors"}},
+              "inputs": {"vae_name": "mochi_vae.safetensors"}},
         "4": {"class_type": "CLIPTextEncode",
               "inputs": {"text": prompt, "clip": ["2", 0]}},
         "5": {"class_type": "CLIPTextEncode",
