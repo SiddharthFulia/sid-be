@@ -13,8 +13,8 @@ import { tryWakeWorker } from '../../services/aiVideo/wakeWorker.js';
 import { tokenInfo as zskyTokenInfo, isConfigured as zskyConfigured } from '../../services/aiVideo/zskyAuth.js';
 import logger from '../../helpers/logger.js';
 
-const ALIASES = { gpu: 'worker', comfyui: 'worker' };
-const VALID = new Set(['zsky', 'worker']);
+const ALIASES = { gpu: 'worker', comfyui: 'worker', pc: 'local', '5090': 'local', beast: 'local' };
+const VALID = new Set(['zsky', 'worker', 'local']);
 
 function normalizeProvider(raw) {
   const p = (raw || 'zsky').toLowerCase();
@@ -48,7 +48,8 @@ export const postGenerateVideo = async (req, res) => {
 
     const opts = { prompt: prompt.trim(), duration, resolution, aspectRatio, style, audio, imageUrl, generateCaption };
     if (provider === 'zsky') return handleZsky(req, res, opts);
-    return handleWorker(req, res, opts);
+    if (provider === 'local') return handleAsyncWorker(req, res, opts, 'local');
+    return handleAsyncWorker(req, res, opts, 'worker');
   } catch (err) {
     logger.error('AI video generate failed', err.message);
     return error(res, err.message, 500);
@@ -94,7 +95,11 @@ async function handleZsky(req, res, opts) {
 
   let upload;
   try {
-    upload = await uploadVideoBuffer(result.buffer, videoId, meta);
+    // Trim the ZSky watermark by clipping to the user's requested duration.
+    // ZSky outputs ~2s longer than requested with a watermark in the tail.
+    upload = await uploadVideoBuffer(result.buffer, videoId, meta, {
+      trimToSeconds: opts.duration,
+    });
   } catch (err) {
     logger.error('Cloudinary upload failed', err.message);
     return error(res, `Cloudinary upload failed: ${err.message}`, 502);
@@ -177,9 +182,9 @@ async function handleHostedSync(req, res, opts, providerName, generateFn) {
 }
 
 // ─── Worker: async, queue + Telegram + polling ────────────
-async function handleWorker(req, res, opts) {
+async function handleAsyncWorker(req, res, opts, role) {
   const job = await createInflightJob({
-    provider: 'worker',
+    provider: role,
     prompt: opts.prompt,
     duration: opts.duration,
     resolution: opts.resolution,
@@ -190,22 +195,22 @@ async function handleWorker(req, res, opts) {
     generateCaption: opts.generateCaption,
   });
 
-  const ws = await getWorkerStatus();
+  const ws = await getWorkerStatus(role);
   const online = isWorkerOnline(ws);
   if (!online) {
-    tryWakeWorker({ jobId: job.videoId, prompt: opts.prompt }).catch(() => {});
+    tryWakeWorker({ jobId: job.videoId, prompt: opts.prompt, role }).catch(() => {});
   }
 
-  logger.info(`WORKER QUEUE | ${job.videoId} | online=${online} | "${opts.prompt.slice(0, 60)}"`);
+  logger.info(`${role.toUpperCase()} QUEUE | ${job.videoId} | online=${online} | "${opts.prompt.slice(0, 60)}"`);
   return success(res, {
     success: true,
     videoId: job.videoId,
     jobId: job.videoId,
     status: 'queued',
-    provider: 'worker',
+    provider: role,
     workerOnline: online,
     message: online
-      ? 'Job queued — GPU is processing now'
+      ? `Job queued — ${role === 'local' ? '5090' : 'GPU'} is processing now`
       : 'Job queued — your video will appear in the Library when ready',
   });
 }
@@ -288,14 +293,20 @@ export const deleteVideoById = async (req, res) => {
 
 // ─── Providers / health ────────────────────────────────────
 export const getVideoProviders = async (_req, res) => {
-  const ws = await getWorkerStatus();
+  const lightning = await getWorkerStatus('worker');
+  const local = await getWorkerStatus('local');
   const ti = zskyConfigured() ? await zskyTokenInfo() : null;
   return success(res, {
-    providers: ['zsky', 'worker'],
+    providers: ['zsky', 'worker', 'local'],
     cloudinary: isCloudinaryConfigured(),
-    workerOnline: isWorkerOnline(ws),
-    workerLastSeen: ws?.lastSeenAt || null,
-    workerId: ws?.workerId || null,
+    // Lightning worker status (legacy keys for back-compat)
+    workerOnline: isWorkerOnline(lightning),
+    workerLastSeen: lightning?.lastSeenAt || null,
+    workerId: lightning?.workerId || null,
+    workers: {
+      worker: { online: isWorkerOnline(lightning), lastSeenAt: lightning?.lastSeenAt || null, workerId: lightning?.workerId || null },
+      local:  { online: isWorkerOnline(local),     lastSeenAt: local?.lastSeenAt || null,     workerId: local?.workerId || null },
+    },
     zsky: {
       configured: zskyConfigured(),
       hasFreshToken: !!ti?.hasAccess,

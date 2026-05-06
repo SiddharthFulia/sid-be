@@ -6,8 +6,14 @@ import {
   recordWorkerHeartbeat,
 } from '../../services/aiVideo/jobStore.js';
 import {
-  getInflightJob, updateInflightJob, removeInflightJob, getNextQueuedWorkerJob,
+  getInflightJob, updateInflightJob, removeInflightJob, getNextQueuedForRole,
 } from '../../services/aiVideo/storage.js';
+
+const VALID_ROLES = new Set(['worker', 'local']);
+function normalizeRole(role) {
+  const r = (role || 'worker').toLowerCase();
+  return VALID_ROLES.has(r) ? r : 'worker';
+}
 import logger from '../../helpers/logger.js';
 
 const WORKER_FILES_DIR = path.join(process.cwd(), 'gpu-worker');
@@ -26,10 +32,11 @@ function checkAuth(req) {
 
 export const postRegister = async (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
-  const { workerId } = req.body || {};
+  const { workerId, role } = req.body || {};
   if (!workerId) return error(res, 'workerId is required', 400);
-  const status = await recordWorkerHeartbeat(workerId);
-  logger.info(`GPU worker registered: ${workerId}`);
+  const r = normalizeRole(role);
+  const status = await recordWorkerHeartbeat(workerId, r);
+  logger.info(`GPU worker registered: ${workerId} (role=${r})`);
   return success(res, status);
 };
 
@@ -37,9 +44,10 @@ export const getNextJob = async (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
 
   const workerId = req.query.workerId || req.headers['x-worker-id'] || 'unknown';
-  await recordWorkerHeartbeat(workerId);
+  const role = normalizeRole(req.query.role || req.headers['x-worker-role']);
+  await recordWorkerHeartbeat(workerId, role);
 
-  const job = await getNextQueuedWorkerJob();
+  const job = await getNextQueuedForRole(role);
   if (!job) return success(res, null);
 
   await updateInflightJob(job.videoId, {
@@ -49,8 +57,7 @@ export const getNextJob = async (req, res) => {
     attemptCount: (job.attemptCount || 0) + 1,
   });
 
-  logger.info(`Dispatched ${job.videoId} → ${workerId}`);
-  // Return the cloudinary context fields the worker needs to set on upload.
+  logger.info(`Dispatched ${job.videoId} → ${workerId} (${role})`);
   return success(res, {
     jobId: job.videoId,
     prompt: job.prompt,
@@ -60,19 +67,18 @@ export const getNextJob = async (req, res) => {
     style: job.style,
     audio: job.audio,
     imageUrl: job.imageUrl,
-    // Hints the worker uses when uploading to Cloudinary
     public_id: job.videoId,
     context: {
       prompt: job.prompt,
-      provider: 'worker',
-      duration: String(job.duration),
-      aspectRatio: job.aspectRatio,
-      resolution: job.resolution,
-      style: job.style,
+      provider: role,
+      duration: String(job.duration || 5),
+      aspectRatio: job.aspectRatio || '9:16',
+      resolution: job.resolution || '720p',
+      style: job.style || '',
       audio: job.audio ? '1' : '0',
       createdAt: job.createdAt,
     },
-    tags: ['worker', job.aspectRatio || ''].filter(Boolean),
+    tags: [role, job.aspectRatio || ''].filter(Boolean),
   });
 };
 

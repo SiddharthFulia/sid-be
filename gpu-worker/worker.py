@@ -22,12 +22,17 @@ import comfyui_client
 
 MAIN_BACKEND_URL = os.getenv("MAIN_BACKEND_URL", "https://api.siddharthfulia.com").rstrip("/")
 WORKER_TOKEN = os.getenv("WORKER_TOKEN", "").strip()
-WORKER_ID = os.getenv("WORKER_ID", "").strip() or f"lightning-{socket.gethostname()}"
+WORKER_ROLE = os.getenv("WORKER_ROLE", "worker").strip().lower()  # 'worker' = Lightning, 'local' = personal PC
+WORKER_ID = os.getenv("WORKER_ID", "").strip() or f"{WORKER_ROLE}-{socket.gethostname()}"
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
 
 def _headers() -> dict:
-    h = {"Content-Type": "application/json", "X-Worker-Id": WORKER_ID}
+    h = {
+        "Content-Type": "application/json",
+        "X-Worker-Id": WORKER_ID,
+        "X-Worker-Role": WORKER_ROLE,
+    }
     if WORKER_TOKEN:
         h["Authorization"] = f"Bearer {WORKER_TOKEN}"
     return h
@@ -38,7 +43,7 @@ def register(client: httpx.Client) -> bool:
         r = client.post(
             f"{MAIN_BACKEND_URL}/api/gpu-worker/register",
             headers=_headers(),
-            json={"workerId": WORKER_ID, "token": WORKER_TOKEN},
+            json={"workerId": WORKER_ID, "role": WORKER_ROLE, "token": WORKER_TOKEN},
             timeout=10,
         )
         if r.status_code == 200:
@@ -54,7 +59,7 @@ def get_next_job(client: httpx.Client) -> dict[str, Any] | None:
         r = client.get(
             f"{MAIN_BACKEND_URL}/api/gpu-worker/next-job",
             headers=_headers(),
-            params={"workerId": WORKER_ID},
+            params={"workerId": WORKER_ID, "role": WORKER_ROLE},
             timeout=15,
         )
         if r.status_code != 200:
@@ -160,6 +165,7 @@ def main() -> None:
     print(f"=== GPU worker booting ===")
     print(f"Backend:   {MAIN_BACKEND_URL}")
     print(f"WorkerId:  {WORKER_ID}")
+    print(f"Role:      {WORKER_ROLE}")
     print(f"Poll:      every {POLL_INTERVAL}s")
     print(f"Auth:      {'on' if WORKER_TOKEN else 'OFF (no WORKER_TOKEN set)'}")
 

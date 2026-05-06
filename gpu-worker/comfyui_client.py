@@ -46,10 +46,51 @@ def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg
     }
 
 
+def _wan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float) -> dict[str, Any]:
+    """Wan 2.1 1.3B T2V — uses ComfyUI native UNETLoader + CLIPLoader(type=wan) + WAN VAE.
+    Native fps is 16; lengths quantize to 4n+1 frames (5s ≈ 81 frames)."""
+    width, height = (480, 832) if aspect == "9:16" else (832, 480) if aspect == "16:9" else (640, 640)
+    fps = 16
+    desired = max(17, min((duration or 5) * fps + 1, 161))
+    # Quantize to nearest 4n+1 (Wan latent constraint)
+    frames = ((desired - 1) // 4) * 4 + 1
+    seed = random.randint(1, 1_000_000_000)
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "wan2.1_t2v_1.3B_fp16.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "low quality, blurry, distorted, watermark, text, ugly, deformed",
+                         "clip": ["2", 0]}},
+        "6": {"class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}},
+        "7": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
+                         "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
+                         "model": ["1", 0],
+                         "positive": ["4", 0], "negative": ["5", 0],
+                         "latent_image": ["6", 0]}},
+        "8": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+        "9": {"class_type": "VHS_VideoCombine",
+              "inputs": {"images": ["8", 0], "frame_rate": fps,
+                         "filename_prefix": "wan_video", "format": "video/h264-mp4",
+                         "pix_fmt": "yuv420p", "crf": 19,
+                         "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+
+
 def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: int, cfg: float) -> dict[str, Any]:
-    # Currently only LTX-Video has a built-in workflow template.
-    # Drop additional templates here keyed by model id.
-    return _ltx_video_workflow(prompt, aspect, duration, steps, cfg)
+    m = (model or "ltx-video").lower()
+    if m in ("wan-2.1", "wan2.1", "wan21", "wan"):
+        return _wan_t2v_workflow(prompt, aspect, duration, steps or 30, cfg or 6.0)
+    # Default: LTX-Video
+    return _ltx_video_workflow(prompt, aspect, duration, steps or 30, cfg or 3.0)
 
 
 async def _queue_prompt(client: httpx.AsyncClient, workflow: dict[str, Any]) -> str:

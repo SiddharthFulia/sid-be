@@ -58,7 +58,7 @@ function parseContext(custom = {}) {
 }
 
 // ─── Upload ─────────────────────────────────────────────────
-export async function uploadVideoBuffer(buffer, videoId, meta = {}) {
+export async function uploadVideoBuffer(buffer, videoId, meta = {}, opts = {}) {
   configure();
   const context = buildContext({
     prompt: meta.prompt,
@@ -73,20 +73,40 @@ export async function uploadVideoBuffer(buffer, videoId, meta = {}) {
     createdAt: meta.createdAt || new Date().toISOString(),
   });
 
+  // Server-side trim. ZSky pads its output by ~2s to fit a watermark; cropping
+  // to the user's *requested* duration drops it cleanly without touching ffmpeg.
+  // Pass `trimToSeconds` to enforce this on upload.
+  const uploadOptions = {
+    resource_type: 'video',
+    public_id: videoId,
+    folder: FOLDER,
+    context,
+    tags: [meta.provider || 'unknown', meta.aspectRatio || ''].filter(Boolean),
+    chunk_size: 6_000_000,
+  };
+  if (opts.trimToSeconds && opts.trimToSeconds > 0) {
+    uploadOptions.transformation = [{ end_offset: String(opts.trimToSeconds) }];
+  }
+
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream({
-      resource_type: 'video',
-      public_id: videoId,
-      folder: FOLDER,
-      context,
-      tags: [meta.provider || 'unknown', meta.aspectRatio || ''].filter(Boolean),
-      chunk_size: 6_000_000,
-    }, (err, res) => {
+    const stream = cloudinary.uploader.upload_stream(uploadOptions, (err, res) => {
       if (err) return reject(err);
       resolve(res);
     });
     stream.end(buffer);
   });
+}
+
+// Build a Cloudinary thumbnail URL from a stored video URL — used by the FE
+// to render Library cards without preloading actual MP4s.
+export function thumbnailFromVideoUrl(videoUrl, opts = {}) {
+  if (!videoUrl || !/cloudinary\.com\/.+\/video\/upload\//.test(videoUrl)) return null;
+  const w = opts.width || 400;
+  const so = opts.startOffset != null ? opts.startOffset : 1;
+  const transform = `so_${so},w_${w},c_fill,q_auto,f_jpg`;
+  return videoUrl
+    .replace('/video/upload/', `/video/upload/${transform}/`)
+    .replace(/\.(mp4|webm|mov)$/i, '.jpg');
 }
 
 // ─── List with pagination ──────────────────────────────────

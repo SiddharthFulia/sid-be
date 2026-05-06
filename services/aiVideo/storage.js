@@ -79,9 +79,13 @@ export async function removeInflightJob(videoId) {
 }
 
 export async function getNextQueuedWorkerJob() {
+  return getNextQueuedForRole('worker');
+}
+
+export async function getNextQueuedForRole(role) {
   const items = await readAll();
   return items
-    .filter(j => j.provider === 'worker' && j.status === 'queued')
+    .filter(j => j.provider === role && j.status === 'queued')
     .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0] || null;
 }
 

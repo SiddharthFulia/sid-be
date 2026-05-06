@@ -1,5 +1,5 @@
-// Worker heartbeat tracker — used by /api/gpu-worker/register and getNextJob.
-// Job records themselves now live in the unified storage.js metadata file.
+// Worker heartbeat tracker — supports multiple workers keyed by role.
+// Roles: 'worker' (Lightning AI ComfyUI), 'local' (user's own GPU PC).
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -12,17 +12,45 @@ async function ensure() {
   catch { await fs.writeFile(WORKER_FILE, '{}', 'utf8'); }
 }
 
-export async function recordWorkerHeartbeat(workerId) {
+async function readAll() {
   await ensure();
-  const data = { workerId, lastSeenAt: new Date().toISOString() };
-  await fs.writeFile(WORKER_FILE, JSON.stringify(data, null, 2), 'utf8');
-  return data;
+  try {
+    const raw = await fs.readFile(WORKER_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch { return {}; }
 }
 
-export async function getWorkerStatus() {
+async function writeAll(obj) {
   await ensure();
-  try { return JSON.parse(await fs.readFile(WORKER_FILE, 'utf8')); }
-  catch { return {}; }
+  await fs.writeFile(WORKER_FILE, JSON.stringify(obj, null, 2), 'utf8');
+}
+
+export async function recordWorkerHeartbeat(workerId, role = 'worker') {
+  const all = await readAll();
+  const entry = { workerId, role, lastSeenAt: new Date().toISOString() };
+  // Migration: if file is in legacy flat shape, move existing entry to its role bucket.
+  if (all.workerId && !all.workers) {
+    all.workers = { [all.role || 'worker']: { workerId: all.workerId, role: all.role || 'worker', lastSeenAt: all.lastSeenAt } };
+    delete all.workerId; delete all.role; delete all.lastSeenAt;
+  }
+  all.workers = all.workers || {};
+  all.workers[role] = entry;
+  await writeAll(all);
+  return entry;
+}
+
+export async function getWorkerStatus(role = 'worker') {
+  const all = await readAll();
+  // Legacy flat-shape fallback
+  if (all.workerId && !all.workers) return all;
+  return all.workers?.[role] || {};
+}
+
+export async function getAllWorkerStatuses() {
+  const all = await readAll();
+  if (all.workerId && !all.workers) return { [all.role || 'worker']: all };
+  return all.workers || {};
 }
 
 export function isWorkerOnline(status, maxAgeSec = 30) {

@@ -48,9 +48,12 @@ def _build_context(meta: Optional[dict]) -> str:
 
 def upload_video(buffer: bytes, public_id: str,
                  context: Optional[dict] = None,
-                 tags: Optional[list] = None) -> dict[str, Any]:
+                 tags: Optional[list] = None,
+                 trim_to_seconds: Optional[float] = None) -> dict[str, Any]:
     """Upload an MP4 buffer. `context` is a dict of metadata keys (prompt, provider, etc.)
-    that gets stored on the Cloudinary resource and returned by the list endpoint."""
+    that gets stored on the Cloudinary resource and returned by the list endpoint.
+    `trim_to_seconds` clips the upload to that length (used by ZSky path to remove
+    the watermark tail; LTX/local outputs don't need it)."""
     configure()
     kwargs: dict[str, Any] = {
         "resource_type": "video",
@@ -63,6 +66,8 @@ def upload_video(buffer: bytes, public_id: str,
         kwargs["context"] = ctx_str
     if tags:
         kwargs["tags"] = [t for t in tags if t]
+    if trim_to_seconds and trim_to_seconds > 0:
+        kwargs["transformation"] = [{"end_offset": str(trim_to_seconds)}]
 
     res = cloudinary.uploader.upload_large(io.BytesIO(buffer), **kwargs)
     return {
