@@ -14,32 +14,40 @@ POLL_TIMEOUT = 8 * 60  # seconds
 
 
 def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float) -> dict[str, Any]:
+    """LTX-Video — modern ComfyUI workflow with explicit UNET/CLIP/VAE loaders.
+    Newer ComfyUI versions don't extract CLIP from the LTX safetensors anymore;
+    needs t5xxl text encoder + LTX VAE as separate files in:
+      models/text_encoders/t5xxl_fp8_e4m3fn.safetensors
+      models/vae/ltx-video-2b-v0.9_vae.safetensors  (extracted from the checkpoint, OR fallback to ckpt's VAE via second loader)
+    """
     width, height = (480, 832) if aspect == "9:16" else (832, 480) if aspect == "16:9" else (640, 640)
     frames = max(25, min(duration * 25, 257))
     seed = random.randint(1, 1_000_000_000)
     return {
-        "3": {"class_type": "CheckpointLoaderSimple",
+        "1": {"class_type": "CheckpointLoaderSimple",
               "inputs": {"ckpt_name": "ltx-video-2b-v0.9.safetensors"}},
-        "4": {"class_type": "ModelSamplingLTXV",
-              "inputs": {"model": ["3", 0], "max_shift": 2.05, "base_shift": 0.95}},
-        "6": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": prompt, "clip": ["3", 1]}},
-        "7": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": "low quality, blurry, distorted, watermark", "clip": ["3", 1]}},
-        "8": {"class_type": "EmptyLTXVLatentVideo",
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "ltxv"}},
+        "3": {"class_type": "ModelSamplingLTXV",
+              "inputs": {"model": ["1", 0], "max_shift": 2.05, "base_shift": 0.95}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "low quality, blurry, distorted, watermark", "clip": ["2", 0]}},
+        "6": {"class_type": "EmptyLTXVLatentVideo",
               "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}},
-        "12": {"class_type": "LTXVConditioning",
-               "inputs": {"positive": ["6", 0], "negative": ["7", 0], "frame_rate": 25}},
-        "9": {"class_type": "KSampler",
+        "7": {"class_type": "LTXVConditioning",
+              "inputs": {"positive": ["4", 0], "negative": ["5", 0], "frame_rate": 25}},
+        "8": {"class_type": "KSampler",
               "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
                          "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
-                         "model": ["4", 0],
-                         "positive": ["12", 0], "negative": ["12", 1],
-                         "latent_image": ["8", 0]}},
-        "10": {"class_type": "VAEDecode",
-               "inputs": {"samples": ["9", 0], "vae": ["3", 2]}},
-        "11": {"class_type": "VHS_VideoCombine",
-               "inputs": {"images": ["10", 0], "frame_rate": 25,
+                         "model": ["3", 0],
+                         "positive": ["7", 0], "negative": ["7", 1],
+                         "latent_image": ["6", 0]}},
+        "9": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["8", 0], "vae": ["1", 2]}},
+        "10": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["9", 0], "frame_rate": 25,
                           "filename_prefix": "ai_video", "format": "video/h264-mp4",
                           "pix_fmt": "yuv420p", "crf": 19,
                           "loop_count": 0, "pingpong": False, "save_output": True}},
