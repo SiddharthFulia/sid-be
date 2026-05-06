@@ -120,8 +120,20 @@ async def _poll_history(client: httpx.AsyncClient, prompt_id: str) -> dict[str, 
             entry = hist.get(prompt_id)
             if entry and entry.get("status", {}).get("completed"):
                 return entry
-            if entry and entry.get("status", {}).get("status_str") == "error":
-                raise RuntimeError("ComfyUI workflow errored")
+            status = (entry or {}).get("status", {}) if entry else {}
+            if status.get("status_str") == "error":
+                # Pull the per-node error message out of status.messages
+                msgs = status.get("messages") or []
+                detail = ""
+                for m in msgs:
+                    if isinstance(m, list) and len(m) >= 2 and m[0] == "execution_error":
+                        info = m[1] if isinstance(m[1], dict) else {}
+                        detail = (info.get("exception_type") or "") + ": " + (info.get("exception_message") or "")
+                        node = info.get("node_type") or info.get("node_id") or ""
+                        if node:
+                            detail = f"[{node}] {detail}"
+                        break
+                raise RuntimeError(f"ComfyUI workflow errored — {detail or 'no detail'}")
         await asyncio.sleep(POLL_INTERVAL)
     raise TimeoutError("ComfyUI generation timed out")
 
