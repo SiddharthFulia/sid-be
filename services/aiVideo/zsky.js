@@ -1,4 +1,5 @@
 import { ZSKY_API_KEY, ZSKY_API_URL } from '../../helpers/constants.js';
+import { getAccessToken, isConfigured as zskyAuthConfigured, forceRefresh } from './zskyAuth.js';
 
 const BASE = (() => {
   try {
@@ -38,14 +39,34 @@ function buildType(audio, resolution, isImg2Vid) {
   return audio ? `${baseMode}_av` : baseMode;
 }
 
-function buildHeaders() {
+async function buildHeaders({ forceTokenRefresh = false } = {}) {
+  // Browser-like headers so Cloudflare bot mitigation doesn't reject the request.
   const h = {
     'Content-Type': 'application/json',
-    'Accept': 'application/json',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
     'Origin': BASE,
     'Referer': `${BASE}/create`,
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Sec-CH-UA': '"Chromium";v="130", "Not?A_Brand";v="99"',
+    'Sec-CH-UA-Mobile': '?0',
+    'Sec-CH-UA-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
   };
-  if (ZSKY_API_KEY) h['Authorization'] = `Bearer ${ZSKY_API_KEY}`;
+
+  // Auth precedence: refresh-token flow (free account) > static API key > anonymous
+  if (zskyAuthConfigured()) {
+    try {
+      const token = forceTokenRefresh ? await forceRefresh() : await getAccessToken();
+      h['Authorization'] = `Bearer ${token}`;
+    } catch {
+      // fall through; ZSky will return its own auth error
+    }
+  } else if (ZSKY_API_KEY) {
+    h['Authorization'] = `Bearer ${ZSKY_API_KEY}`;
+  }
   return h;
 }
 
@@ -142,12 +163,24 @@ async function runZsky(prompt, opts = {}) {
     body.image_base64 = await urlToBase64(opts.imageUrl);
   }
 
-  const res = await fetch(GENERATE_URL, {
+  let res = await fetch(GENERATE_URL, {
     method: 'POST',
-    headers: buildHeaders(),
+    headers: await buildHeaders(),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(45000),
   });
+
+  // If unauthorized AND we have a refresh token, force-refresh and retry once.
+  if ((res.status === 401 || res.status === 403) && zskyAuthConfigured()) {
+    try {
+      res = await fetch(GENERATE_URL, {
+        method: 'POST',
+        headers: await buildHeaders({ forceTokenRefresh: true }),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(45000),
+      });
+    } catch {}
+  }
 
   if (!res.ok) {
     let detail = '';
@@ -156,9 +189,9 @@ async function runZsky(prompt, opts = {}) {
       detail = err.error || err.message || JSON.stringify(err);
     } catch {}
     if (res.status === 401 || res.status === 403) {
-      const hint = isImg2Vid
-        ? 'ZSky image-to-video requires a free account session — sign up at zsky.ai → grab the supabase JWT from devtools → set ZSKY_API_KEY in sid-be/.env'
-        : 'ZSky rejected anonymous request — set ZSKY_API_KEY in sid-be/.env';
+      const hint = zskyAuthConfigured()
+        ? 'ZSky token refresh failed — your refresh_token may have expired. Log in at zsky.ai again, copy the new refresh_token from DevTools (Application → Local Storage → sb-yrkfputkviojshtnguwt-auth-token), paste into ZSKY_REFRESH_TOKEN in sid-be/.env, restart BE.'
+        : 'ZSky requires sign-in. Get a free account at zsky.ai, copy refresh_token from DevTools (Application → Local Storage), paste into ZSKY_REFRESH_TOKEN in sid-be/.env, restart BE.';
       throw new Error(hint);
     }
     if (res.status === 402) {

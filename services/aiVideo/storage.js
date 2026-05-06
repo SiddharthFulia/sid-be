@@ -1,62 +1,90 @@
+// Lightweight in-flight job tracker — ONLY for queued/processing/failed worker jobs.
+// Completed videos live on Cloudinary (see cloudinaryStore.js) and are NOT recorded here.
+//
+// Why two stores:
+//   - Cloudinary: persistent, single source of truth for completed videos
+//   - JSON file:  ephemeral, per-env, holds jobs that are mid-flight (no Cloudinary URL yet)
+
 import fs from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
 const ROOT = process.cwd();
-export const VIDEO_DIR = path.join(ROOT, 'public', 'generated-videos');
-export const META_DIR = path.join(ROOT, 'data');
-export const META_FILE = path.join(META_DIR, 'generated-videos.json');
+const META_DIR = path.join(ROOT, 'data');
+const JOBS_FILE = path.join(META_DIR, 'inflight-jobs.json');
 
-async function ensureDirs() {
-  await fs.mkdir(VIDEO_DIR, { recursive: true });
+async function ensure() {
   await fs.mkdir(META_DIR, { recursive: true });
+  try { await fs.access(JOBS_FILE); }
+  catch { await fs.writeFile(JOBS_FILE, '[]', 'utf8'); }
 }
 
 export function newVideoId() {
   return `vid_${Date.now()}_${randomUUID().slice(0, 8)}`;
 }
 
-export async function saveVideoBuffer(buffer, videoId, ext = 'mp4') {
-  await ensureDirs();
-  const filename = `${videoId}.${ext}`;
-  const fullPath = path.join(VIDEO_DIR, filename);
-  await fs.writeFile(fullPath, buffer);
-  return {
-    filename,
-    fullPath,
-    publicPath: `/generated-videos/${filename}`,
-  };
-}
-
-async function readMeta() {
-  await ensureDirs();
+async function readAll() {
+  await ensure();
   try {
-    const raw = await fs.readFile(META_FILE, 'utf8');
+    const raw = await fs.readFile(JOBS_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
-async function writeMeta(items) {
-  await ensureDirs();
-  await fs.writeFile(META_FILE, JSON.stringify(items, null, 2), 'utf8');
+async function writeAll(items) {
+  await ensure();
+  await fs.writeFile(JOBS_FILE, JSON.stringify(items.slice(0, 200), null, 2), 'utf8');
 }
 
-export async function saveVideoMetadata(record) {
-  const items = await readMeta();
-  items.unshift(record);
-  await writeMeta(items.slice(0, 100));
-  return record;
+export async function createInflightJob(jobData) {
+  const items = await readAll();
+  const job = {
+    videoId: newVideoId(),
+    status: 'queued',
+    attemptCount: 0,
+    createdAt: new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+    videoUrl: null,
+    caption: null,
+    error: null,
+    workerId: null,
+    ...jobData,
+  };
+  items.unshift(job);
+  await writeAll(items);
+  return job;
 }
 
-export async function getLatestVideo() {
-  const items = await readMeta();
-  return items[0] || null;
+export async function getInflightJob(videoId) {
+  const items = await readAll();
+  return items.find(j => j.videoId === videoId) || null;
 }
 
-export async function getRecentVideos(limit = 12) {
-  const items = await readMeta();
-  return items.slice(0, limit);
+export async function updateInflightJob(videoId, patch) {
+  const items = await readAll();
+  const idx = items.findIndex(j => j.videoId === videoId);
+  if (idx === -1) return null;
+  items[idx] = { ...items[idx], ...patch };
+  await writeAll(items);
+  return items[idx];
+}
+
+export async function removeInflightJob(videoId) {
+  const items = await readAll();
+  const filtered = items.filter(j => j.videoId !== videoId);
+  await writeAll(filtered);
+  return items.length !== filtered.length;
+}
+
+export async function getNextQueuedWorkerJob() {
+  const items = await readAll();
+  return items
+    .filter(j => j.provider === 'worker' && j.status === 'queued')
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0] || null;
+}
+
+export async function listInflightJobs() {
+  return await readAll();
 }

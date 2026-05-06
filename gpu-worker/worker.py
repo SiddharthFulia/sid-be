@@ -133,8 +133,19 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
         report_failed(client, job_id, f"ComfyUI failed: {e}")
         return
 
+    # The BE supplies context + tags so the list endpoint can read metadata back.
+    public_id = job.get("public_id") or job_id
+    context = job.get("context") or {
+        "prompt": prompt,
+        "provider": "worker",
+        "duration": str(duration),
+        "aspectRatio": aspect,
+        "style": style,
+    }
+    tags = job.get("tags") or ["worker", aspect]
+
     try:
-        upload = cloudinary_upload.upload_video(mp4_bytes, job_id)
+        upload = cloudinary_upload.upload_video(mp4_bytes, public_id, context=context, tags=tags)
     except Exception as e:
         traceback.print_exc()
         report_failed(client, job_id, f"Cloudinary upload failed: {e}", requeue=False)

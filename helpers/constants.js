@@ -20,3 +20,10 @@ export const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 export const LIGHTNING_STUDIO_URL = process.env.LIGHTNING_STUDIO_URL || '';
 export const ZSKY_API_KEY = process.env.ZSKY_API_KEY || '';
 export const ZSKY_API_URL = process.env.ZSKY_API_URL || 'https://zsky.ai/api/generate';
+// Supabase tokens for free zsky.ai account (auto-refreshed by zskyAuth.js)
+export const ZSKY_REFRESH_TOKEN = process.env.ZSKY_REFRESH_TOKEN || '';
+export const ZSKY_ACCESS_TOKEN = process.env.ZSKY_ACCESS_TOKEN || '';
+export const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || '';
+export const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '';
+export const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
+export const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || 'ai-videos';

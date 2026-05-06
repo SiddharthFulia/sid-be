@@ -6,3 +6,6 @@ python/__pycache__/
 python/*.dat
 *.log
 setup-vps.sh
+# Runtime metadata + generated artifacts — local + prod each maintain their own
+data/
+public/generated-videos/

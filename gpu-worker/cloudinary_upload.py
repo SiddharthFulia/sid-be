@@ -1,9 +1,9 @@
-"""Upload an MP4 buffer to Cloudinary and return the public secure URL."""
+"""Upload an MP4 buffer to Cloudinary with optional context tags + return secure_url."""
 from __future__ import annotations
 
 import io
 import os
-from typing import Any
+from typing import Any, Optional
 
 import cloudinary
 import cloudinary.uploader
@@ -29,15 +29,42 @@ def configure() -> None:
     )
 
 
-def upload_video(buffer: bytes, public_id: str) -> dict[str, Any]:
+def _escape_ctx(v: Any) -> str:
+    if v is None:
+        return ""
+    return str(v).replace("|", " ").replace("=", ":").replace("\n", " ")[:950]
+
+
+def _build_context(meta: Optional[dict]) -> str:
+    if not meta:
+        return ""
+    pairs = []
+    for k, v in meta.items():
+        if v is None or v == "":
+            continue
+        pairs.append(f"{k}={_escape_ctx(v)}")
+    return "|".join(pairs)
+
+
+def upload_video(buffer: bytes, public_id: str,
+                 context: Optional[dict] = None,
+                 tags: Optional[list] = None) -> dict[str, Any]:
+    """Upload an MP4 buffer. `context` is a dict of metadata keys (prompt, provider, etc.)
+    that gets stored on the Cloudinary resource and returned by the list endpoint."""
     configure()
-    res = cloudinary.uploader.upload_large(
-        io.BytesIO(buffer),
-        resource_type="video",
-        public_id=public_id,
-        folder=FOLDER,
-        chunk_size=6_000_000,
-    )
+    kwargs: dict[str, Any] = {
+        "resource_type": "video",
+        "public_id": public_id,
+        "folder": FOLDER,
+        "chunk_size": 6_000_000,
+    }
+    ctx_str = _build_context(context)
+    if ctx_str:
+        kwargs["context"] = ctx_str
+    if tags:
+        kwargs["tags"] = [t for t in tags if t]
+
+    res = cloudinary.uploader.upload_large(io.BytesIO(buffer), **kwargs)
     return {
         "videoUrl": res.get("secure_url"),
         "publicId": res.get("public_id"),

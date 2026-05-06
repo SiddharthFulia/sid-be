@@ -8,7 +8,7 @@ const app = express();
 
 // CORS
 const corsOptions = NODE_ENV === 'production'
-  ? { origin: [FRONTEND_URL, 'https://www.siddharthfulia.com', 'http://localhost:3000'], methods: ['GET', 'POST'] }
+  ? { origin: [FRONTEND_URL, 'https://www.siddharthfulia.com', 'http://localhost:3000'], methods: ['GET', 'POST', 'DELETE'] }
   : { origin: true };
 app.use(cors(corsOptions));
 
