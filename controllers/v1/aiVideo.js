@@ -31,6 +31,7 @@ export const postGenerateVideo = async (req, res) => {
       duration = 5,
       resolution = '720p',
       aspectRatio = '9:16',
+      steps = 30,
       style = 'cinematic',
       audio = true,
       imageUrl = '',
@@ -47,7 +48,7 @@ export const postGenerateVideo = async (req, res) => {
       return error(res, 'Cloudinary not configured on server', 503);
     }
 
-    const opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, style, audio, imageUrl, generateCaption };
+    const opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption };
     if (provider === 'zsky') return handleZsky(req, res, opts);
     if (provider === 'local') return handleAsyncWorker(req, res, opts, 'local');
     return handleAsyncWorker(req, res, opts, 'worker');
@@ -191,6 +192,7 @@ async function handleAsyncWorker(req, res, opts, role) {
     duration: opts.duration,
     resolution: opts.resolution,
     aspectRatio: opts.aspectRatio,
+    steps: opts.steps || 30,
     style: opts.style,
     audio: opts.audio,
     imageUrl: opts.imageUrl || '',

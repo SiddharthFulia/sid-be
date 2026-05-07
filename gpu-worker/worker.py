@@ -105,9 +105,10 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     aspect = job.get("aspectRatio") or "9:16"
     duration = job.get("duration")
     resolution = job.get("resolution") or "720p"
+    steps = int(job.get("steps") or 30)
     image_url = (job.get("imageUrl") or "").strip()
     print(f"\n[process] {job_id}")
-    print(f"  model={model} | aspect={aspect} | duration={duration}s | res={resolution}")
+    print(f"  model={model} | aspect={aspect} | duration={duration}s | res={resolution} | steps={steps}")
     print(f"  prompt={prompt[:80]!r}")
     if image_url:
         print(f"  image_url={image_url[:80]}")
@@ -136,7 +137,7 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
             model=model,
             aspect=aspect,
             duration=duration,
-            steps=30,
+            steps=steps,
             cfg=3.0,
             resolution=resolution,
             image_url=image_url,

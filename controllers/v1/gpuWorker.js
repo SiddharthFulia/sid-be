@@ -65,6 +65,7 @@ export const getNextJob = async (req, res) => {
     duration: job.duration,
     resolution: job.resolution,
     aspectRatio: job.aspectRatio,
+    steps: job.steps || 30,
     style: job.style,
     audio: job.audio,
     imageUrl: job.imageUrl,
