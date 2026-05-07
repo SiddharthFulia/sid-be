@@ -101,7 +101,16 @@ def report_failed(client: httpx.Client, job_id: str, err_msg: str, requeue: bool
 def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     job_id = job["jobId"]
     prompt = job.get("prompt", "")
-    print(f"\n[process] {job_id} | {prompt[:60]}")
+    model = job.get("model") or "ltx-video"
+    aspect = job.get("aspectRatio") or "9:16"
+    duration = job.get("duration")
+    resolution = job.get("resolution") or "720p"
+    image_url = (job.get("imageUrl") or "").strip()
+    print(f"\n[process] {job_id}")
+    print(f"  model={model} | aspect={aspect} | duration={duration}s | res={resolution}")
+    print(f"  prompt={prompt[:80]!r}")
+    if image_url:
+        print(f"  image_url={image_url[:80]}")
     started = time.monotonic()
 
     if not cloudinary_upload.is_configured():
@@ -119,14 +128,8 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
 
     style = job.get("style") or ""
     styled_prompt = f"{prompt}, {style}, high detail" if style else prompt
-    duration = int(job.get("duration") or 5)
-    aspect = job.get("aspectRatio") or "9:16"
-
-    model = job.get("model") or "ltx-video"
-    resolution = job.get("resolution") or "720p"
-    image_url = (job.get("imageUrl") or "").strip() or None
-    if image_url:
-        print(f"[i2v] using source image → {image_url[:80]}")
+    duration = int(duration or 5)
+    image_url = image_url or None
     try:
         mp4_bytes = asyncio.run(comfyui_client.generate(
             prompt=styled_prompt,
