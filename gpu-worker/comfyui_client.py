@@ -40,7 +40,7 @@ def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg
     cfg = max(cfg, 3.0)
     return {
         "1": {"class_type": "CheckpointLoaderSimple",
-              "inputs": {"ckpt_name": "ltx-video-2b-v0.9.safetensors"}},
+              "inputs": {"ckpt_name": "ltx-video-2b-v0.9.5.safetensors"}},
         "2": {"class_type": "CLIPLoader",
               "inputs": {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "ltxv"}},
         "3": {"class_type": "ModelSamplingLTXV",
@@ -85,6 +85,10 @@ def _wan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: 
               "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
         "3": {"class_type": "VAELoader",
               "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+        # Wan 2.1 REQUIRES ModelSamplingSD3 with shift=8.0 — without this the
+        # latent isn't denoised correctly and you get black/noise output.
+        "10": {"class_type": "ModelSamplingSD3",
+               "inputs": {"model": ["1", 0], "shift": 8.0}},
         "4": {"class_type": "CLIPTextEncode",
               "inputs": {"text": prompt, "clip": ["2", 0]}},
         "5": {"class_type": "CLIPTextEncode",
@@ -95,7 +99,7 @@ def _wan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: 
         "7": {"class_type": "KSampler",
               "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
                          "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
-                         "model": ["1", 0],
+                         "model": ["10", 0],
                          "positive": ["4", 0], "negative": ["5", 0],
                          "latent_image": ["6", 0]}},
         "8": {"class_type": "VAEDecode",
@@ -125,7 +129,7 @@ def _ltx_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: i
     cfg = max(cfg, 3.0)
     return {
         "1": {"class_type": "CheckpointLoaderSimple",
-              "inputs": {"ckpt_name": "ltx-video-2b-v0.9.safetensors"}},
+              "inputs": {"ckpt_name": "ltx-video-2b-v0.9.5.safetensors"}},
         "2": {"class_type": "CLIPLoader",
               "inputs": {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "ltxv"}},
         "3": {"class_type": "ModelSamplingLTXV",
@@ -192,10 +196,13 @@ def _wan_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: i
                          "start_image": ["5", 0],
                          "width": width, "height": height,
                          "length": frames, "batch_size": 1}},
+        # Wan I2V also requires ModelSamplingSD3 shift to denoise correctly
+        "13": {"class_type": "ModelSamplingSD3",
+               "inputs": {"model": ["1", 0], "shift": 8.0}},
         "10": {"class_type": "KSampler",
                "inputs": {"seed": seed, "steps": max(steps, 30), "cfg": max(cfg, 6.0),
                           "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
-                          "model": ["1", 0],
+                          "model": ["13", 0],
                           "positive": ["9", 0], "negative": ["9", 1],
                           "latent_image": ["9", 2]}},
         "11": {"class_type": "VAEDecode",
@@ -210,58 +217,60 @@ def _wan_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: i
 
 def _wan22_workflow(prompt: str, image_filename: str | None, aspect: str, duration: int,
                     steps: int, cfg: float) -> dict[str, Any]:
-    """Wan 2.2 5B — supports both T2V (image_filename=None) and I2V via the same node graph.
-    Uses Wan 2.2's native loader; fps native is 24."""
-    width, height = (704, 1280) if aspect == "9:16" else (1280, 704) if aspect == "16:9" else (960, 960)
+    """Wan 2.2 5B TI2V — exact mirror of ComfyUI's official Wan2.2 5B template.
+
+    Single TI2V model handles both T2V and I2V via Wan22ImageToVideoLatent
+    (start_image is optional). Uses Wan 2.2's own VAE (not Wan 2.1's) and
+    ModelSamplingSD3 with shift=8.0. Native fps=24, length=4n+1, default 121.
+    """
+    width, height = (704, 1280) if aspect == "9:16" else (1280, 704) if aspect == "16:9" else (704, 704)
     fps = 24
     desired = max(25, min((duration or 5) * fps + 1, 193))
     frames = ((desired - 1) // 4) * 4 + 1
     seed = random.randint(1, 1_000_000_000)
     is_i2v = bool(image_filename)
-    # Wan 2.2 5B is a single TI2V model that handles both T2V and I2V
-    unet_name = "wan2.2_ti2v_5B_fp16.safetensors"
-    graph: dict[str, Any] = {
-        "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
-        "2": {"class_type": "CLIPLoader",
-              "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
-        "3": {"class_type": "VAELoader",
-              "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
-        "7": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": prompt, "clip": ["2", 0]}},
-        "8": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": "low quality, blurry, distorted, watermark",
-                         "clip": ["2", 0]}},
+
+    # Wan22ImageToVideoLatent inputs: vae (required) + start_image (optional for I2V)
+    latent_inputs: dict[str, Any] = {
+        "vae": ["39", 0],
+        "width": width, "height": height,
+        "length": frames, "batch_size": 1,
     }
     if is_i2v:
-        graph["4"] = {"class_type": "CLIPVisionLoader",
-                      "inputs": {"clip_name": "clip_vision_h.safetensors"}}
-        graph["5"] = {"class_type": "LoadImage", "inputs": {"image": image_filename}}
-        graph["6"] = {"class_type": "CLIPVisionEncode",
-                      "inputs": {"clip_vision": ["4", 0], "image": ["5", 0], "crop": "none"}}
-        graph["9"] = {"class_type": "WanImageToVideo",
-                      "inputs": {"positive": ["7", 0], "negative": ["8", 0],
-                                 "vae": ["3", 0], "clip_vision_output": ["6", 0],
-                                 "start_image": ["5", 0],
-                                 "width": width, "height": height,
-                                 "length": frames, "batch_size": 1}}
-        latent_in = ["9", 2]; pos = ["9", 0]; neg = ["9", 1]
-    else:
-        graph["6"] = {"class_type": "EmptyHunyuanLatentVideo",
-                      "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}}
-        latent_in = ["6", 0]; pos = ["7", 0]; neg = ["8", 0]
-    graph["10"] = {"class_type": "KSampler",
-                   "inputs": {"seed": seed, "steps": max(steps, 30), "cfg": max(cfg, 5.5),
-                              "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
-                              "model": ["1", 0], "positive": pos, "negative": neg,
-                              "latent_image": latent_in}}
-    graph["11"] = {"class_type": "VAEDecode",
-                   "inputs": {"samples": ["10", 0], "vae": ["3", 0]}}
-    graph["12"] = {"class_type": "VHS_VideoCombine",
-                   "inputs": {"images": ["11", 0], "frame_rate": fps,
-                              "filename_prefix": "wan22", "format": "video/h264-mp4",
-                              "pix_fmt": "yuv420p", "crf": 19,
-                              "loop_count": 0, "pingpong": False, "save_output": True}}
+        latent_inputs["start_image"] = ["56", 0]
+
+    graph: dict[str, Any] = {
+        "37": {"class_type": "UNETLoader",
+               "inputs": {"unet_name": "wan2.2_ti2v_5B_fp16.safetensors", "weight_dtype": "default"}},
+        "38": {"class_type": "CLIPLoader",
+               "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
+        "39": {"class_type": "VAELoader",
+               "inputs": {"vae_name": "wan2.2_vae.safetensors"}},
+        "48": {"class_type": "ModelSamplingSD3",
+               "inputs": {"model": ["37", 0], "shift": 8.0}},
+        "6":  {"class_type": "CLIPTextEncode",
+               "inputs": {"text": prompt, "clip": ["38", 0]}},
+        "7":  {"class_type": "CLIPTextEncode",
+               "inputs": {
+                   "text": "low quality, blurry, distorted, watermark, deformed, ugly",
+                   "clip": ["38", 0]}},
+        "55": {"class_type": "Wan22ImageToVideoLatent", "inputs": latent_inputs},
+        "3":  {"class_type": "KSampler",
+               "inputs": {"seed": seed, "steps": max(steps, 20), "cfg": max(cfg, 5.0),
+                          "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0,
+                          "model": ["48", 0],
+                          "positive": ["6", 0], "negative": ["7", 0],
+                          "latent_image": ["55", 0]}},
+        "8":  {"class_type": "VAEDecode",
+               "inputs": {"samples": ["3", 0], "vae": ["39", 0]}},
+        "10": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["8", 0], "frame_rate": fps,
+                          "filename_prefix": "wan22", "format": "video/h264-mp4",
+                          "pix_fmt": "yuv420p", "crf": 19,
+                          "loop_count": 0, "pingpong": False, "save_output": True}},
+    }
+    if is_i2v:
+        graph["56"] = {"class_type": "LoadImage", "inputs": {"image": image_filename}}
     return graph
 
 
