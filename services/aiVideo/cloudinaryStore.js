@@ -57,6 +57,34 @@ function parseContext(custom = {}) {
   return custom || {};
 }
 
+// ─── Upload source image (used as I2V starting frame) ─────
+// Accepts a base64 data URL from the FE, returns a public Cloudinary URL.
+// Cloudinary auto-converts HEIC/WEBP/etc. to a delivered jpg/png; the worker
+// downloads via the resulting secure_url, so any format ComfyUI's PIL backend
+// can read works downstream.
+export async function uploadSourceImage(dataUrl) {
+  configure();
+  if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error('Expected a data: URL');
+  }
+  const result = await cloudinary.uploader.upload(dataUrl, {
+    resource_type: 'image',
+    folder: `${FOLDER}/sources`,
+    tags: ['ai-video-source'],
+    // delivered as jpg for max ComfyUI compatibility (PIL handles all base formats)
+    format: 'jpg',
+  });
+  return {
+    url: result.secure_url,
+    publicId: result.public_id,
+    bytes: result.bytes,
+    width: result.width,
+    height: result.height,
+    format: result.format,
+  };
+}
+
+
 // ─── Upload ─────────────────────────────────────────────────
 export async function uploadVideoBuffer(buffer, videoId, meta = {}, opts = {}) {
   configure();

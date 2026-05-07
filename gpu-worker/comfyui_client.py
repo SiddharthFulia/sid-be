@@ -146,6 +146,7 @@ def _ltx_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: i
                   "width": width, "height": height,
                   "length": frames, "batch_size": 1,
                   "image_noise_scale": 0.15,
+                  "strength": 1.0,
               }},
         "7": {"class_type": "LTXVConditioning",
               "inputs": {"positive": ["6", 0], "negative": ["6", 1], "frame_rate": 25}},

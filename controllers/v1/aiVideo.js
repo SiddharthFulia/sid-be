@@ -6,7 +6,7 @@ import {
 } from '../../services/aiVideo/storage.js';
 import {
   uploadVideoBuffer, listVideos, getVideo, deleteVideo,
-  getLatestVideo, isCloudinaryConfigured,
+  getLatestVideo, isCloudinaryConfigured, uploadSourceImage,
 } from '../../services/aiVideo/cloudinaryStore.js';
 import { getWorkerStatus, isWorkerOnline } from '../../services/aiVideo/jobStore.js';
 import { tryWakeWorker } from '../../services/aiVideo/wakeWorker.js';
@@ -290,6 +290,25 @@ export const deleteVideoById = async (req, res) => {
   } catch (err) {
     logger.error('Delete failed', err.message);
     return error(res, err.message);
+  }
+};
+
+// ─── Upload a source image (for image-to-video) ────────────
+// Accepts a base64 data URL, returns a Cloudinary URL the worker can fetch.
+export const postUploadSourceImage = async (req, res) => {
+  try {
+    const { dataUrl } = req.body || {};
+    if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+      return error(res, 'dataUrl (base64 image) is required', 400);
+    }
+    if (!isCloudinaryConfigured()) {
+      return error(res, 'Cloudinary not configured on server', 503);
+    }
+    const result = await uploadSourceImage(dataUrl);
+    return success(res, result);
+  } catch (err) {
+    logger.error('Source image upload failed', err.message);
+    return error(res, err.message, 502);
   }
 };
 

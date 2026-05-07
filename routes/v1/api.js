@@ -4,7 +4,7 @@ import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision } from
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
-import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById } from '../../controllers/v1/aiVideo.js';
+import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage } from '../../controllers/v1/aiVideo.js';
 import { postRegister, getNextJob, postJobComplete, postJobFailed, getWorkerFile } from '../../controllers/v1/gpuWorker.js';
 
 const router = Router();
@@ -37,6 +37,7 @@ router.get('/ai-video/today', getTodayVideo);
 router.get('/ai-video/list', getVideoList);
 router.get('/ai-video/providers', getVideoProviders);
 router.delete('/ai-video/:videoId', deleteVideoById);
+router.post('/ai-video/upload-image', postUploadSourceImage);
 
 // GPU worker — polling client endpoints (called by Lightning AI worker)
 router.post('/gpu-worker/register', postRegister);
