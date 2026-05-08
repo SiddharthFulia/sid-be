@@ -121,6 +121,25 @@ export const postJobFailed = async (req, res) => {
   return success(res, job);
 };
 
+// Worker reports progress mid-job: estimated total seconds + optional message.
+// FE polls /status/:jobId and computes live ETA from startedAt + estimatedSeconds.
+export const postJobProgress = async (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, estimatedSeconds, message, step, totalSteps } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+
+  const updates = {};
+  if (typeof estimatedSeconds === 'number') updates.estimatedSeconds = estimatedSeconds;
+  if (message) updates.progressMessage = String(message).slice(0, 200);
+  if (typeof step === 'number') updates.progressStep = step;
+  if (typeof totalSteps === 'number') updates.progressTotal = totalSteps;
+  if (!Object.keys(updates).length) return success(res, { ok: true });
+
+  const job = await updateInflightJob(jobId, updates);
+  if (!job) return error(res, 'Job not found', 404);
+  return success(res, job);
+};
+
 export const getWorkerFile = (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
   const fname = req.params.filename;

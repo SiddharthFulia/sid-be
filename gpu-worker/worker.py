@@ -98,6 +98,42 @@ def report_failed(client: httpx.Client, job_id: str, err_msg: str, requeue: bool
         print(f"[failed] error: {e}")
 
 
+def report_progress(client: httpx.Client, job_id: str, **fields: Any) -> None:
+    """Push estimated_seconds / progressMessage / step / totalSteps to BE."""
+    if not fields:
+        return
+    try:
+        client.post(
+            f"{MAIN_BACKEND_URL}/api/gpu-worker/job-progress",
+            headers=_headers(),
+            json={"jobId": job_id, **fields},
+            timeout=8,
+        )
+    except Exception:
+        pass   # progress is best-effort; never fail a job over this
+
+
+# Per-model rough seconds-per-step on the 5090 at 720p. 1080p gets ~1.8x.
+# Used to compute an ETA the FE shows as a countdown.
+_SECONDS_PER_STEP = {
+    "ltx-video":   0.85,
+    "wan-2.1":     1.30,
+    "wan-2.1-i2v": 9.0,    # 14B is much heavier
+    "wan-2.2":     6.0,    # 5B
+    "hunyuan":     32.0,   # the 26GB beast
+    "mochi":       7.5,
+    "svd":         1.0,
+}
+
+
+def estimate_seconds(model: str, steps: int, resolution: str) -> int:
+    base = _SECONDS_PER_STEP.get(model, 1.5)
+    res_mult = 1.8 if (resolution or "").lower() == "1080p" else 1.0
+    sampler = base * max(steps, 1) * res_mult
+    overhead = 12   # model load + VAE decode + Cloudinary upload
+    return int(sampler + overhead)
+
+
 def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     job_id = job["jobId"]
     prompt = job.get("prompt", "")
@@ -131,6 +167,21 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     styled_prompt = f"{prompt}, {style}, high detail" if style else prompt
     duration = int(duration or 5)
     image_url = image_url or None
+
+    # Estimate how long this job should take + tell BE so the FE can show ETA
+    eta = estimate_seconds(model, steps, resolution)
+    nice_name = {
+        "ltx-video": "LTX-Video", "wan-2.1": "Wan 2.1", "wan-2.1-i2v": "Wan 2.1 I2V 14B",
+        "wan-2.2": "Wan 2.2 5B", "hunyuan": "HunyuanVideo", "mochi": "Mochi 1", "svd": "SVD-XT",
+    }.get(model, model)
+    print(f"[eta] ~{eta}s estimated ({nice_name} • {steps} steps • {resolution})")
+    report_progress(
+        client, job_id,
+        estimatedSeconds=eta,
+        message=f"Rendering on the 5090 — {nice_name} • {steps} steps • {resolution}",
+        totalSteps=steps,
+    )
+
     try:
         mp4_bytes = asyncio.run(comfyui_client.generate(
             prompt=styled_prompt,
