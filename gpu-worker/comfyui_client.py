@@ -33,9 +33,13 @@ _CLIENT_ID = str(uuid.uuid4())
 #
 # Supported model_type strings (must match TeaCache's INPUT_TYPES list exactly):
 #   flux, flux-kontext, ltxv, lumina_2, hunyuan_video, hidream_*, wan2.1_*
-# NOT supported (as of welltop-cn fork latest): wan2.2_* (any variant).
+# NOT supported (as of welltop-cn fork latest):
+#   - wan2.2_* (any variant) — never added to TeaCache
+#   - hunyuan_video — ComfyUI 0.20+ added positional args (txt_byt5, clip_fea,
+#     disable_time_r) that shift the call site and collide with TeaCache's
+#     patched forward on `control`. Re-enable when upstream fork updates.
 SUPPORTED_TEACACHE_TYPES = {
-    "flux", "flux-kontext", "ltxv", "lumina_2", "hunyuan_video",
+    "flux", "flux-kontext", "ltxv", "lumina_2",
     "hidream_i1_full", "hidream_i1_dev", "hidream_i1_fast",
     "wan2.1_t2v_1.3B", "wan2.1_t2v_14B",
     "wan2.1_i2v_480p_14B", "wan2.1_i2v_720p_14B",
