@@ -623,10 +623,13 @@ def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: i
 
 
 async def _queue_prompt(client: httpx.AsyncClient, workflow: dict[str, Any]) -> str:
+    # ComfyUI can be slow to ack /prompt while it's busy with another job's VAE
+    # decode or while still loading models on first invocation. 120s is a generous
+    # upper bound that won't trigger except on real hangs.
     r = await client.post(
         f"{COMFYUI_URL}/prompt",
         json={"prompt": workflow, "client_id": _CLIENT_ID},
-        timeout=30,
+        timeout=120,
     )
     if r.status_code >= 400:
         raise RuntimeError(f"ComfyUI rejected workflow ({r.status_code}): {r.text[:1000]}")

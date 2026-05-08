@@ -125,7 +125,7 @@ export const postJobFailed = async (req, res) => {
 // FE polls /status/:jobId and computes live ETA from startedAt + estimatedSeconds.
 export const postJobProgress = async (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
-  const { jobId, estimatedSeconds, message, step, totalSteps } = req.body || {};
+  const { jobId, estimatedSeconds, message, step, totalSteps, logLine } = req.body || {};
   if (!jobId) return error(res, 'jobId required', 400);
 
   const updates = {};
@@ -133,6 +133,18 @@ export const postJobProgress = async (req, res) => {
   if (message) updates.progressMessage = String(message).slice(0, 200);
   if (typeof step === 'number') updates.progressStep = step;
   if (typeof totalSteps === 'number') updates.progressTotal = totalSteps;
+
+  // Append a structured log entry. The worker streams human-readable lines
+  // here (e.g. "queued by 5090 worker", "ComfyUI step 12/30 @ 1.7s/step",
+  // "uploading to Cloudinary", "https://res.cloudinary.com/...") so the FE
+  // can show a live activity feed for the in-flight job. Cap at the most
+  // recent 80 entries to keep the JSON file from ballooning.
+  if (logLine) {
+    const existing = (await getInflightJob(jobId))?.logs || [];
+    const next = [...existing, { ts: Date.now(), msg: String(logLine).slice(0, 300) }];
+    updates.logs = next.slice(-80);
+  }
+
   if (!Object.keys(updates).length) return success(res, { ok: true });
 
   const job = await updateInflightJob(jobId, updates);

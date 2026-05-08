@@ -100,7 +100,7 @@ def report_failed(client: httpx.Client, job_id: str, err_msg: str, requeue: bool
 
 
 def report_progress(client: httpx.Client, job_id: str, **fields: Any) -> None:
-    """Push estimated_seconds / progressMessage / step / totalSteps to BE."""
+    """Push estimated_seconds / progressMessage / step / totalSteps / logLine to BE."""
     if not fields:
         return
     try:
@@ -112,6 +112,17 @@ def report_progress(client: httpx.Client, job_id: str, **fields: Any) -> None:
         )
     except Exception:
         pass   # progress is best-effort; never fail a job over this
+
+
+def report_log(client: httpx.Client, job_id: str, line: str) -> None:
+    """Append a log line to the inflight job's `logs` array. Mirrors print() to
+    the worker terminal, but the BE persists the line so the FE shows a live feed.
+    Fire-and-forget on a background thread so we never block sampling."""
+    print(f"[log] {line}")
+    threading.Thread(
+        target=lambda: report_progress(client, job_id, logLine=line),
+        daemon=True,
+    ).start()
 
 
 # Per-model rough seconds-per-step on the 5090 at 720p (calibrated from real runs).
@@ -151,6 +162,14 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
         print(f"  image_url={image_url[:80]}")
     started = time.monotonic()
 
+    # Stream-to-FE log feed: every milestone emits a line that lands in the
+    # inflight job's `logs` array. The FE renders these so the user sees the
+    # same activity the worker terminal shows.
+    report_log(client, job_id, f"picked up by worker {WORKER_ID}")
+    report_log(client, job_id, f"model={model} • aspect={aspect} • {duration}s • {resolution} • {steps} steps")
+    if image_url:
+        report_log(client, job_id, f"i2v source: {image_url[:80]}")
+
     if not cloudinary_upload.is_configured():
         report_failed(client, job_id, "Cloudinary not configured on worker", requeue=False)
         return
@@ -158,6 +177,7 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     try:
         comfy_ok = asyncio.run(comfyui_client.health())
     except Exception as e:
+        report_log(client, job_id, f"✗ ComfyUI health check failed: {e}")
         report_failed(client, job_id, f"ComfyUI health check failed: {e}")
         return
     if not comfy_ok:
@@ -182,6 +202,11 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
         message=f"Rendering on the 5090 — {nice_name} • {steps} steps • {resolution}",
         totalSteps=steps,
     )
+    report_log(client, job_id, f"⏱ ETA ~{eta}s ({nice_name})")
+    if os.getenv("ENABLE_TEACACHE", "0").strip().lower() in ("1", "true", "yes"):
+        report_log(client, job_id, "⚡ TeaCache acceleration: ON")
+    if os.getenv("SAGE_ATTENTION", "0").strip().lower() in ("1", "true", "yes"):
+        report_log(client, job_id, "⚡ SageAttention: ON")
 
     # ── Live progress via ComfyUI websocket ──────────────────────────────
     # ComfyUI emits {"type": "progress", "value": N, "max": M} per sampler step.
@@ -191,6 +216,10 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
         "last_post": 0.0,
         "ema_sps": None,        # exponential moving average of seconds-per-step
     }
+
+    # Track which step indices we've already logged (every 25% mark) so we don't
+    # spam the BE with 30 separate log lines on a 30-step run.
+    _logged_marks: set[int] = set()
 
     def progress_cb(step: int, total: int, sec_per_step: float) -> None:
         now = time.monotonic()
@@ -217,7 +246,18 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
             ),
             daemon=True,
         ).start()
+        # Log a discrete line at start, 25%, 50%, 75%, and end — gives the user
+        # the same "30/30 [00:50<00:00, 1.68s/it]" granularity ComfyUI prints.
+        marks = {1, max(1, total // 4), max(1, total // 2), max(1, (3 * total) // 4), total}
+        if step in marks and step not in _logged_marks:
+            _logged_marks.add(step)
+            pct = int(round(100 * step / max(total, 1)))
+            report_log(
+                client, job_id,
+                f"sampler {step}/{total} ({pct}%) • {sps:.2f}s/it • ~{int(remaining_sec)}s left",
+            )
 
+    report_log(client, job_id, "→ submitting workflow to ComfyUI")
     try:
         mp4_bytes = asyncio.run(comfyui_client.generate(
             prompt=styled_prompt,
@@ -231,12 +271,15 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
             progress_cb=progress_cb,
         ))
     except TimeoutError as e:
+        report_log(client, job_id, f"✗ ComfyUI timed out: {e}")
         report_failed(client, job_id, f"ComfyUI timed out: {e}")
         return
     except Exception as e:
         traceback.print_exc()
+        report_log(client, job_id, f"✗ ComfyUI error: {str(e)[:180]}")
         report_failed(client, job_id, f"ComfyUI failed: {e}")
         return
+    report_log(client, job_id, f"✓ generation done ({len(mp4_bytes) / (1024*1024):.1f} MB mp4)")
 
     # The BE supplies context + tags so the list endpoint can read metadata back.
     public_id = job.get("public_id") or job_id
@@ -249,15 +292,19 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     }
     tags = job.get("tags") or ["worker", aspect]
 
+    report_log(client, job_id, "↑ uploading to Cloudinary")
     try:
         upload = cloudinary_upload.upload_video(mp4_bytes, public_id, context=context, tags=tags)
     except Exception as e:
         traceback.print_exc()
+        report_log(client, job_id, f"✗ Cloudinary upload failed: {str(e)[:180]}")
         report_failed(client, job_id, f"Cloudinary upload failed: {e}", requeue=False)
         return
 
     elapsed = round(time.monotonic() - started, 1)
     print(f"[done] {job_id} → {upload['videoUrl']} ({elapsed}s)")
+    report_log(client, job_id, f"✓ published in {elapsed}s")
+    report_log(client, job_id, f"🎬 {upload['videoUrl']}")
     report_complete(client, job_id, upload["videoUrl"])
 
 

@@ -70,9 +70,12 @@ export const postGenerateVideo = async (req, res) => {
     // The user can still override via explicit fields, but blank fields get the mode's recommendation.
     if (provider === 'optimized') {
       const overrides = OPTIMIZED_MODES[(mode || 'balanced').toLowerCase()] || OPTIMIZED_MODES.balanced;
+      // Force the mode's model regardless of what the FE sent (mode selector is the
+      // source of truth for this provider; stale model state from other providers
+      // would otherwise leak through, e.g. 'cinematic' from a previous ZSky session).
       opts = {
         ...opts,
-        model: model || overrides.model,
+        model: overrides.model,
         steps: req.body.steps ?? overrides.steps,
         resolution: req.body.resolution ?? overrides.resolution,
         duration: req.body.duration ?? overrides.duration,
