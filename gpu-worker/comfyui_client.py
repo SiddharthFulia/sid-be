@@ -1,16 +1,37 @@
-"""ComfyUI HTTP client — queues a workflow, polls until done, returns MP4 bytes."""
+"""ComfyUI HTTP client — queues a workflow, polls until done, returns MP4 bytes.
+
+Also subscribes to ComfyUI's WebSocket during a job to surface real-time
+sampler progress (step / total / sec-per-step) via an optional callback.
+"""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
-from typing import Any
+import time
+import uuid
+from typing import Any, Callable, Optional
 
 import httpx
 
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8000").rstrip("/")
 POLL_INTERVAL = 2.5
 POLL_TIMEOUT = 8 * 60  # seconds
+
+# Stable per-process client ID — ComfyUI uses this to route WS events back to us.
+# Sent on every /prompt POST so the WS at /ws?clientId=... receives our job's progress.
+_CLIENT_ID = str(uuid.uuid4())
+
+
+def _ws_url() -> str:
+    """Convert COMFYUI_URL (http://... or https://...) to ws://... or wss://..."""
+    base = COMFYUI_URL
+    if base.startswith("https://"):
+        return f"wss://{base[len('https://'):]}/ws?clientId={_CLIENT_ID}"
+    if base.startswith("http://"):
+        return f"ws://{base[len('http://'):]}/ws?clientId={_CLIENT_ID}"
+    return f"ws://{base}/ws?clientId={_CLIENT_ID}"
 
 
 def _ltx_frames(duration: int) -> int:
@@ -488,13 +509,70 @@ def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: i
 
 
 async def _queue_prompt(client: httpx.AsyncClient, workflow: dict[str, Any]) -> str:
-    r = await client.post(f"{COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=30)
+    r = await client.post(
+        f"{COMFYUI_URL}/prompt",
+        json={"prompt": workflow, "client_id": _CLIENT_ID},
+        timeout=30,
+    )
     if r.status_code >= 400:
         raise RuntimeError(f"ComfyUI rejected workflow ({r.status_code}): {r.text[:1000]}")
     data = r.json()
     if "prompt_id" not in data:
         raise RuntimeError(f"ComfyUI did not return prompt_id: {data}")
     return data["prompt_id"]
+
+
+async def _ws_progress_listener(
+    prompt_id: str,
+    progress_cb: Callable[[int, int, float], None],
+    stop_event: asyncio.Event,
+) -> None:
+    """Listen on ComfyUI's WebSocket and fire progress_cb(step, total, sec_per_step).
+
+    Silently exits if the websockets package isn't installed or ComfyUI's WS
+    is unreachable — the caller's job still completes via /history polling."""
+    try:
+        import websockets  # type: ignore
+    except ImportError:
+        return
+
+    url = _ws_url()
+    started_at = time.monotonic()
+    last_step = 0
+    try:
+        async with websockets.connect(url, ping_interval=20, max_size=2 ** 20) as ws:
+            while not stop_event.is_set():
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    return
+                if not isinstance(raw, (str, bytes)):
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if msg.get("type") != "progress":
+                    continue
+                d = msg.get("data") or {}
+                if d.get("prompt_id") != prompt_id:
+                    continue
+                step = int(d.get("value") or 0)
+                total = int(d.get("max") or 0)
+                if step <= last_step or total <= 0:
+                    continue
+                last_step = step
+                elapsed = time.monotonic() - started_at
+                sec_per_step = elapsed / step if step > 0 else 0
+                try:
+                    progress_cb(step, total, sec_per_step)
+                except Exception:
+                    pass
+    except Exception:
+        # WS unreachable / closed mid-job — silent fallback
+        return
 
 
 async def _poll_history(client: httpx.AsyncClient, prompt_id: str) -> dict[str, Any]:
@@ -577,7 +655,8 @@ async def health() -> bool:
 
 async def generate(prompt: str, model: str = "ltx-video", aspect: str = "9:16",
                    duration: int = 5, steps: int = 30, cfg: float = 3.0,
-                   resolution: str = "720p", image_url: str | None = None) -> bytes:
+                   resolution: str = "720p", image_url: str | None = None,
+                   progress_cb: Optional[Callable[[int, int, float], None]] = None) -> bytes:
     async with httpx.AsyncClient() as client:
         image_filename = None
         if image_url:
@@ -585,7 +664,24 @@ async def generate(prompt: str, model: str = "ltx-video", aspect: str = "9:16",
             image_filename = await _upload_image_to_comfy(client, img_bytes)
         workflow = build_workflow(model, prompt, aspect, duration, steps, cfg, resolution, image_filename)
         prompt_id = await _queue_prompt(client, workflow)
-        entry = await _poll_history(client, prompt_id)
+
+        # Run WS progress listener concurrently with /history polling.
+        # If WS fails (or websockets not installed), polling still finishes the job.
+        stop_event = asyncio.Event()
+        listener: Optional[asyncio.Task[None]] = None
+        if progress_cb is not None:
+            listener = asyncio.create_task(_ws_progress_listener(prompt_id, progress_cb, stop_event))
+
+        try:
+            entry = await _poll_history(client, prompt_id)
+        finally:
+            stop_event.set()
+            if listener is not None:
+                try:
+                    await asyncio.wait_for(listener, timeout=3.0)
+                except (asyncio.TimeoutError, Exception):
+                    listener.cancel()
+
         file = _find_video_file(entry)
         if not file:
             raise RuntimeError("ComfyUI completed but no video file in outputs")

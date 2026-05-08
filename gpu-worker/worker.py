@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import threading
 import time
 import traceback
 from typing import Any
@@ -113,24 +114,24 @@ def report_progress(client: httpx.Client, job_id: str, **fields: Any) -> None:
         pass   # progress is best-effort; never fail a job over this
 
 
-# Per-model rough seconds-per-step on the 5090 at 720p. 1080p gets ~1.8x.
-# Used to compute an ETA the FE shows as a countdown.
+# Per-model rough seconds-per-step on the 5090 at 720p (calibrated from real runs).
+# 1080p gets ~1.8x. Overhead covers model load + VAE decode + Cloudinary upload.
 _SECONDS_PER_STEP = {
-    "ltx-video":   0.85,
-    "wan-2.1":     1.30,
-    "wan-2.1-i2v": 9.0,    # 14B is much heavier
-    "wan-2.2":     6.0,    # 5B
-    "hunyuan":     32.0,   # the 26GB beast
-    "mochi":       7.5,
-    "svd":         1.0,
+    "ltx-video":   1.7,
+    "wan-2.1":     2.6,
+    "wan-2.1-i2v": 18.0,   # 14B is much heavier
+    "wan-2.2":     12.0,   # 5B
+    "hunyuan":     64.0,   # the 26GB beast
+    "mochi":       15.0,
+    "svd":         2.0,
 }
 
 
 def estimate_seconds(model: str, steps: int, resolution: str) -> int:
-    base = _SECONDS_PER_STEP.get(model, 1.5)
+    base = _SECONDS_PER_STEP.get(model, 3.0)
     res_mult = 1.8 if (resolution or "").lower() == "1080p" else 1.0
     sampler = base * max(steps, 1) * res_mult
-    overhead = 12   # model load + VAE decode + Cloudinary upload
+    overhead = 25   # model load + VAE decode + Cloudinary upload
     return int(sampler + overhead)
 
 
@@ -182,6 +183,41 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
         totalSteps=steps,
     )
 
+    # ── Live progress via ComfyUI websocket ──────────────────────────────
+    # ComfyUI emits {"type": "progress", "value": N, "max": M} per sampler step.
+    # We throttle to ~2s and use an EMA over sec/step so the ETA the FE shows
+    # stops being a constant prediction and starts being a live readout.
+    _prog_state = {
+        "last_post": 0.0,
+        "ema_sps": None,        # exponential moving average of seconds-per-step
+    }
+
+    def progress_cb(step: int, total: int, sec_per_step: float) -> None:
+        now = time.monotonic()
+        # EMA smoothing — fast steps still reach the user without bouncing the bar
+        prev = _prog_state["ema_sps"]
+        _prog_state["ema_sps"] = sec_per_step if prev is None else (0.6 * prev + 0.4 * sec_per_step)
+        # Throttle BE posts to once per ~1.5s so we don't spam Oracle
+        if now - _prog_state["last_post"] < 1.5 and step != total:
+            return
+        _prog_state["last_post"] = now
+        sps = _prog_state["ema_sps"] or sec_per_step or 0.0
+        remaining_steps = max(0, total - step)
+        remaining_sec = remaining_steps * sps
+        live_eta = int(((step * sps) if sps > 0 else 0) + remaining_sec + 8)
+        msg = (f"Rendering on the 5090 — {nice_name} • step {step}/{total}"
+               f" • {sps:.2f}s per step")
+        # Fire-and-forget on a background thread so we never block the asyncio loop
+        threading.Thread(
+            target=lambda: report_progress(
+                client, job_id,
+                estimatedSeconds=live_eta,
+                step=step, totalSteps=total,
+                message=msg,
+            ),
+            daemon=True,
+        ).start()
+
     try:
         mp4_bytes = asyncio.run(comfyui_client.generate(
             prompt=styled_prompt,
@@ -192,6 +228,7 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
             cfg=3.0,
             resolution=resolution,
             image_url=image_url,
+            progress_cb=progress_cb,
         ))
     except TimeoutError as e:
         report_failed(client, job_id, f"ComfyUI timed out: {e}")
