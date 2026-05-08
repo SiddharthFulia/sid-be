@@ -24,6 +24,45 @@ POLL_TIMEOUT = 8 * 60  # seconds
 _CLIENT_ID = str(uuid.uuid4())
 
 
+# ── Cache acceleration injection ──────────────────────────────────────────
+# When the user has installed ComfyUI-TeaCache (custom node by welltop-cn) and
+# sets ENABLE_TEACACHE=1, we splice a TeaCache node between the model patcher
+# and the KSampler. ~2× speedup on Wan/Hunyuan with mild quality loss.
+# Workflows call _maybe_inject_teacache(graph, model_node_ref, model_type) and
+# get back the new model ref — if TeaCache isn't enabled, returns the original.
+TEACACHE_THRESHOLDS = {
+    "ltxv":              0.10,
+    "wan2.1_t2v_1.3B":   0.20,
+    "wan2.1_i2v_480p_14B": 0.20,
+    "wan2.2_ti2v_5B":    0.18,
+    "hunyuan_video":     0.15,
+}
+
+
+def _teacache_enabled() -> bool:
+    return os.getenv("ENABLE_TEACACHE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _maybe_inject_teacache(graph: dict[str, Any], model_ref: list, model_type: str,
+                           steps: int) -> list:
+    """Splice a TeaCache node before the KSampler if the user has it enabled."""
+    if not _teacache_enabled():
+        return model_ref
+    threshold = TEACACHE_THRESHOLDS.get(model_type, 0.15)
+    # Use a high node id we know isn't taken (workflows use 1-13 typically)
+    tc_id = "200"
+    graph[tc_id] = {
+        "class_type": "TeaCache",
+        "inputs": {
+            "model": model_ref,
+            "model_type": model_type,
+            "rel_l1_thresh": threshold,
+            "max_skip_steps": max(1, steps // 4),
+        },
+    }
+    return [tc_id, 0]
+
+
 def _ws_url() -> str:
     """Convert COMFYUI_URL (http://... or https://...) to ws://... or wss://..."""
     base = COMFYUI_URL
@@ -39,6 +78,73 @@ def _ltx_frames(duration: int) -> int:
     Round down to the nearest valid count so the user's duration isn't exceeded."""
     raw = max(9, min((duration or 5) * 25, 257))
     return ((raw - 1) // 8) * 8 + 1
+
+
+def _ltx_distilled_workflow(prompt: str, image_filename: str | None, aspect: str, duration: int,
+                            steps: int, resolution: str = "720p") -> dict[str, Any]:
+    """LTX-Video DISTILLED (v0.9.6/0.9.7) — same node graph as regular LTX but uses a
+    distilled checkpoint that converges in 8-12 steps with cfg≈1. Ultra-fast preview path.
+
+    Requires `ltxv-2b-0.9.6-distilled-04-25.safetensors` in ComfyUI/models/checkpoints/.
+    """
+    res = (resolution or "720p").lower()
+    if aspect == "9:16":
+        width, height = (768, 1280) if res == "1080p" else (480, 832)
+    elif aspect == "16:9":
+        width, height = (1280, 768) if res == "1080p" else (832, 480)
+    else:
+        width, height = (768, 768) if res == "1080p" else (640, 640)
+    # Hard-cap frames for preview speed; user duration only nudges within bounds.
+    frames = _ltx_frames(min(duration or 2, 4))   # ≤ 97 frames worst case
+    seed = random.randint(1, 1_000_000_000)
+    steps = max(steps, 6)   # distilled needs at least 6 steps
+    cfg = 1.0               # distilled is trained to denoise in one direction; cfg=1 is correct
+
+    graph: dict[str, Any] = {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "ltxv-2b-0.9.6-distilled-04-25.safetensors"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "ltxv"}},
+        "3": {"class_type": "ModelSamplingLTXV",
+              "inputs": {"model": ["1", 0], "max_shift": 2.05, "base_shift": 0.95}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "low quality, blurry, watermark", "clip": ["2", 0]}},
+    }
+    if image_filename:
+        graph["11"] = {"class_type": "LoadImage", "inputs": {"image": image_filename}}
+        graph["6"] = {"class_type": "LTXVImgToVideo",
+                      "inputs": {
+                          "positive": ["4", 0], "negative": ["5", 0],
+                          "vae": ["1", 2], "image": ["11", 0],
+                          "width": width, "height": height,
+                          "length": frames, "batch_size": 1,
+                          "image_noise_scale": 0.15, "strength": 1.0,
+                      }}
+        graph["7"] = {"class_type": "LTXVConditioning",
+                      "inputs": {"positive": ["6", 0], "negative": ["6", 1], "frame_rate": 25}}
+        latent_in = ["6", 2]
+    else:
+        graph["6"] = {"class_type": "EmptyLTXVLatentVideo",
+                      "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}}
+        graph["7"] = {"class_type": "LTXVConditioning",
+                      "inputs": {"positive": ["4", 0], "negative": ["5", 0], "frame_rate": 25}}
+        latent_in = ["6", 0]
+    graph["8"] = {"class_type": "KSampler",
+                  "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
+                             "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
+                             "model": ["3", 0],
+                             "positive": ["7", 0], "negative": ["7", 1],
+                             "latent_image": latent_in}}
+    graph["9"] = {"class_type": "VAEDecode",
+                  "inputs": {"samples": ["8", 0], "vae": ["1", 2]}}
+    graph["10"] = {"class_type": "VHS_VideoCombine",
+                   "inputs": {"images": ["9", 0], "frame_rate": 25,
+                              "filename_prefix": "ltx_preview", "format": "video/h264-mp4",
+                              "pix_fmt": "yuv420p", "crf": 22,
+                              "loop_count": 0, "pingpong": False, "save_output": True}}
+    return graph
 
 
 def _ltx_video_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: float,
@@ -275,22 +381,24 @@ def _wan22_workflow(prompt: str, image_filename: str | None, aspect: str, durati
                    "text": "low quality, blurry, distorted, watermark, deformed, ugly",
                    "clip": ["38", 0]}},
         "55": {"class_type": "Wan22ImageToVideoLatent", "inputs": latent_inputs},
-        "3":  {"class_type": "KSampler",
-               "inputs": {"seed": seed, "steps": steps, "cfg": max(cfg, 5.0),
-                          "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0,
-                          "model": ["48", 0],
-                          "positive": ["6", 0], "negative": ["7", 0],
-                          "latent_image": ["55", 0]}},
-        "8":  {"class_type": "VAEDecode",
-               "inputs": {"samples": ["3", 0], "vae": ["39", 0]}},
-        "10": {"class_type": "VHS_VideoCombine",
-               "inputs": {"images": ["8", 0], "frame_rate": fps,
-                          "filename_prefix": "wan22", "format": "video/h264-mp4",
-                          "pix_fmt": "yuv420p", "crf": 19,
-                          "loop_count": 0, "pingpong": False, "save_output": True}},
     }
     if is_i2v:
         graph["56"] = {"class_type": "LoadImage", "inputs": {"image": image_filename}}
+    # Optional TeaCache between ModelSamplingSD3 and KSampler (~2× faster on Wan)
+    sampler_model = _maybe_inject_teacache(graph, ["48", 0], "wan2.2_ti2v_5B", steps)
+    graph["3"] = {"class_type": "KSampler",
+                  "inputs": {"seed": seed, "steps": steps, "cfg": max(cfg, 5.0),
+                             "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0,
+                             "model": sampler_model,
+                             "positive": ["6", 0], "negative": ["7", 0],
+                             "latent_image": ["55", 0]}}
+    graph["8"] = {"class_type": "VAEDecode",
+                  "inputs": {"samples": ["3", 0], "vae": ["39", 0]}}
+    graph["10"] = {"class_type": "VHS_VideoCombine",
+                   "inputs": {"images": ["8", 0], "frame_rate": fps,
+                              "filename_prefix": "wan22", "format": "video/h264-mp4",
+                              "pix_fmt": "yuv420p", "crf": 19,
+                              "loop_count": 0, "pingpong": False, "save_output": True}}
     return graph
 
 
@@ -345,7 +453,7 @@ def _hunyuan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, c
     desired = max(25, min((duration or 5) * fps + 1, 129))
     frames = ((desired - 1) // 4) * 4 + 1
     seed = random.randint(1, 1_000_000_000)
-    return {
+    graph: dict[str, Any] = {
         "1": {"class_type": "UNETLoader",
               "inputs": {"unet_name": "hunyuan_video_t2v_720p_bf16.safetensors", "weight_dtype": "default"}},
         "2": {"class_type": "DualCLIPLoader",
@@ -364,20 +472,23 @@ def _hunyuan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, c
               "inputs": {"model": ["1", 0], "shift": 7.0}},
         "8": {"class_type": "EmptyHunyuanLatentVideo",
               "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}},
-        "9": {"class_type": "KSampler",
-              "inputs": {"seed": seed, "steps": steps, "cfg": 1.0,
-                         "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
-                         "model": ["7", 0],
-                         "positive": ["6", 0], "negative": ["5", 0],
-                         "latent_image": ["8", 0]}},
-        "10": {"class_type": "VAEDecode",
-               "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
-        "11": {"class_type": "VHS_VideoCombine",
-               "inputs": {"images": ["10", 0], "frame_rate": fps,
-                          "filename_prefix": "hunyuan_t2v", "format": "video/h264-mp4",
-                          "pix_fmt": "yuv420p", "crf": 19,
-                          "loop_count": 0, "pingpong": False, "save_output": True}},
     }
+    # Optional TeaCache between ModelSamplingSD3 and KSampler — biggest win on Hunyuan
+    sampler_model = _maybe_inject_teacache(graph, ["7", 0], "hunyuan_video", steps)
+    graph["9"] = {"class_type": "KSampler",
+                  "inputs": {"seed": seed, "steps": steps, "cfg": 1.0,
+                             "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                             "model": sampler_model,
+                             "positive": ["6", 0], "negative": ["5", 0],
+                             "latent_image": ["8", 0]}}
+    graph["10"] = {"class_type": "VAEDecode",
+                   "inputs": {"samples": ["9", 0], "vae": ["3", 0]}}
+    graph["11"] = {"class_type": "VHS_VideoCombine",
+                   "inputs": {"images": ["10", 0], "frame_rate": fps,
+                              "filename_prefix": "hunyuan_t2v", "format": "video/h264-mp4",
+                              "pix_fmt": "yuv420p", "crf": 19,
+                              "loop_count": 0, "pingpong": False, "save_output": True}}
+    return graph
 
 
 def _hunyuan_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: int,
@@ -471,6 +582,9 @@ def _mochi_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: fl
 def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: int, cfg: float,
                    resolution: str = "720p", image_filename: str | None = None) -> dict[str, Any]:
     m = (model or "ltx-video").lower()
+    # LTX distilled — fast preview pipeline (8-12 steps, cfg=1, native checkpoint switch)
+    if m in ("ltx-distilled", "ltx-preview", "ltxv-distilled"):
+        return _ltx_distilled_workflow(prompt, image_filename, aspect, duration, steps or 8, resolution)
     # SVD is image-only (no prompt) — accept either name
     if m in ("svd", "svd-xt", "svd_xt"):
         if not image_filename:

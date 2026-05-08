@@ -13,8 +13,23 @@ import { tryWakeWorker } from '../../services/aiVideo/wakeWorker.js';
 import { tokenInfo as zskyTokenInfo, isConfigured as zskyConfigured } from '../../services/aiVideo/zskyAuth.js';
 import logger from '../../helpers/logger.js';
 
-const ALIASES = { gpu: 'worker', comfyui: 'worker', pc: 'local', '5090': 'local', beast: 'local' };
-const VALID = new Set(['zsky', 'worker', 'local']);
+const ALIASES = {
+  gpu: 'worker', comfyui: 'worker',
+  pc: 'local', '5090': 'local', beast: 'local',
+  // 'optimized' is a NEW provider — same physical worker (5090), but the worker
+  // applies aggressive speed defaults based on req.body.mode (preview/balanced/quality).
+  turbo: 'optimized', fast: 'optimized', '5090opt': 'optimized',
+};
+const VALID = new Set(['zsky', 'worker', 'local', 'optimized']);
+
+// Mode → (model, steps, resolution, durationCap) overrides for the optimized provider.
+// Keeps the 5090 Beast card's existing behaviour untouched; this only kicks in
+// when provider === 'optimized'.
+const OPTIMIZED_MODES = {
+  preview:  { model: 'ltx-distilled', steps: 8,  resolution: '720p', duration: 2 },
+  balanced: { model: 'wan-2.2',       steps: 14, resolution: '720p', duration: 5 },
+  quality:  { model: 'hunyuan',       steps: 20, resolution: '720p', duration: 5 },
+};
 
 function normalizeProvider(raw) {
   const p = (raw || 'zsky').toLowerCase();
@@ -36,6 +51,7 @@ export const postGenerateVideo = async (req, res) => {
       audio = true,
       imageUrl = '',
       generateCaption = true,
+      mode,           // 'preview' | 'balanced' | 'quality' — only meaningful for the optimized provider
     } = req.body || {};
 
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -48,9 +64,24 @@ export const postGenerateVideo = async (req, res) => {
       return error(res, 'Cloudinary not configured on server', 503);
     }
 
-    const opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption };
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode };
+
+    // For the 'optimized' provider, apply mode-based speed defaults BEFORE dispatch.
+    // The user can still override via explicit fields, but blank fields get the mode's recommendation.
+    if (provider === 'optimized') {
+      const overrides = OPTIMIZED_MODES[(mode || 'balanced').toLowerCase()] || OPTIMIZED_MODES.balanced;
+      opts = {
+        ...opts,
+        model: model || overrides.model,
+        steps: req.body.steps ?? overrides.steps,
+        resolution: req.body.resolution ?? overrides.resolution,
+        duration: req.body.duration ?? overrides.duration,
+      };
+    }
+
     if (provider === 'zsky') return handleZsky(req, res, opts);
     if (provider === 'local') return handleAsyncWorker(req, res, opts, 'local');
+    if (provider === 'optimized') return handleAsyncWorker(req, res, opts, 'local');   // same physical worker
     return handleAsyncWorker(req, res, opts, 'worker');
   } catch (err) {
     logger.error('AI video generate failed', err.message);
