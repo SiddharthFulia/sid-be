@@ -204,7 +204,11 @@ def process_job(client: httpx.Client, job: dict[str, Any]) -> None:
     )
     report_log(client, job_id, f"⏱ ETA ~{eta}s ({nice_name})")
     if os.getenv("ENABLE_TEACACHE", "0").strip().lower() in ("1", "true", "yes"):
-        report_log(client, job_id, "⚡ TeaCache acceleration: ON")
+        # TeaCache supports Hunyuan + Wan 2.1, but NOT Wan 2.2 5B and not LTX (in
+        # this version of the welltop-cn fork). Surface only when we actually splice.
+        if model in ("hunyuan", "hunyuan-video", "hunyuan-i2v",
+                     "wan-2.1", "wan-2.1-i2v"):
+            report_log(client, job_id, "⚡ TeaCache acceleration: ON")
     if os.getenv("SAGE_ATTENTION", "0").strip().lower() in ("1", "true", "yes"):
         report_log(client, job_id, "⚡ SageAttention: ON")
 

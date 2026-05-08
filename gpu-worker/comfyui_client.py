@@ -27,14 +27,29 @@ _CLIENT_ID = str(uuid.uuid4())
 # ── Cache acceleration injection ──────────────────────────────────────────
 # When the user has installed ComfyUI-TeaCache (custom node by welltop-cn) and
 # sets ENABLE_TEACACHE=1, we splice a TeaCache node between the model patcher
-# and the KSampler. ~2× speedup on Wan/Hunyuan with mild quality loss.
-# Workflows call _maybe_inject_teacache(graph, model_node_ref, model_type) and
-# get back the new model ref — if TeaCache isn't enabled, returns the original.
+# and the KSampler. Workflows call _maybe_inject_teacache(graph, model_node_ref,
+# model_type) and get back the new model ref — if TeaCache isn't enabled OR the
+# model isn't in TeaCache's supported list, returns the original ref unchanged.
+#
+# Supported model_type strings (must match TeaCache's INPUT_TYPES list exactly):
+#   flux, flux-kontext, ltxv, lumina_2, hunyuan_video, hidream_*, wan2.1_*
+# NOT supported (as of welltop-cn fork latest): wan2.2_* (any variant).
+SUPPORTED_TEACACHE_TYPES = {
+    "flux", "flux-kontext", "ltxv", "lumina_2", "hunyuan_video",
+    "hidream_i1_full", "hidream_i1_dev", "hidream_i1_fast",
+    "wan2.1_t2v_1.3B", "wan2.1_t2v_14B",
+    "wan2.1_i2v_480p_14B", "wan2.1_i2v_720p_14B",
+    "wan2.1_t2v_1.3B_ret_mode", "wan2.1_t2v_14B_ret_mode",
+    "wan2.1_i2v_480p_14B_ret_mode", "wan2.1_i2v_720p_14B_ret_mode",
+}
+
+# rel_l1_thresh — higher = faster but worse quality. TeaCache default is 0.4.
 TEACACHE_THRESHOLDS = {
     "ltxv":              0.10,
-    "wan2.1_t2v_1.3B":   0.20,
-    "wan2.1_i2v_480p_14B": 0.20,
-    "wan2.2_ti2v_5B":    0.18,
+    "wan2.1_t2v_1.3B":   0.30,
+    "wan2.1_t2v_14B":    0.30,
+    "wan2.1_i2v_480p_14B": 0.25,
+    "wan2.1_i2v_720p_14B": 0.25,
     "hunyuan_video":     0.15,
 }
 
@@ -43,13 +58,20 @@ def _teacache_enabled() -> bool:
     return os.getenv("ENABLE_TEACACHE", "").strip().lower() in ("1", "true", "yes")
 
 
-def _maybe_inject_teacache(graph: dict[str, Any], model_ref: list, model_type: str,
+def _maybe_inject_teacache(graph: dict[str, Any], model_ref: list, model_type: str | None,
                            steps: int) -> list:
-    """Splice a TeaCache node before the KSampler if the user has it enabled."""
+    """Splice a TeaCache node before the KSampler if the user has it enabled
+    AND the model is in TeaCache's supported list. Returns the (possibly new)
+    model ref the KSampler should use."""
     if not _teacache_enabled():
         return model_ref
+    if model_type is None or model_type not in SUPPORTED_TEACACHE_TYPES:
+        # Caller asked for caching but TeaCache doesn't know this model.
+        # Silently fall back to direct sampling — the BE log already mentions
+        # TeaCache; we don't surface the skip per-job to avoid noise.
+        return model_ref
     threshold = TEACACHE_THRESHOLDS.get(model_type, 0.15)
-    # Use a high node id we know isn't taken (workflows use 1-13 typically)
+    # Use a high node id we know isn't taken (workflows use 1-13 typically).
     tc_id = "200"
     graph[tc_id] = {
         "class_type": "TeaCache",
@@ -57,7 +79,9 @@ def _maybe_inject_teacache(graph: dict[str, Any], model_ref: list, model_type: s
             "model": model_ref,
             "model_type": model_type,
             "rel_l1_thresh": threshold,
-            "max_skip_steps": max(1, steps // 4),
+            "start_percent": 0.0,
+            "end_percent": 1.0,
+            "cache_device": "cuda",
         },
     }
     return [tc_id, 0]
@@ -204,7 +228,7 @@ def _wan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: 
     # Quantize to nearest 4n+1 (Wan latent constraint)
     frames = ((desired - 1) // 4) * 4 + 1
     seed = random.randint(1, 1_000_000_000)
-    return {
+    graph: dict[str, Any] = {
         "1": {"class_type": "UNETLoader",
               "inputs": {"unet_name": "wan2.1_t2v_1.3B_fp16.safetensors", "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader",
@@ -222,20 +246,24 @@ def _wan_t2v_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: 
                          "clip": ["2", 0]}},
         "6": {"class_type": "EmptyHunyuanLatentVideo",
               "inputs": {"width": width, "height": height, "length": frames, "batch_size": 1}},
-        "7": {"class_type": "KSampler",
-              "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
-                         "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
-                         "model": ["10", 0],
-                         "positive": ["4", 0], "negative": ["5", 0],
-                         "latent_image": ["6", 0]}},
-        "8": {"class_type": "VAEDecode",
-              "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
-        "9": {"class_type": "VHS_VideoCombine",
-              "inputs": {"images": ["8", 0], "frame_rate": fps,
-                         "filename_prefix": "wan_video", "format": "video/h264-mp4",
-                         "pix_fmt": "yuv420p", "crf": 19,
-                         "loop_count": 0, "pingpong": False, "save_output": True}},
     }
+    # Optional TeaCache between ModelSamplingSD3 and KSampler — Wan 2.1 1.3B IS
+    # in TeaCache's supported list (unlike Wan 2.2).
+    sampler_model = _maybe_inject_teacache(graph, ["10", 0], "wan2.1_t2v_1.3B", steps)
+    graph["7"] = {"class_type": "KSampler",
+                  "inputs": {"seed": seed, "steps": steps, "cfg": cfg,
+                             "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
+                             "model": sampler_model,
+                             "positive": ["4", 0], "negative": ["5", 0],
+                             "latent_image": ["6", 0]}}
+    graph["8"] = {"class_type": "VAEDecode",
+                  "inputs": {"samples": ["7", 0], "vae": ["3", 0]}}
+    graph["9"] = {"class_type": "VHS_VideoCombine",
+                  "inputs": {"images": ["8", 0], "frame_rate": fps,
+                             "filename_prefix": "wan_video", "format": "video/h264-mp4",
+                             "pix_fmt": "yuv420p", "crf": 19,
+                             "loop_count": 0, "pingpong": False, "save_output": True}}
+    return graph
 
 
 def _ltx_i2v_workflow(prompt: str, image_filename: str, aspect: str, duration: int,
@@ -384,8 +412,9 @@ def _wan22_workflow(prompt: str, image_filename: str | None, aspect: str, durati
     }
     if is_i2v:
         graph["56"] = {"class_type": "LoadImage", "inputs": {"image": image_filename}}
-    # Optional TeaCache between ModelSamplingSD3 and KSampler (~2× faster on Wan)
-    sampler_model = _maybe_inject_teacache(graph, ["48", 0], "wan2.2_ti2v_5B", steps)
+    # Wan 2.2 5B is NOT in TeaCache's supported model list (welltop-cn fork only
+    # ships Wan 2.1 entries). Pass None so injection is skipped cleanly.
+    sampler_model = _maybe_inject_teacache(graph, ["48", 0], None, steps)
     graph["3"] = {"class_type": "KSampler",
                   "inputs": {"seed": seed, "steps": steps, "cfg": max(cfg, 5.0),
                              "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0,
