@@ -560,7 +560,7 @@ export const postImageEnhance = async (req, res) => {
     let sourceUrl = imageUrl || null;
     if (!sourceUrl && dataUrl) {
       const upload = await cdnUpload(dataUrl);
-      sourceUrl = upload.imageUrl;
+      sourceUrl = upload.url;
     }
 
     const job = createImage({
@@ -614,8 +614,8 @@ async function runCloudEnhance(job) {
 
   updateImage(job.imageId, {
     status: 'completed',
-    outputUrl: upload.imageUrl,
-    bytes: out.base64.length,
+    outputUrl: upload.url,
+    bytes: upload.bytes || out.base64.length,
     completedAt: new Date().toISOString(),
   });
 }
