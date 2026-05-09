@@ -130,7 +130,10 @@ export async function enhanceImageGemini(imageBase64, prompt) {
     base64Data = imageBase64.split(',')[1];
   }
 
-  // gemini-2.5-flash-image supports both text-out and image-out; we want image-out.
+  // gemini-2.5-flash-image supports both text-out and image-out. By default
+  // it returns text describing the requested edit; we MUST request the IMAGE
+  // modality explicitly via generationConfig.responseModalities, otherwise the
+  // response comes back as a text description and we get "no image data".
   const modelId = 'gemini-2.5-flash-image';
   const res = await fetch(`${BASE_URL}/models/${modelId}:generateContent?key=${GEMINI_API_KEY}`, {
     method: 'POST',
@@ -142,6 +145,9 @@ export async function enhanceImageGemini(imageBase64, prompt) {
           { text: prompt },
         ],
       }],
+      generationConfig: {
+        responseModalities: ['IMAGE'],
+      },
     }),
   });
 

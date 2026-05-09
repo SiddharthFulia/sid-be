@@ -86,7 +86,15 @@ def get_next_job(client: httpx.Client) -> dict[str, Any] | None:
 
 def get_job_by_id(client: httpx.Client, job_id: str) -> dict[str, Any] | None:
     """Fetch a single inflight job by ID. Used by the RabbitMQ path: the broker
-    delivers just the jobId; we look up the full payload from the BE."""
+    delivers just the jobId; we look up the full payload from the BE.
+
+    Returns None when the job has already finished (completed or failed) so the
+    caller ACKs the broker message and moves on without re-processing. Without
+    this guard, a duplicate broker delivery (heartbeat blip, network jitter)
+    would be mis-served by the BE's /status fallback to the Cloudinary record,
+    which lacks model/steps fields → process_job defaults to ltx-video+30 →
+    wasted re-render.
+    """
     if not job_id:
         return None
     try:
@@ -99,6 +107,12 @@ def get_job_by_id(client: httpx.Client, job_id: str) -> dict[str, Any] | None:
         body = r.json()
         data = body.get("data")
         if not data:
+            return None
+        # Active jobs always carry status='queued' or 'processing'. The /status
+        # endpoint's Cloudinary fallback (for completed jobs) returns a video
+        # record with no status. Treat anything that isn't an active status as
+        # "no job to do" so the broker pickup branch ACKs cleanly.
+        if data.get("status") not in ("queued", "processing"):
             return None
         # Normalize to the shape get_next_job() returns (BE's status endpoint
         # returns the same fields under different top-level keys).
@@ -497,12 +511,14 @@ def main() -> None:
                 if broker_msg:
                     job_id = broker_msg.get("jobId") or broker_msg.get("videoId")
                     # The broker only carried a *trigger*; the full job lives
-                    # in inflight-jobs.json on the BE. Fetch it via HTTP.
+                    # in SQLite on the BE. Fetch it via HTTP.
                     job = get_job_by_id(client, job_id) if job_id else None
                     if not job:
-                        # Job was deleted/expired between publish and pickup — drop it.
-                        print(f"[broker] {job_id}: not found on BE, NACK to DLQ")
-                        broker.nack_to_dlq(delivery_tag)
+                        # Most common reason: this is a duplicate delivery of a
+                        # job we already finished (heartbeat blip during ack).
+                        # ACK and skip — DLQ would falsely flag it as a failure.
+                        print(f"[broker] {job_id}: already complete or missing — ACK + skip")
+                        broker.ack(delivery_tag)
                     else:
                         try:
                             process_job(client, job)
