@@ -161,13 +161,24 @@ export async function enhanceImageGemini(imageBase64, prompt) {
   const parts = data.candidates?.[0]?.content?.parts || [];
   const imagePart = parts.find(p => p.inlineData?.data);
   if (!imagePart) {
-    // Fall back to the text response so the caller can show *something*.
+    // Surface the actual reason. Possible causes (with diagnostic clues):
+    //   • finishReason='SAFETY'         — prompt or image tripped a filter
+    //   • finishReason='RECITATION'     — copyright filter
+    //   • parts has only text           — model declined to output image
+    //   • promptFeedback.blockReason    — input was rejected before generation
     const textPart = parts.find(p => p.text);
-    throw new Error(
-      textPart?.text
-        ? `Gemini returned text instead of an image: ${textPart.text.slice(0, 200)}`
-        : 'Gemini returned no image data'
-    );
+    const finish = data.candidates?.[0]?.finishReason;
+    const block = data.promptFeedback?.blockReason;
+    const safetyRatings = data.candidates?.[0]?.safetyRatings || data.promptFeedback?.safetyRatings;
+    const detail = [
+      finish && `finishReason=${finish}`,
+      block && `blockReason=${block}`,
+      textPart?.text && `text="${textPart.text.slice(0, 200)}"`,
+      safetyRatings?.length && `safety=${JSON.stringify(safetyRatings).slice(0, 200)}`,
+    ].filter(Boolean).join(' | ');
+    throw new Error(detail
+      ? `Gemini returned no image — ${detail}`
+      : `Gemini returned no image data (raw: ${JSON.stringify(data).slice(0, 400)})`);
   }
   return {
     base64: imagePart.inlineData.data,
