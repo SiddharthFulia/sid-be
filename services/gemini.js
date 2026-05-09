@@ -130,12 +130,12 @@ export async function enhanceImageGemini(imageBase64, prompt) {
     base64Data = imageBase64.split(',')[1];
   }
 
-  // The image-out model is `gemini-2.5-flash-image-preview` (the non-preview
-  // alias `gemini-2.5-flash-image` returns 404 / text-only on the v1beta API).
-  // We MUST list BOTH `TEXT` and `IMAGE` in responseModalities — `IMAGE` alone
-  // makes Gemini reject the request with "Image-only output isn't supported";
-  // `TEXT` alone returns a description instead of pixels (the bug we hit).
-  const modelId = 'gemini-2.5-flash-image-preview';
+  // The image-out model is `gemini-2.5-flash-image` on v1beta (the `-preview`
+  // suffix returns 404). We MUST list BOTH `TEXT` and `IMAGE` in
+  // responseModalities — `IMAGE` alone makes Gemini reject the request with
+  // "Image-only output isn't supported"; `TEXT` alone returns a description
+  // instead of pixels (the original "no image data" bug).
+  const modelId = 'gemini-2.5-flash-image';
   const res = await fetch(`${BASE_URL}/models/${modelId}:generateContent?key=${GEMINI_API_KEY}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
