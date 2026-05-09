@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import path from 'path';
 import routes from './routes/index.js';
 import { NODE_ENV, FRONTEND_URL } from './helpers/constants.js';
@@ -11,6 +12,22 @@ const corsOptions = NODE_ENV === 'production'
   ? { origin: [FRONTEND_URL, 'https://www.siddharthfulia.com', 'http://localhost:3000'], methods: ['GET', 'POST', 'DELETE'] }
   : { origin: true };
 app.use(cors(corsOptions));
+
+// Gzip / deflate response compression. Browsers send `Accept-Encoding: gzip,
+// deflate, br` automatically and the middleware picks the best one. Heavy
+// JSON endpoints (job logs with 80 entries, video lists, queue snapshots)
+// shrink ~70-85% on the wire — saves bandwidth on the 1.5s status poll and
+// makes the FE feel snappier. Tiny responses (<1 KB) stay uncompressed
+// (compression overhead would dominate). Set threshold=1024 to skip them.
+app.use(compression({
+  threshold: 1024,
+  filter: (req, res) => {
+    // Don't compress mp4/image streams — Cloudinary already serves those
+    // pre-compressed and re-compressing hurts more than it helps.
+    if (res.getHeader('Content-Type')?.toString().match(/^(video|image)\//)) return false;
+    return compression.filter(req, res);
+  },
+}));
 
 // Body parsing
 app.use(express.json({ limit: '50mb' }));

@@ -17,6 +17,7 @@ function normalizeRole(role) {
 import logger from '../../helpers/logger.js';
 import { recordFailure } from '../../services/aiVideo/failureStore.js';
 import { recordVideo } from '../../services/aiVideo/videoStore.js';
+import { generateGroqCaption } from '../../services/aiVideo/caption.js';
 
 const WORKER_FILES_DIR = path.join(process.cwd(), 'gpu-worker');
 const ALLOWED_FILES = new Set([
@@ -98,6 +99,19 @@ export const postJobComplete = async (req, res) => {
   const job = await getInflightJob(jobId);
   if (!job) return error(res, 'Job not found', 404);
 
+  // Caption generation — the worker doesn't have the Groq key, so the BE
+  // does it here using the job's original prompt. ZSky already does this
+  // sync; for the 5090/Lightning lanes this fills the gap.
+  // Fast (~200ms via Groq llama-3.1-8b-instant) so we run it inline.
+  let caption = req.body?.caption ?? null;
+  if (!caption && job.generateCaption !== false) {
+    try {
+      caption = await generateGroqCaption(job.prompt);
+    } catch (e) {
+      logger.warn(`Groq caption failed for ${jobId}: ${e.message}`);
+    }
+  }
+
   // Mirror the completed video into our local SQLite cache so the Library
   // tab can paginate / filter without paying the Cloudinary Search-API tax.
   // Failures here are non-fatal — Cloudinary remains the source of truth.
@@ -114,18 +128,22 @@ export const postJobComplete = async (req, res) => {
       resolution: job.resolution,
       style: job.style,
       audio: !!job.audio,
-      caption: req.body?.caption ?? null,
+      caption,
       bytes: req.body?.bytes ?? null,
       createdAt: job.createdAt,
-      cloudinaryContext: { prompt: job.prompt, provider: job.originalProvider || job.provider },
+      cloudinaryContext: {
+        prompt: job.prompt,
+        provider: job.originalProvider || job.provider,
+        caption: caption || '',
+      },
     });
   } catch (e) {
     logger.error('recordVideo failed (non-fatal)', e.message);
   }
 
   await removeInflightJob(jobId);
-  logger.info(`Job ${jobId} completed by worker → ${videoUrl}`);
-  return success(res, { ok: true, videoId: jobId, videoUrl });
+  logger.info(`Job ${jobId} completed by worker → ${videoUrl}${caption ? ' (with caption)' : ''}`);
+  return success(res, { ok: true, videoId: jobId, videoUrl, caption });
 };
 
 export const postJobFailed = async (req, res) => {

@@ -106,7 +106,7 @@ async function ensureChannel() {
       await channel.assertQueue(QUEUE_FAST, workQueueOpts);
       await channel.assertQueue(QUEUE_QUALITY, workQueueOpts);
 
-      logger.info(`RabbitMQ connected — queues: ${QUEUE_FAST}, ${QUEUE_QUALITY}, ${QUEUE_FAILED} (DLQ)`);
+      logger.info('RabbitMQ ready — both video queues connected');
       return channel;
     } catch (err) {
       logger.error('RabbitMQ connect failed (workers will fall back to HTTP polling)', err.message);
@@ -170,15 +170,10 @@ process.on('beforeExit', () => gracefulShutdown('beforeExit'));
 // the worker's HTTP polling path still works without the broker.
 if (isConfigured()) {
   ensureChannel()
-    .then((ch) => {
-      if (ch) {
-        logger.info(
-          `RabbitMQ publisher ready · publishing to ${QUEUE_FAST} (5090 Optimized) ` +
-          `+ ${QUEUE_QUALITY} (5090 Beast) · DLQ ${QUEUE_FAILED}`
-        );
-      }
-    })
-    .catch((err) => logger.warn(`RabbitMQ eager-connect failed: ${err.message}`));
+    // ensureChannel() already logs "RabbitMQ ready — both video queues connected"
+    // on success. We just swallow the promise here; warnings are logged inside.
+    .then(() => {})
+    .catch(() => {});
 } else {
   logger.info('RabbitMQ disabled (RABBITMQ_URL not set) — workers will use HTTP polling');
 }

@@ -357,6 +357,91 @@ export const getJobQueue = async (req, res) => {
   }
 };
 
+// ─── Unified jobs feed (queued + processing + completed + failed) ──
+// Single endpoint for the FE Jobs tab. Reads straight from SQLite (jobs +
+// videos + failures) so it's a few ms even with paging — no Cloudinary
+// Search API on the hot path.
+//
+// Query params:
+//   status=queued|processing|completed|failed|all   (default 'all')
+//   page=N, limit=N (default 1, 24)
+//
+// Response items have a unified shape regardless of source table:
+//   { videoId, status, lane, model, prompt, duration, aspectRatio,
+//     resolution, videoUrl?, error?, createdAt, completedAt? }
+export const getJobsFeed = async (req, res) => {
+  try {
+    const status = (req.query.status || 'all').toLowerCase();
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
+    const offset = (page - 1) * limit;
+
+    // Lazy-load to avoid circular imports.
+    const { db } = await import('../../services/aiVideo/db.js');
+
+    // We UNION ALL three sources, then sort by ts and page. Each row carries
+    // a normalized `status` and `ts` (ms epoch) so the FE can render uniformly.
+    const sql = `
+      WITH unified AS (
+        SELECT videoId, status,
+               COALESCE(originalProvider, provider) AS lane,
+               model, prompt, duration, aspectRatio, resolution,
+               videoUrl, error, createdAt,
+               COALESCE(completedAt, startedAt, createdAt) AS ts,
+               'jobs' AS src
+          FROM jobs
+        UNION ALL
+        SELECT videoId, 'completed' AS status,
+               provider AS lane,
+               model, prompt, duration, aspectRatio, resolution,
+               videoUrl, NULL AS error, createdAt,
+               createdAt AS ts,
+               'videos' AS src
+          FROM videos
+        UNION ALL
+        SELECT videoId, 'failed' AS status,
+               originalProvider AS lane,
+               model, prompt, duration, aspectRatio, resolution,
+               NULL AS videoUrl, error, createdAt,
+               failedAt AS ts,
+               'failures' AS src
+          FROM failures
+      )
+      SELECT * FROM unified
+      ${status === 'all' ? '' : 'WHERE status = @status'}
+      ORDER BY ts DESC
+      LIMIT @limit OFFSET @offset
+    `;
+    const countSql = `
+      WITH unified AS (
+        SELECT videoId, status FROM jobs
+        UNION ALL SELECT videoId, 'completed' FROM videos
+        UNION ALL SELECT videoId, 'failed'    FROM failures
+      )
+      SELECT COUNT(*) AS n FROM unified
+      ${status === 'all' ? '' : 'WHERE status = @status'}
+    `;
+
+    const items = db.prepare(sql).all({ status, limit, offset });
+    const total = db.prepare(countSql).get({ status }).n;
+
+    return success(res, {
+      items, total, page, limit,
+      pages: Math.max(1, Math.ceil(total / limit)),
+      counts: db.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM jobs WHERE status='queued')     AS queued,
+          (SELECT COUNT(*) FROM jobs WHERE status='processing') AS processing,
+          (SELECT COUNT(*) FROM videos)                          AS completed,
+          (SELECT COUNT(*) FROM failures)                        AS failed
+      `).get(),
+    });
+  } catch (err) {
+    logger.error('Jobs feed failed', err.message);
+    return error(res, err.message);
+  }
+};
+
 // ─── Failures audit log ────────────────────────────────────────
 // Permanently-failed jobs land here (worker NACKs without requeue, or
 // max-attempts exceeded). The FE Failures tab reads this endpoint.
