@@ -22,6 +22,7 @@ import {
 } from '../../services/aiVideo/enhancedImageStore.js';
 import {
   isCloudinaryConfigured as isCdnConfigured, uploadSourceImage as cdnUpload,
+  deleteImageByUrl as cdnDeleteImage,
 } from '../../services/aiVideo/cloudinaryStore.js';
 
 const ALIASES = {
@@ -600,6 +601,17 @@ export const postImageEnhance = async (req, res) => {
 
 // Background processor for cloud (Gemini) jobs. Runs out-of-band; status is
 // the only way the FE knows we're working on it.
+//
+// Auto-retry strategy: Gemini often refuses heavy identity-preservation
+// prompts (especially on portraits) with `IMAGE_OTHER` or `SAFETY`. When that
+// happens we retry once with a stripped-down generic enhancement prompt that
+// the model accepts. The user still gets *an* enhancement, just less
+// instruction-heavy than the preset they picked.
+const FALLBACK_PROMPT = (
+  'Enhance the image quality. Improve sharpness, lighting, contrast, and ' +
+  'fine details. Keep the same composition, colors, and overall scene.'
+);
+
 async function runCloudEnhance(job) {
   // Fetch source as base64 for Gemini
   const imgRes = await fetch(job.sourceUrl);
@@ -608,7 +620,17 @@ async function runCloudEnhance(job) {
   const mime = imgRes.headers.get('content-type') || 'image/jpeg';
   const inputBase64 = `data:${mime};base64,${buf.toString('base64')}`;
 
-  const out = await enhanceImageGemini(inputBase64, job.prompt);
+  let out;
+  try {
+    out = await enhanceImageGemini(inputBase64, job.prompt);
+  } catch (e) {
+    const msg = e.message || '';
+    const refused = /IMAGE_OTHER|SAFETY|RECITATION|blockReason/i.test(msg);
+    if (!refused) throw e;
+    logger.warn(`Gemini refused first try (${msg.slice(0, 120)}) — retrying with softened prompt`);
+    out = await enhanceImageGemini(inputBase64, FALLBACK_PROMPT);
+  }
+
   const enhancedDataUrl = `data:${out.mimeType};base64,${out.base64}`;
   const upload = await cdnUpload(enhancedDataUrl);
 
@@ -650,14 +672,19 @@ export const getImageList = (req, res) => {
   }
 };
 
-// Hard delete — removes the SQLite row + the Cloudinary asset(s) if present.
+// Hard delete — removes the SQLite row + both Cloudinary assets if present.
 export const deleteImage = async (req, res) => {
   try {
     const row = getImage(req.params.imageId);
     if (!row) return error(res, 'Not found', 404);
     deleteImageRow(req.params.imageId);
-    // Cloudinary cleanup is fire-and-forget — Cloudinary auto-evicts orphans
-    // in their free tier policy, no need to block the response on it.
+    // Cloudinary deletes run in parallel + fire-and-forget so the response is
+    // fast. Both failure modes (404/403/network) are non-fatal — orphans get
+    // auto-evicted on the free tier eventually.
+    Promise.all([
+      row.sourceUrl ? cdnDeleteImage(row.sourceUrl) : null,
+      row.outputUrl ? cdnDeleteImage(row.outputUrl) : null,
+    ]).catch(e => logger.warn(`Cloudinary cleanup partial: ${e.message}`));
     return success(res, { ok: true });
   } catch (err) {
     return error(res, err.message);

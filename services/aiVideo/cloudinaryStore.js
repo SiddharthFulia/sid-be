@@ -251,3 +251,26 @@ export async function deleteVideo(videoId) {
   const r = await cloudinary.uploader.destroy(publicId, { resource_type: 'video' });
   return { ok: r?.result === 'ok' || r?.result === 'not found', result: r?.result };
 }
+
+/**
+ * Delete an image asset by its full Cloudinary URL. Used by the Image
+ * Enhancer's delete endpoint — we don't store the public_id in our SQLite
+ * row, only the URL, so we parse it back out. Failures are non-fatal —
+ * Cloudinary auto-evicts orphans on the free tier, so a 404/403 here is
+ * fine.
+ */
+export async function deleteImageByUrl(url) {
+  if (!url) return { ok: true, result: 'noop' };
+  // Extract everything after `/upload/` and strip the version prefix
+  // (`v1234567890/`) and the file extension. What's left is the publicId.
+  const m = url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.\w+)?(?:\?.*)?$/);
+  if (!m) return { ok: false, result: 'unparseable URL' };
+  const publicId = m[1];
+  configure();
+  try {
+    const r = await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+    return { ok: r?.result === 'ok' || r?.result === 'not found', result: r?.result };
+  } catch (e) {
+    return { ok: false, result: e.message };
+  }
+}
