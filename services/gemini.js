@@ -108,3 +108,64 @@ export async function analyzeImageGemini(imageBase64, prompt = 'Describe this im
     provider: 'gemini',
   };
 }
+
+/**
+ * Image enhancement / transformation via Gemini 2.5 Flash Image (image-out model).
+ * Takes an input image (base64) + an instruction prompt, returns enhanced image bytes.
+ *
+ * The "image" model variant supports inline image output in addition to text — we
+ * pluck the first inlineData part from the response.
+ *
+ * Used by /api/image-enhance for the "Image Enhancer" page (cinematic upscale,
+ * 4K detail recovery, Hong Kong night film look, etc.).
+ */
+export async function enhanceImageGemini(imageBase64, prompt) {
+  if (!GEMINI_API_KEY) throw new Error('Gemini API key not configured');
+
+  let base64Data = imageBase64;
+  let mimeType = 'image/jpeg';
+  if (imageBase64.includes(',')) {
+    const match = imageBase64.match(/^data:(image\/\w+);base64,/);
+    if (match) mimeType = match[1];
+    base64Data = imageBase64.split(',')[1];
+  }
+
+  // gemini-2.5-flash-image supports both text-out and image-out; we want image-out.
+  const modelId = 'gemini-2.5-flash-image';
+  const res = await fetch(`${BASE_URL}/models/${modelId}:generateContent?key=${GEMINI_API_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { inlineData: { mimeType, data: base64Data } },
+          { text: prompt },
+        ],
+      }],
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Gemini Image error: ${res.status}`);
+  }
+
+  const data = await res.json();
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find(p => p.inlineData?.data);
+  if (!imagePart) {
+    // Fall back to the text response so the caller can show *something*.
+    const textPart = parts.find(p => p.text);
+    throw new Error(
+      textPart?.text
+        ? `Gemini returned text instead of an image: ${textPart.text.slice(0, 200)}`
+        : 'Gemini returned no image data'
+    );
+  }
+  return {
+    base64: imagePart.inlineData.data,
+    mimeType: imagePart.inlineData.mimeType || 'image/png',
+    model: modelId,
+    provider: 'gemini',
+  };
+}

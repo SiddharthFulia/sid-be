@@ -125,6 +125,33 @@ export async function uploadVideoBuffer(buffer, videoId, meta = {}, opts = {}) {
   });
 }
 
+/**
+ * Upload a raw audio buffer (mp3 / wav / ogg). Used by /api/music/generate
+ * to persist HF Inference output. Returns { url, publicId, bytes }.
+ */
+export async function uploadAudioBuffer(buffer, mimeType = 'audio/mpeg') {
+  configure();
+  const ext = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : 'mp3';
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        // Cloudinary stores audio under the 'video' resource_type bucket.
+        resource_type: 'video',
+        folder: `${FOLDER}/audio`,
+        public_id: `music_${Date.now()}`,
+        format: ext,
+        context: { kind: 'music', createdAt: new Date().toISOString() },
+        tags: ['music', 'standalone'],
+      },
+      (err, res) => {
+        if (err) return reject(err);
+        resolve({ url: res.secure_url, publicId: res.public_id, bytes: res.bytes });
+      },
+    );
+    stream.end(buffer);
+  });
+}
+
 // Build a Cloudinary thumbnail URL from a stored video URL — used by the FE
 // to render Library cards without preloading actual MP4s.
 export function thumbnailFromVideoUrl(videoUrl, opts = {}) {

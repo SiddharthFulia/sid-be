@@ -15,6 +15,8 @@ function normalizeRole(role) {
   return VALID_ROLES.has(r) ? r : 'worker';
 }
 import logger from '../../helpers/logger.js';
+import { recordFailure } from '../../services/aiVideo/failureStore.js';
+import { recordVideo } from '../../services/aiVideo/videoStore.js';
 
 const WORKER_FILES_DIR = path.join(process.cwd(), 'gpu-worker');
 const ALLOWED_FILES = new Set([
@@ -72,7 +74,10 @@ export const getNextJob = async (req, res) => {
     public_id: job.videoId,
     context: {
       prompt: job.prompt,
-      provider: role,
+      // originalProvider preserves the FE-facing label ('optimized' vs 'local')
+      // so the Library can filter videos by which 5090 lane they came from,
+      // even though both lanes share the same worker role.
+      provider: job.originalProvider || role,
       duration: String(job.duration || 5),
       aspectRatio: job.aspectRatio || '9:16',
       resolution: job.resolution || '720p',
@@ -80,7 +85,7 @@ export const getNextJob = async (req, res) => {
       audio: job.audio ? '1' : '0',
       createdAt: job.createdAt,
     },
-    tags: [role, job.aspectRatio || ''].filter(Boolean),
+    tags: [job.originalProvider || role, job.aspectRatio || ''].filter(Boolean),
   });
 };
 
@@ -92,6 +97,31 @@ export const postJobComplete = async (req, res) => {
   // Worker has already uploaded to Cloudinary. We just clear the in-flight record.
   const job = await getInflightJob(jobId);
   if (!job) return error(res, 'Job not found', 404);
+
+  // Mirror the completed video into our local SQLite cache so the Library
+  // tab can paginate / filter without paying the Cloudinary Search-API tax.
+  // Failures here are non-fatal — Cloudinary remains the source of truth.
+  try {
+    recordVideo({
+      videoId: jobId,
+      publicId: jobId,
+      videoUrl,
+      prompt: job.prompt,
+      provider: job.originalProvider || job.provider,
+      model: job.model,
+      duration: job.duration,
+      aspectRatio: job.aspectRatio,
+      resolution: job.resolution,
+      style: job.style,
+      audio: !!job.audio,
+      caption: req.body?.caption ?? null,
+      bytes: req.body?.bytes ?? null,
+      createdAt: job.createdAt,
+      cloudinaryContext: { prompt: job.prompt, provider: job.originalProvider || job.provider },
+    });
+  } catch (e) {
+    logger.error('recordVideo failed (non-fatal)', e.message);
+  }
 
   await removeInflightJob(jobId);
   logger.info(`Job ${jobId} completed by worker → ${videoUrl}`);
@@ -112,12 +142,23 @@ export const postJobFailed = async (req, res) => {
   const job = await updateInflightJob(jobId, {
     status: shouldRequeue ? 'queued' : 'failed',
     error: errMsg || 'unknown error',
+    attemptCount: attemptCount + 1,
     completedAt: shouldRequeue ? null : new Date().toISOString(),
     workerId: shouldRequeue ? null : existing.workerId,
     startedAt: shouldRequeue ? null : existing.startedAt,
   });
 
-  logger.warn(`Job ${jobId} failed (attempt ${attemptCount}/2): ${errMsg}. ${shouldRequeue ? 'Requeued.' : 'Final.'}`);
+  // Permanent failures land in the audit table so the FE Failures tab can
+  // show them (and we keep history even if the job row is later evicted).
+  if (!shouldRequeue) {
+    try {
+      recordFailure({ job: existing, error: errMsg, workerId: existing.workerId });
+    } catch (e) {
+      logger.error('Failed to record failure audit row', e.message);
+    }
+  }
+
+  logger.warn(`Job ${jobId} failed (attempt ${attemptCount + 1}/3): ${errMsg}. ${shouldRequeue ? 'Requeued.' : 'Final.'}`);
   return success(res, job);
 };
 

@@ -1,44 +1,47 @@
-// Lightweight in-flight job tracker — ONLY for queued/processing/failed worker jobs.
-// Completed videos live on Cloudinary (see cloudinaryStore.js) and are NOT recorded here.
-//
-// Why two stores:
-//   - Cloudinary: persistent, single source of truth for completed videos
-//   - JSON file:  ephemeral, per-env, holds jobs that are mid-flight (no Cloudinary URL yet)
+// Inflight-job store. Same API as the original JSON-backed module — every
+// caller (controllers/v1/aiVideo.js, gpuWorker.js) keeps working unchanged.
+// Now persisted in SQLite (services/aiVideo/db.js) for proper indexes,
+// concurrent reads while a worker streams /job-progress updates, and
+// O(log n) status lookups instead of O(n) full-file rewrites.
 
-import fs from 'fs/promises';
-import path from 'path';
 import { randomUUID } from 'crypto';
-
-const ROOT = process.cwd();
-const META_DIR = path.join(ROOT, 'data');
-const JOBS_FILE = path.join(META_DIR, 'inflight-jobs.json');
-
-async function ensure() {
-  await fs.mkdir(META_DIR, { recursive: true });
-  try { await fs.access(JOBS_FILE); }
-  catch { await fs.writeFile(JOBS_FILE, '[]', 'utf8'); }
-}
+import { db, jobToRow, rowToJob } from './db.js';
 
 export function newVideoId() {
   return `vid_${Date.now()}_${randomUUID().slice(0, 8)}`;
 }
 
-async function readAll() {
-  await ensure();
-  try {
-    const raw = await fs.readFile(JOBS_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
-}
+const insertStmt = db.prepare(`INSERT INTO jobs (
+  videoId, provider, originalProvider, status, prompt, model, duration,
+  resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption,
+  attemptCount, createdAt, startedAt, completedAt, videoUrl, caption, error,
+  workerId, estimatedSeconds, progressMessage, progressStep, progressTotal, logs,
+  withMusic, musicPrompt
+) VALUES (
+  @videoId, @provider, @originalProvider, @status, @prompt, @model, @duration,
+  @resolution, @aspectRatio, @steps, @style, @audio, @imageUrl, @generateCaption,
+  @attemptCount, @createdAt, @startedAt, @completedAt, @videoUrl, @caption, @error,
+  @workerId, @estimatedSeconds, @progressMessage, @progressStep, @progressTotal, @logs,
+  @withMusic, @musicPrompt
+)`);
 
-async function writeAll(items) {
-  await ensure();
-  await fs.writeFile(JOBS_FILE, JSON.stringify(items.slice(0, 200), null, 2), 'utf8');
-}
+const selectStmt   = db.prepare('SELECT * FROM jobs WHERE videoId = ?');
+const deleteStmt   = db.prepare('DELETE FROM jobs WHERE videoId = ?');
+const listAllStmt  = db.prepare('SELECT * FROM jobs ORDER BY createdAt DESC LIMIT 200');
+const nextRoleStmt = db.prepare(
+  "SELECT * FROM jobs WHERE provider = ? AND status = 'queued' ORDER BY createdAt ASC LIMIT 1"
+);
+
+const COLUMN_SET = new Set([
+  'videoId', 'provider', 'originalProvider', 'status', 'prompt', 'model',
+  'duration', 'resolution', 'aspectRatio', 'steps', 'style', 'audio',
+  'imageUrl', 'generateCaption', 'attemptCount', 'createdAt', 'startedAt',
+  'completedAt', 'videoUrl', 'caption', 'error', 'workerId',
+  'estimatedSeconds', 'progressMessage', 'progressStep', 'progressTotal',
+  'logs', 'withMusic', 'musicPrompt',
+]);
 
 export async function createInflightJob(jobData) {
-  const items = await readAll();
   const job = {
     videoId: newVideoId(),
     status: 'queued',
@@ -50,32 +53,35 @@ export async function createInflightJob(jobData) {
     caption: null,
     error: null,
     workerId: null,
+    logs: [],
     ...jobData,
   };
-  items.unshift(job);
-  await writeAll(items);
+  insertStmt.run(jobToRow(job));
   return job;
 }
 
 export async function getInflightJob(videoId) {
-  const items = await readAll();
-  return items.find(j => j.videoId === videoId) || null;
+  return rowToJob(selectStmt.get(videoId));
 }
 
 export async function updateInflightJob(videoId, patch) {
-  const items = await readAll();
-  const idx = items.findIndex(j => j.videoId === videoId);
-  if (idx === -1) return null;
-  items[idx] = { ...items[idx], ...patch };
-  await writeAll(items);
-  return items[idx];
+  const existing = rowToJob(selectStmt.get(videoId));
+  if (!existing) return null;
+  // Build a dynamic UPDATE so we only touch the columns the caller mutated.
+  // This keeps `logs` rewrites narrow and lets concurrent /job-progress
+  // writers play nicely under WAL.
+  const cols = Object.keys(patch).filter(k => COLUMN_SET.has(k));
+  if (cols.length === 0) return existing;
+  const merged = { ...existing, ...patch };
+  const row = jobToRow(merged);
+  const set = cols.map(c => `${c} = @${c}`).join(', ');
+  const params = { videoId, ...Object.fromEntries(cols.map(c => [c, row[c]])) };
+  db.prepare(`UPDATE jobs SET ${set} WHERE videoId = @videoId`).run(params);
+  return rowToJob(selectStmt.get(videoId));
 }
 
 export async function removeInflightJob(videoId) {
-  const items = await readAll();
-  const filtered = items.filter(j => j.videoId !== videoId);
-  await writeAll(filtered);
-  return items.length !== filtered.length;
+  return deleteStmt.run(videoId).changes > 0;
 }
 
 export async function getNextQueuedWorkerJob() {
@@ -83,12 +89,9 @@ export async function getNextQueuedWorkerJob() {
 }
 
 export async function getNextQueuedForRole(role) {
-  const items = await readAll();
-  return items
-    .filter(j => j.provider === role && j.status === 'queued')
-    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0] || null;
+  return rowToJob(nextRoleStmt.get(role));
 }
 
 export async function listInflightJobs() {
-  return await readAll();
+  return listAllStmt.all().map(rowToJob);
 }

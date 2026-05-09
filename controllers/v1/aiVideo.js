@@ -12,6 +12,10 @@ import { getWorkerStatus, isWorkerOnline } from '../../services/aiVideo/jobStore
 import { tryWakeWorker } from '../../services/aiVideo/wakeWorker.js';
 import { tokenInfo as zskyTokenInfo, isConfigured as zskyConfigured } from '../../services/aiVideo/zskyAuth.js';
 import logger from '../../helpers/logger.js';
+import { publishJob } from '../../services/aiVideo/messageQueue.js';
+import { listFailures } from '../../services/aiVideo/failureStore.js';
+import { enhanceImageGemini } from '../../services/gemini.js';
+import { generateMusicViaHF } from '../../services/aiVideo/musicGen.js';
 
 const ALIASES = {
   gpu: 'worker', comfyui: 'worker',
@@ -28,7 +32,10 @@ const VALID = new Set(['zsky', 'worker', 'local', 'optimized']);
 const OPTIMIZED_MODES = {
   preview:  { model: 'ltx-distilled', steps: 8,  resolution: '720p', duration: 2 },
   balanced: { model: 'wan-2.2',       steps: 14, resolution: '720p', duration: 5 },
-  quality:  { model: 'hunyuan',       steps: 20, resolution: '720p', duration: 5 },
+  // Hunyuan is the heaviest model we ship — 30 steps × ~78s/step on the 5090
+  // would mean a 40-minute job. 16 steps gives nearly identical quality and
+  // lands around 20-22 min until SageAttention/TeaCache come back online.
+  quality:  { model: 'hunyuan',       steps: 16, resolution: '720p', duration: 5 },
 };
 
 function normalizeProvider(raw) {
@@ -52,6 +59,8 @@ export const postGenerateVideo = async (req, res) => {
       imageUrl = '',
       generateCaption = true,
       mode,           // 'preview' | 'balanced' | 'quality' — only meaningful for the optimized provider
+      withMusic = false,           // 5090 lanes only: have MusicGen produce a backing track
+      musicPrompt = '',            // optional override; falls back to the video prompt if empty
     } = req.body || {};
 
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -64,28 +73,29 @@ export const postGenerateVideo = async (req, res) => {
       return error(res, 'Cloudinary not configured on server', 503);
     }
 
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode };
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt };
 
     // For the 'optimized' provider, apply mode-based speed defaults BEFORE dispatch.
     // The user can still override via explicit fields, but blank fields get the mode's recommendation.
     if (provider === 'optimized') {
       const overrides = OPTIMIZED_MODES[(mode || 'balanced').toLowerCase()] || OPTIMIZED_MODES.balanced;
-      // Force the mode's model regardless of what the FE sent (mode selector is the
-      // source of truth for this provider; stale model state from other providers
-      // would otherwise leak through, e.g. 'cinematic' from a previous ZSky session).
+      // Mode is the SOLE source of truth for the optimized lane. The FE always
+      // sends defaults (steps=30, resolution=720p) so we can't tell whether the
+      // user touched the slider — and if they're on this lane, they wanted the
+      // mode's tuning, not their stale slider state. Force every knob.
       opts = {
         ...opts,
         model: overrides.model,
-        steps: req.body.steps ?? overrides.steps,
-        resolution: req.body.resolution ?? overrides.resolution,
-        duration: req.body.duration ?? overrides.duration,
+        steps: overrides.steps,
+        resolution: overrides.resolution,
+        duration: overrides.duration,
       };
     }
 
     if (provider === 'zsky') return handleZsky(req, res, opts);
-    if (provider === 'local') return handleAsyncWorker(req, res, opts, 'local');
-    if (provider === 'optimized') return handleAsyncWorker(req, res, opts, 'local');   // same physical worker
-    return handleAsyncWorker(req, res, opts, 'worker');
+    if (provider === 'local') return handleAsyncWorker(req, res, opts, 'local', 'local');
+    if (provider === 'optimized') return handleAsyncWorker(req, res, opts, 'local', 'optimized');   // same physical worker
+    return handleAsyncWorker(req, res, opts, 'worker', 'worker');
   } catch (err) {
     logger.error('AI video generate failed', err.message);
     return error(res, err.message, 500);
@@ -218,9 +228,14 @@ async function handleHostedSync(req, res, opts, providerName, generateFn) {
 }
 
 // ─── Worker: async, queue + Telegram + polling ────────────
-async function handleAsyncWorker(req, res, opts, role) {
+async function handleAsyncWorker(req, res, opts, role, originalProvider) {
+  // originalProvider preserves the FE-facing label ('optimized' | 'local')
+  // so the Library and Cloudinary tags can distinguish 5090 Optimized vs
+  // 5090 Beast even though both run on the same physical worker (role='local').
+  const tagProvider = originalProvider || role;
   const job = await createInflightJob({
-    provider: role,
+    provider: role,           // workers index by role; don't break that
+    originalProvider: tagProvider,   // FE label, persisted on the job
     prompt: opts.prompt,
     model: opts.model || 'ltx-video',
     duration: opts.duration,
@@ -231,6 +246,10 @@ async function handleAsyncWorker(req, res, opts, role) {
     audio: opts.audio,
     imageUrl: opts.imageUrl || '',
     generateCaption: opts.generateCaption,
+    // MusicGen flags — only the 5090 worker honours these (Lightning + ZSky
+    // ignore them today). worker.py reads job.withMusic + job.musicPrompt.
+    withMusic: !!opts.withMusic,
+    musicPrompt: (opts.musicPrompt || '').slice(0, 400),
   });
 
   const ws = await getWorkerStatus(role);
@@ -239,13 +258,20 @@ async function handleAsyncWorker(req, res, opts, role) {
     tryWakeWorker({ jobId: job.videoId, prompt: opts.prompt, role }).catch(() => {});
   }
 
-  logger.info(`${role.toUpperCase()} QUEUE | ${job.videoId} | online=${online} | "${opts.prompt.slice(0, 60)}"`);
+  // Best-effort: publish a trigger to RabbitMQ so the worker picks the job
+  // up instantly. If the broker is down or unconfigured, the worker's HTTP
+  // polling fallback delivers the same job within POLL_INTERVAL seconds —
+  // correctness doesn't depend on the broker being up.
+  publishJob({ provider: tagProvider, role, jobId: job.videoId, videoId: job.videoId })
+    .catch((err) => logger.warn(`RabbitMQ publish skipped: ${err.message}`));
+
+  logger.info(`${tagProvider.toUpperCase()} QUEUE | ${job.videoId} | online=${online} | "${opts.prompt.slice(0, 60)}"`);
   return success(res, {
     success: true,
     videoId: job.videoId,
     jobId: job.videoId,
     status: 'queued',
-    provider: role,
+    provider: tagProvider,
     workerOnline: online,
     message: online
       ? `Job queued — ${role === 'local' ? '5090' : 'GPU'} is processing now`
@@ -289,7 +315,11 @@ export const getVideoList = async (req, res) => {
 
     if (includeInflight) {
       let inflight = await listInflightJobs();
-      if (provider) inflight = inflight.filter(j => j.provider === provider);
+      if (provider) {
+        // Match by originalProvider (FE label) first; fall back to role for
+        // legacy jobs that pre-date the originalProvider field.
+        inflight = inflight.filter(j => (j.originalProvider || j.provider) === provider);
+      }
       // Show only mid-flight states; completed should already be on Cloudinary.
       inflight = inflight.filter(j => ['queued', 'processing', 'failed'].includes(j.status));
       if (inflight.length) {
@@ -304,6 +334,41 @@ export const getVideoList = async (req, res) => {
     return success(res, result);
   } catch (err) {
     logger.error('List videos failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// ─── Queue inspection (live in-flight jobs across all providers) ──
+// Returns every queued/processing job so the FE can render a "what's
+// running" panel. Sorted by createdAt asc so the worker's actual pickup
+// order matches what the user sees.
+export const getJobQueue = async (req, res) => {
+  try {
+    const provider = req.query.provider;
+    let items = await listInflightJobs();
+    items = items
+      .filter(j => ['queued', 'processing'].includes(j.status))
+      .filter(j => !provider || (j.originalProvider || j.provider) === provider)
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    return success(res, { items, total: items.length });
+  } catch (err) {
+    logger.error('Queue list failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// ─── Failures audit log ────────────────────────────────────────
+// Permanently-failed jobs land here (worker NACKs without requeue, or
+// max-attempts exceeded). The FE Failures tab reads this endpoint.
+export const getFailuresList = (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    const provider = req.query.provider;
+    const result = listFailures({ provider, page, limit });
+    return success(res, result);
+  } catch (err) {
+    logger.error('Failures list failed', err.message);
     return error(res, err.message);
   }
 };
@@ -344,6 +409,78 @@ export const postUploadSourceImage = async (req, res) => {
     return success(res, result);
   } catch (err) {
     logger.error('Source image upload failed', err.message);
+    return error(res, err.message, 502);
+  }
+};
+
+// ─── Standalone music generation (HF Inference fallback) ──────
+// Free, server-side, no GPU on Oracle needed. Defaults to musicgen-small for
+// fast cold-start. The 5090 worker has a separate higher-quality path via
+// audio_generator.py — this endpoint is for standalone clips users want
+// without spinning up the worker.
+export const postMusicGenerate = async (req, res) => {
+  try {
+    const { prompt, duration = 8 } = req.body || {};
+    if (!prompt || typeof prompt !== 'string' || prompt.trim().length < 3) {
+      return error(res, 'prompt is required', 400);
+    }
+    const t0 = Date.now();
+    const out = await generateMusicViaHF({ prompt: prompt.trim(), duration });
+    const elapsedMs = Date.now() - t0;
+    logger.info(`MUSIC | ${out.model} | ${duration}s | ${elapsedMs}ms | ${out.audioUrl}`);
+    return success(res, { ...out, elapsedMs });
+  } catch (err) {
+    logger.error('Music generate failed', err.message);
+    return error(res, err.message, 502);
+  }
+};
+
+// ─── Image Enhancer (Gemini-powered) ────────────────────────
+// Sends the image + a polishing prompt to Gemini 2.5 Flash Image and uploads
+// the returned image to Cloudinary. The FE has a card-grid of preset prompts
+// (cinematic upscale, 4K detail recovery, Hong Kong night film look, etc.)
+// and posts whichever the user picks.
+export const postImageEnhance = async (req, res) => {
+  try {
+    const { dataUrl, imageUrl, prompt, presetId } = req.body || {};
+    if (!prompt || typeof prompt !== 'string' || prompt.length < 20) {
+      return error(res, 'prompt is required (minimum 20 chars)', 400);
+    }
+    if (!dataUrl && !imageUrl) {
+      return error(res, 'dataUrl (base64) or imageUrl is required', 400);
+    }
+    if (!isCloudinaryConfigured()) {
+      return error(res, 'Cloudinary not configured on server', 503);
+    }
+
+    // Resolve to a base64 string the Gemini API will accept.
+    let inputBase64;
+    if (dataUrl) {
+      inputBase64 = dataUrl;   // already a data: URL
+    } else {
+      const imgRes = await fetch(imageUrl);
+      if (!imgRes.ok) return error(res, `Failed to fetch imageUrl: ${imgRes.status}`, 502);
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      const mime = imgRes.headers.get('content-type') || 'image/jpeg';
+      inputBase64 = `data:${mime};base64,${buf.toString('base64')}`;
+    }
+
+    const t0 = Date.now();
+    const out = await enhanceImageGemini(inputBase64, prompt);
+    const enhancedDataUrl = `data:${out.mimeType};base64,${out.base64}`;
+    const upload = await uploadSourceImage(enhancedDataUrl);
+    const elapsedMs = Date.now() - t0;
+
+    logger.info(`IMAGE ENHANCE | preset=${presetId || 'custom'} | ${elapsedMs}ms | ${upload.imageUrl}`);
+    return success(res, {
+      imageUrl: upload.imageUrl,
+      publicId: upload.publicId,
+      presetId: presetId || null,
+      model: out.model,
+      elapsedMs,
+    });
+  } catch (err) {
+    logger.error('Image enhance failed', err.message);
     return error(res, err.message, 502);
   }
 };

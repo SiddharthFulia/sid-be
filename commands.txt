@@ -1,0 +1,73 @@
+# sid-be — server admin commands
+# This file is gitignored if you want to keep notes here that shouldn't ship.
+# (`commands.txt` is NOT in .gitignore by default — add it if you keep secrets.)
+
+# ─── Deploy ─────────────────────────────────────────────────────
+ssh -i "E:\Siddharth\ssh-key-2026-04-19.key" ubuntu@80.225.213.103
+cd /home/ubuntu/sid-be && git pull && npm install && pm2 restart all
+pm2 logs                                  # tail all PM2 services
+pm2 logs sid-be --lines 200               # tail the BE only
+
+# ─── RabbitMQ (CloudAMQP / LavinMQ) ─────────────────────────────
+# Add to /home/ubuntu/sid-be/.env (NEVER commit):
+#   RABBITMQ_URL=amqps://USER:PASS@HOST/VHOST
+# After editing .env, pm2 restart picks up the new env.
+# Verify the BE connected:
+pm2 logs sid-be --lines 200 | grep -iE 'rabbit|queue'
+
+# ─── SQLite admin (Oracle box) ──────────────────────────────────
+# DB lives at /home/ubuntu/sid-be/data/sid.db (gitignored, persists across pulls)
+sudo apt-get install -y sqlite3            # one-time install on the Oracle box
+cd /home/ubuntu/sid-be/data
+sqlite3 sid.db                              # opens the REPL — `.q` to exit
+
+# Useful one-liners (each runs the SQL and exits):
+sqlite3 sid.db ".tables"                                                  # list tables
+sqlite3 sid.db ".schema jobs"                                             # show schema
+sqlite3 sid.db "SELECT COUNT(*) FROM jobs WHERE status='queued';"         # queue depth
+sqlite3 sid.db "SELECT COUNT(*) FROM jobs WHERE status='processing';"     # active workers
+sqlite3 sid.db "SELECT COUNT(*) FROM videos;"                             # completed videos cached
+sqlite3 sid.db "SELECT COUNT(*) FROM failures;"                           # permanently-failed audit count
+
+# Pretty output for ad-hoc inspection:
+sqlite3 -header -column sid.db "
+  SELECT videoId, status, originalProvider AS lane, model, steps, createdAt
+  FROM jobs
+  ORDER BY createdAt DESC
+  LIMIT 20;
+"
+
+# Failures by lane (most recent 10):
+sqlite3 -header -column sid.db "
+  SELECT videoId, originalProvider AS lane, model, substr(error,1,60) AS err, failedAt
+  FROM failures
+  ORDER BY failedAt DESC
+  LIMIT 10;
+"
+
+# Active queue snapshot (what workers will pick up next):
+sqlite3 -header -column sid.db "
+  SELECT createdAt, originalProvider AS lane, model, substr(prompt,1,40) AS prompt
+  FROM jobs
+  WHERE status IN ('queued','processing')
+  ORDER BY createdAt ASC;
+"
+
+# Recent completions (last 24h):
+sqlite3 -header -column sid.db "
+  SELECT videoId, provider, model, datetime(createdAt) AS created
+  FROM videos
+  WHERE createdAt > datetime('now','-24 hours')
+  ORDER BY createdAt DESC;
+"
+
+# ─── Backups ────────────────────────────────────────────────────
+# SQLite is a single file — back it up with cp (safe in WAL mode):
+cp /home/ubuntu/sid-be/data/sid.db /home/ubuntu/sid-be/data/sid.db.bak
+# To download to your laptop:
+scp -i "E:\Siddharth\ssh-key-2026-04-19.key" ubuntu@80.225.213.103:/home/ubuntu/sid-be/data/sid.db .
+
+# ─── Reset (nuclear option) ─────────────────────────────────────
+# Wipes ALL job history. Cloudinary videos remain (they live in Cloudinary, not SQLite).
+# rm /home/ubuntu/sid-be/data/sid.db /home/ubuntu/sid-be/data/sid.db-wal /home/ubuntu/sid-be/data/sid.db-shm
+# pm2 restart sid-be     # recreates an empty schema on next boot

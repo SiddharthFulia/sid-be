@@ -4,7 +4,7 @@ import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision } from
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
-import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage } from '../../controllers/v1/aiVideo.js';
+import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, postImageEnhance, postMusicGenerate } from '../../controllers/v1/aiVideo.js';
 import { postRegister, getNextJob, postJobComplete, postJobFailed, getWorkerFile, postJobProgress } from '../../controllers/v1/gpuWorker.js';
 
 const router = Router();
@@ -35,9 +35,13 @@ router.post('/ai-video/generate', postGenerateVideo);
 router.get('/ai-video/status/:jobId', getJobStatus);
 router.get('/ai-video/today', getTodayVideo);
 router.get('/ai-video/list', getVideoList);
+router.get('/ai-video/queue', getJobQueue);
+router.get('/ai-video/failures', getFailuresList);
 router.get('/ai-video/providers', getVideoProviders);
 router.delete('/ai-video/:videoId', deleteVideoById);
 router.post('/ai-video/upload-image', postUploadSourceImage);
+router.post('/image-enhance',         postImageEnhance);
+router.post('/music/generate',        postMusicGenerate);
 
 // GPU worker — polling client endpoints (called by Lightning AI worker)
 router.post('/gpu-worker/register', postRegister);
