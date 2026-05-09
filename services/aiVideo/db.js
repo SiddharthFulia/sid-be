@@ -127,6 +127,31 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_jobs_origProv_created  ON jobs(originalProvider, createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_jobs_status_created    ON jobs(status, createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_jobs_model             ON jobs(model);
+
+  -- Image Enhancer pipeline. One table for all states (queued/processing/
+  -- completed/failed) — Library / Queue / Failures views are filtered queries.
+  --   type: fast | quality | cinematic | edit
+  --   engine: cloud (Gemini) | local (5090)
+  CREATE TABLE IF NOT EXISTS enhanced_images (
+    imageId        TEXT PRIMARY KEY,
+    status         TEXT NOT NULL,
+    type           TEXT NOT NULL,
+    engine         TEXT NOT NULL,
+    presetId       TEXT,
+    prompt         TEXT NOT NULL,
+    sourceUrl      TEXT,
+    outputUrl      TEXT,
+    error          TEXT,
+    bytes          INTEGER,
+    workerId       TEXT,
+    createdAt      TEXT NOT NULL,
+    startedAt      TEXT,
+    completedAt    TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_enh_status_created  ON enhanced_images(status, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_enh_type_created    ON enhanced_images(type, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_enh_engine_created  ON enhanced_images(engine, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_enh_completed_created ON enhanced_images(status, createdAt DESC) WHERE status = 'completed';
 `);
 
 // ── One-time migration from the legacy JSON file ────────────────

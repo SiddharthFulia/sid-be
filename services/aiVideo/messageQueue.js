@@ -20,7 +20,10 @@ const RABBITMQ_URL = process.env.RABBITMQ_URL || '';
 const QUEUE_FAST = 'video_fast_queue';
 const QUEUE_QUALITY = 'video_quality_queue';
 const QUEUE_FAILED = 'video_failed_queue';
+const QUEUE_IMAGE = 'image_enhance_queue';
+const QUEUE_IMAGE_FAILED = 'image_failed_queue';
 const EXCHANGE_DLX = 'video.dlx';
+const EXCHANGE_IMAGE_DLX = 'image.dlx';
 
 let connection = null;
 let channel = null;
@@ -93,18 +96,20 @@ async function ensureChannel() {
       // assertExchange / assertQueue are idempotent: they create on first use,
       // verify on subsequent calls. Safe to run on every BE boot.
 
-      // DLX: failed messages from the work queues fan into video_failed_queue.
+      // Video DLX
       await channel.assertExchange(EXCHANGE_DLX, 'fanout', { durable: true });
       await channel.assertQueue(QUEUE_FAILED, { durable: true });
       await channel.bindQueue(QUEUE_FAILED, EXCHANGE_DLX, '');
+      // Image DLX (separate so the FE Failures tab can show image vs video distinctly)
+      await channel.assertExchange(EXCHANGE_IMAGE_DLX, 'fanout', { durable: true });
+      await channel.assertQueue(QUEUE_IMAGE_FAILED, { durable: true });
+      await channel.bindQueue(QUEUE_IMAGE_FAILED, EXCHANGE_IMAGE_DLX, '');
 
-      // Work queues with DLX wired up.
-      const workQueueOpts = {
-        durable: true,
-        deadLetterExchange: EXCHANGE_DLX,
-      };
-      await channel.assertQueue(QUEUE_FAST, workQueueOpts);
-      await channel.assertQueue(QUEUE_QUALITY, workQueueOpts);
+      // Video work queues
+      await channel.assertQueue(QUEUE_FAST,    { durable: true, deadLetterExchange: EXCHANGE_DLX });
+      await channel.assertQueue(QUEUE_QUALITY, { durable: true, deadLetterExchange: EXCHANGE_DLX });
+      // Image work queue (single queue, type/engine fields on the message dispatch)
+      await channel.assertQueue(QUEUE_IMAGE,   { durable: true, deadLetterExchange: EXCHANGE_IMAGE_DLX });
 
       logger.info('RabbitMQ ready — both video queues connected');
       return channel;
@@ -183,6 +188,39 @@ function queueFor({ provider, role }) {
   if (provider === 'optimized') return QUEUE_FAST;
   if (provider === 'local' || role === 'local') return QUEUE_QUALITY;
   return null;   // 'worker' (Lightning) keeps its existing HTTP-poll path
+}
+
+/** Publish an image-enhance trigger. Returns true on success, false otherwise. */
+export async function publishImageJob({ imageId, type, engine, presetId }) {
+  if (!isConfigured()) return false;
+  const body = Buffer.from(JSON.stringify({
+    imageId, type, engine, presetId,
+    enqueuedAt: Date.now(),
+  }));
+  let lastErr = null;
+  for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
+    const ch = await ensureChannel();
+    if (!ch) { lastErr = 'broker unavailable'; break; }
+    try {
+      const ok = ch.sendToQueue(QUEUE_IMAGE, body, {
+        persistent: true,
+        contentType: 'application/json',
+      });
+      if (ok) {
+        if (attempt > 1) logger.info(`RabbitMQ image publish recovered on attempt ${attempt}`);
+        return true;
+      }
+      lastErr = 'backpressure';
+    } catch (err) {
+      lastErr = err.message;
+      channel = null;
+    }
+    if (attempt < PUBLISH_MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, PUBLISH_RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+    }
+  }
+  logger.error(`RabbitMQ image publish failed after ${PUBLISH_MAX_ATTEMPTS} attempts: ${lastErr}`);
+  return false;
 }
 
 /**

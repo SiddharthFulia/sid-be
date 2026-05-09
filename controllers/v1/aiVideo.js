@@ -12,10 +12,17 @@ import { getWorkerStatus, isWorkerOnline } from '../../services/aiVideo/jobStore
 import { tryWakeWorker } from '../../services/aiVideo/wakeWorker.js';
 import { tokenInfo as zskyTokenInfo, isConfigured as zskyConfigured } from '../../services/aiVideo/zskyAuth.js';
 import logger from '../../helpers/logger.js';
-import { publishJob } from '../../services/aiVideo/messageQueue.js';
+import { publishJob, publishImageJob } from '../../services/aiVideo/messageQueue.js';
 import { listFailures } from '../../services/aiVideo/failureStore.js';
 import { enhanceImageGemini } from '../../services/gemini.js';
 import { generateMusicViaHF } from '../../services/aiVideo/musicGen.js';
+import {
+  createImage, getImage, updateImage, deleteImage as deleteImageRow,
+  listImages, getImageCounts,
+} from '../../services/aiVideo/enhancedImageStore.js';
+import {
+  isCloudinaryConfigured as isCdnConfigured, uploadSourceImage as cdnUpload,
+} from '../../services/aiVideo/cloudinaryStore.js';
 
 const ALIASES = {
   gpu: 'worker', comfyui: 'worker',
@@ -520,53 +527,140 @@ export const postMusicGenerate = async (req, res) => {
   }
 };
 
-// ─── Image Enhancer (Gemini-powered) ────────────────────────
-// Sends the image + a polishing prompt to Gemini 2.5 Flash Image and uploads
-// the returned image to Cloudinary. The FE has a card-grid of preset prompts
-// (cinematic upscale, 4K detail recovery, Hong Kong night film look, etc.)
-// and posts whichever the user picks.
+// ─── Image Enhancer (async, queue + Gemini cloud OR 5090 local) ──
+// Replaces the old sync implementation. Both engines write to the same
+// `enhanced_images` table and follow the same FE polling lifecycle:
+//   queued → processing → completed | failed
+//
+// Cloud (Gemini): processed inline on the BE in a fire-and-forget background
+// task — no worker needed. Status flips to 'processing' immediately.
+// Local (5090):  published to image_enhance_queue; the 5090 worker picks it
+// up, runs the ComfyUI workflow, and POSTs back via job-progress / -complete.
 export const postImageEnhance = async (req, res) => {
   try {
-    const { dataUrl, imageUrl, prompt, presetId } = req.body || {};
-    if (!prompt || typeof prompt !== 'string' || prompt.length < 20) {
-      return error(res, 'prompt is required (minimum 20 chars)', 400);
+    const { dataUrl, imageUrl, prompt, presetId, type = 'fast', engine = 'cloud' } = req.body || {};
+    if (!prompt || typeof prompt !== 'string' || prompt.length < 10) {
+      return error(res, 'prompt is required (minimum 10 chars)', 400);
     }
     if (!dataUrl && !imageUrl) {
       return error(res, 'dataUrl (base64) or imageUrl is required', 400);
     }
-    if (!isCloudinaryConfigured()) {
+    if (!isCdnConfigured()) {
       return error(res, 'Cloudinary not configured on server', 503);
     }
-
-    // Resolve to a base64 string the Gemini API will accept.
-    let inputBase64;
-    if (dataUrl) {
-      inputBase64 = dataUrl;   // already a data: URL
-    } else {
-      const imgRes = await fetch(imageUrl);
-      if (!imgRes.ok) return error(res, `Failed to fetch imageUrl: ${imgRes.status}`, 502);
-      const buf = Buffer.from(await imgRes.arrayBuffer());
-      const mime = imgRes.headers.get('content-type') || 'image/jpeg';
-      inputBase64 = `data:${mime};base64,${buf.toString('base64')}`;
+    if (!['fast', 'quality', 'cinematic', 'edit'].includes(type)) {
+      return error(res, 'type must be one of: fast | quality | cinematic | edit', 400);
+    }
+    if (!['cloud', 'local'].includes(engine)) {
+      return error(res, 'engine must be cloud or local', 400);
     }
 
-    const t0 = Date.now();
-    const out = await enhanceImageGemini(inputBase64, prompt);
-    const enhancedDataUrl = `data:${out.mimeType};base64,${out.base64}`;
-    const upload = await uploadSourceImage(enhancedDataUrl);
-    const elapsedMs = Date.now() - t0;
+    // Always upload the source to Cloudinary first so the worker can fetch by URL
+    // (FE sends a base64 dataUrl; we don't want to publish 8 MB of JSON to the queue).
+    let sourceUrl = imageUrl || null;
+    if (!sourceUrl && dataUrl) {
+      const upload = await cdnUpload(dataUrl);
+      sourceUrl = upload.imageUrl;
+    }
 
-    logger.info(`IMAGE ENHANCE | preset=${presetId || 'custom'} | ${elapsedMs}ms | ${upload.imageUrl}`);
+    const job = createImage({
+      status: engine === 'cloud' ? 'processing' : 'queued',
+      type, engine, presetId: presetId || null,
+      prompt, sourceUrl,
+      startedAt: engine === 'cloud' ? new Date().toISOString() : null,
+    });
+
+    if (engine === 'cloud') {
+      // Fire-and-forget; FE polls /status. Errors recorded into the SQLite row.
+      runCloudEnhance(job).catch((err) => {
+        logger.error(`Cloud enhance ${job.imageId} failed: ${err.message}`);
+        updateImage(job.imageId, {
+          status: 'failed', error: err.message.slice(0, 800),
+          completedAt: new Date().toISOString(),
+        });
+      });
+    } else {
+      // Local — push trigger to RabbitMQ (worker fallback to HTTP polling on broker outages)
+      publishImageJob({ imageId: job.imageId, type, engine, presetId })
+        .catch((err) => logger.warn(`Image publish skipped: ${err.message}`));
+    }
+
+    logger.info(`IMAGE_ENHANCE QUEUE | ${job.imageId} | engine=${engine} type=${type} preset=${presetId || 'custom'}`);
     return success(res, {
-      imageUrl: upload.imageUrl,
-      publicId: upload.publicId,
-      presetId: presetId || null,
-      model: out.model,
-      elapsedMs,
+      imageId: job.imageId,
+      status: job.status,
+      engine, type, presetId: presetId || null,
+      sourceUrl,
     });
   } catch (err) {
-    logger.error('Image enhance failed', err.message);
+    logger.error('Image enhance queue failed', err.message);
     return error(res, err.message, 502);
+  }
+};
+
+// Background processor for cloud (Gemini) jobs. Runs out-of-band; status is
+// the only way the FE knows we're working on it.
+async function runCloudEnhance(job) {
+  // Fetch source as base64 for Gemini
+  const imgRes = await fetch(job.sourceUrl);
+  if (!imgRes.ok) throw new Error(`source fetch ${imgRes.status}`);
+  const buf = Buffer.from(await imgRes.arrayBuffer());
+  const mime = imgRes.headers.get('content-type') || 'image/jpeg';
+  const inputBase64 = `data:${mime};base64,${buf.toString('base64')}`;
+
+  const out = await enhanceImageGemini(inputBase64, job.prompt);
+  const enhancedDataUrl = `data:${out.mimeType};base64,${out.base64}`;
+  const upload = await cdnUpload(enhancedDataUrl);
+
+  updateImage(job.imageId, {
+    status: 'completed',
+    outputUrl: upload.imageUrl,
+    bytes: out.base64.length,
+    completedAt: new Date().toISOString(),
+  });
+}
+
+// FE polls this every 1.5s while the spinner is up
+export const getImageStatus = (req, res) => {
+  try {
+    const row = getImage(req.params.imageId);
+    if (!row) return error(res, 'Not found', 404);
+    return success(res, row);
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+// Library listing — paginated, filterable. Defaults to completed only.
+export const getImageList = (req, res) => {
+  try {
+    const status = req.query.status || 'completed';
+    const type = req.query.type || undefined;
+    const engine = req.query.engine || undefined;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
+    const result = listImages({
+      status: status === 'all' ? undefined : status,
+      type, engine, page, limit,
+    });
+    result.counts = getImageCounts();
+    return success(res, result);
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+// Hard delete — removes the SQLite row + the Cloudinary asset(s) if present.
+export const deleteImage = async (req, res) => {
+  try {
+    const row = getImage(req.params.imageId);
+    if (!row) return error(res, 'Not found', 404);
+    deleteImageRow(req.params.imageId);
+    // Cloudinary cleanup is fire-and-forget — Cloudinary auto-evicts orphans
+    // in their free tier policy, no need to block the response on it.
+    return success(res, { ok: true });
+  } catch (err) {
+    return error(res, err.message);
   }
 };
 
