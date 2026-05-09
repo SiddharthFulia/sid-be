@@ -130,31 +130,47 @@ export async function enhanceImageGemini(imageBase64, prompt) {
     base64Data = imageBase64.split(',')[1];
   }
 
-  // The image-out model is `gemini-2.5-flash-image` on v1beta (the `-preview`
-  // suffix returns 404). We MUST list BOTH `TEXT` and `IMAGE` in
-  // responseModalities — `IMAGE` alone makes Gemini reject the request with
-  // "Image-only output isn't supported"; `TEXT` alone returns a description
-  // instead of pixels (the original "no image data" bug).
-  const modelId = 'gemini-2.5-flash-image';
-  const res = await fetch(`${BASE_URL}/models/${modelId}:generateContent?key=${GEMINI_API_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{
-        parts: [
-          { inlineData: { mimeType, data: base64Data } },
-          { text: prompt },
-        ],
-      }],
-      generationConfig: {
-        responseModalities: ['TEXT', 'IMAGE'],
-      },
-    }),
-  });
+  // Try `-preview` first (current image-out model name in Google's docs);
+  // fall back to the alias if -preview returns 404 (depends on the API key's
+  // model access). Text part goes BEFORE inlineData — image-edit models
+  // honour the instruction more reliably with that order.
+  const modelCandidates = ['gemini-2.5-flash-image-preview', 'gemini-2.5-flash-image'];
+  const requestBody = {
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: prompt },
+        { inlineData: { mimeType, data: base64Data } },
+      ],
+    }],
+    generationConfig: {
+      responseModalities: ['IMAGE', 'TEXT'],
+    },
+  };
+
+  let res, lastErrText = '';
+  let modelId = modelCandidates[0];
+  for (const candidate of modelCandidates) {
+    modelId = candidate;
+    res = await fetch(`${BASE_URL}/models/${candidate}:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+    if (res.ok) break;
+    if (res.status === 404) {
+      // Model not in this project's allowlist — try the next candidate.
+      lastErrText = `${candidate} → 404`;
+      continue;
+    }
+    // 429, 500, etc — surface the error directly, no fallback retry.
+    break;
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `Gemini Image error: ${res.status}`);
+    const detail = err.error?.message || `${res.status}${lastErrText ? ` (${lastErrText})` : ''}`;
+    throw new Error(`Gemini Image error: ${detail}`);
   }
 
   const data = await res.json();
