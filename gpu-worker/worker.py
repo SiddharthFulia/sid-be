@@ -515,6 +515,28 @@ class BrokerHandle:
             print(f"[broker] nack failed: {e}")
 
 
+def image_log(client: httpx.Client, image_id: str, line: str) -> None:
+    """Append a log line to the enhanced_images row's `logs` array. Mirrors
+    report_log() for the video lane. Best-effort + threaded."""
+    print(f"[img-log] {image_id}: {line}")
+    threading.Thread(
+        target=lambda: _post_image_log(client, image_id, line),
+        daemon=True,
+    ).start()
+
+
+def _post_image_log(client: httpx.Client, image_id: str, line: str) -> None:
+    try:
+        client.post(
+            f"{MAIN_BACKEND_URL}/api/gpu-worker/image-progress",
+            headers=_headers(),
+            json={"imageId": image_id, "logLine": line},
+            timeout=5,
+        )
+    except Exception:
+        pass   # best-effort
+
+
 def report_image_complete(client: httpx.Client, image_id: str, output_url: str) -> None:
     try:
         r = client.post(
@@ -568,40 +590,53 @@ def process_image_job(client: httpx.Client, msg: dict) -> None:
         print(f"[image] {image_id}: status={job.get('status')} — skipping")
         return
 
-    image_type = job.get("type") or "fast"
+    workflow = job.get("workflow") or job.get("type") or "realesrgan-x4"
     source_url = job.get("sourceUrl")
-    if not source_url:
-        report_image_failed(client, image_id, "no sourceUrl on job")
+    prompt = job.get("prompt", "")
+    tunings = {
+        "steps":   job.get("steps")   or 20,
+        "denoise": job.get("denoise") if job.get("denoise") is not None else 0.20,
+        "cfg":     job.get("cfg")     or 5.0,
+        "width":   job.get("width")   or 1024,
+        "height":  job.get("height")  or 1024,
+    }
+    # Workflows that need a source image
+    if workflow not in ("sdxl-t2i",) and not source_url:
+        report_image_failed(client, image_id, f"workflow {workflow} requires a source image")
         return
 
-    print(f"\n[image] {image_id}  type={image_type}  source={source_url[:80]}")
+    print(f"\n[image] {image_id}  workflow={workflow}  src={(source_url or '(none)')[:80]}")
+    image_log(client, image_id, f"picked up by worker {WORKER_ID}")
+    image_log(client, image_id, f"workflow={workflow} • {prompt[:60] if prompt else '(no prompt)'}")
     started = time.monotonic()
     try:
-        png_bytes = asyncio.run(comfyui_client.generate_image(image_type, source_url))
+        image_log(client, image_id, "→ submitting workflow to ComfyUI")
+        png_bytes = asyncio.run(comfyui_client.generate_image(
+            workflow, source_url, prompt=prompt, **tunings,
+        ))
     except Exception as e:
         traceback.print_exc()
+        image_log(client, image_id, f"✗ ComfyUI error: {str(e)[:160]}")
         report_image_failed(client, image_id, f"ComfyUI failed: {str(e)[:300]}")
         return
+    image_log(client, image_id, f"✓ render done ({len(png_bytes)/(1024*1024):.1f} MB)")
 
     # Upload to Cloudinary
     public_id = f"enhanced_{image_id}"
+    image_log(client, image_id, "↑ uploading to Cloudinary")
     try:
-        # Reuse the source-image upload path (it accepts dataURL, but we have raw bytes)
-        # so write a tiny adapter inline:
-        import base64
-        b64 = base64.b64encode(png_bytes).decode("ascii")
-        data_url = f"data:image/png;base64,{b64}"
-        upload = cloudinary_upload.upload_image_data_url(data_url, public_id) \
-            if hasattr(cloudinary_upload, "upload_image_data_url") \
-            else cloudinary_upload.upload_image(png_bytes, public_id)
+        upload = cloudinary_upload.upload_image(png_bytes, public_id)
         output_url = upload.get("url") or upload.get("secure_url") or upload.get("imageUrl")
     except Exception as e:
         traceback.print_exc()
+        image_log(client, image_id, f"✗ Cloudinary upload failed: {str(e)[:160]}")
         report_image_failed(client, image_id, f"Cloudinary upload failed: {str(e)[:300]}")
         return
 
     elapsed = round(time.monotonic() - started, 1)
     print(f"[image-done] {image_id} → {output_url} ({elapsed}s)")
+    image_log(client, image_id, f"✓ published in {elapsed}s")
+    image_log(client, image_id, f"🖼 {output_url}")
     report_image_complete(client, image_id, output_url)
 
 

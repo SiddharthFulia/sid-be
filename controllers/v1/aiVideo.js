@@ -539,39 +539,60 @@ export const postMusicGenerate = async (req, res) => {
 // up, runs the ComfyUI workflow, and POSTs back via job-progress / -complete.
 export const postImageEnhance = async (req, res) => {
   try {
-    const { dataUrl, imageUrl, prompt, presetId, type = 'fast', engine = 'cloud' } = req.body || {};
-    if (!prompt || typeof prompt !== 'string' || prompt.length < 10) {
-      return error(res, 'prompt is required (minimum 10 chars)', 400);
+    const {
+      dataUrl, imageUrl, prompt, presetId,
+      type = 'fast', engine = 'cloud',
+      workflow, steps, denoise, cfg, width, height,
+    } = req.body || {};
+    // Accept legacy 'local' as an alias for 'atelier'.
+    const eng = engine === 'local' ? 'atelier' : engine;
+    if (!['cloud', 'atelier'].includes(eng)) {
+      return error(res, 'engine must be cloud or atelier', 400);
     }
-    if (!dataUrl && !imageUrl) {
-      return error(res, 'dataUrl (base64) or imageUrl is required', 400);
+    // Workflow allowlist for atelier; cloud only uses presets/prompts.
+    const ATELIER_WORKFLOWS = new Set([
+      'realesrgan-x4', 'ultrasharp-x4', 'nmkd-siax',
+      'sdxl-polish', 'sdxl-t2i', 'flux-kontext-edit',
+    ]);
+    if (eng === 'atelier' && workflow && !ATELIER_WORKFLOWS.has(workflow)) {
+      return error(res, `unknown atelier workflow: ${workflow}`, 400);
+    }
+    // Source-image rule: t2i workflow doesn't need an image.
+    const isT2I = workflow === 'sdxl-t2i';
+    if (!isT2I && !dataUrl && !imageUrl) {
+      return error(res, 'dataUrl (base64) or imageUrl is required for this workflow', 400);
+    }
+    if (!prompt || typeof prompt !== 'string' || prompt.length < 3) {
+      return error(res, 'prompt is required', 400);
     }
     if (!isCdnConfigured()) {
       return error(res, 'Cloudinary not configured on server', 503);
     }
-    if (!['fast', 'quality', 'cinematic', 'edit'].includes(type)) {
-      return error(res, 'type must be one of: fast | quality | cinematic | edit', 400);
-    }
-    if (!['cloud', 'local'].includes(engine)) {
-      return error(res, 'engine must be cloud or local', 400);
+    if (!['fast', 'quality', 'cinematic', 'edit', 't2i', 'img2img', 'upscale'].includes(type)) {
+      return error(res, `unknown type: ${type}`, 400);
     }
 
-    // Always upload the source to Cloudinary first so the worker can fetch by URL
-    // (FE sends a base64 dataUrl; we don't want to publish 8 MB of JSON to the queue).
+    // Source upload only when needed (t2i workflow has no source image).
     let sourceUrl = imageUrl || null;
-    if (!sourceUrl && dataUrl) {
+    if (!isT2I && !sourceUrl && dataUrl) {
       const upload = await cdnUpload(dataUrl);
       sourceUrl = upload.url;
     }
 
     const job = createImage({
-      status: engine === 'cloud' ? 'processing' : 'queued',
-      type, engine, presetId: presetId || null,
+      status: eng === 'cloud' ? 'processing' : 'queued',
+      type, engine: eng, presetId: presetId || null,
       prompt, sourceUrl,
-      startedAt: engine === 'cloud' ? new Date().toISOString() : null,
+      workflow: workflow || null,
+      steps: typeof steps === 'number' ? steps : null,
+      denoise: typeof denoise === 'number' ? denoise : null,
+      cfg: typeof cfg === 'number' ? cfg : null,
+      width: typeof width === 'number' ? width : null,
+      height: typeof height === 'number' ? height : null,
+      startedAt: eng === 'cloud' ? new Date().toISOString() : null,
     });
 
-    if (engine === 'cloud') {
+    if (eng === 'cloud') {
       // Fire-and-forget; FE polls /status. Errors recorded into the SQLite row.
       runCloudEnhance(job).catch((err) => {
         logger.error(`Cloud enhance ${job.imageId} failed: ${err.message}`);
@@ -581,16 +602,17 @@ export const postImageEnhance = async (req, res) => {
         });
       });
     } else {
-      // Local — push trigger to RabbitMQ (worker fallback to HTTP polling on broker outages)
-      publishImageJob({ imageId: job.imageId, type, engine, presetId })
+      // Atelier — push trigger to RabbitMQ (worker fallback to HTTP polling on broker outages)
+      publishImageJob({ imageId: job.imageId, type, engine: eng, presetId })
         .catch((err) => logger.warn(`Image publish skipped: ${err.message}`));
     }
 
-    logger.info(`IMAGE_ENHANCE QUEUE | ${job.imageId} | engine=${engine} type=${type} preset=${presetId || 'custom'}`);
+    logger.info(`IMAGE_ENHANCE QUEUE | ${job.imageId} | engine=${eng} workflow=${workflow || '-'} type=${type}`);
     return success(res, {
       imageId: job.imageId,
       status: job.status,
-      engine, type, presetId: presetId || null,
+      engine: eng, type, presetId: presetId || null,
+      workflow: workflow || null,
       sourceUrl,
     });
   } catch (err) {

@@ -11,10 +11,12 @@ export function newImageId() {
 
 const insertStmt = db.prepare(`INSERT INTO enhanced_images (
   imageId, status, type, engine, presetId, prompt, sourceUrl, outputUrl,
-  error, bytes, workerId, createdAt, startedAt, completedAt
+  error, bytes, workerId, createdAt, startedAt, completedAt,
+  workflow, steps, denoise, cfg, width, height
 ) VALUES (
   @imageId, @status, @type, @engine, @presetId, @prompt, @sourceUrl, @outputUrl,
-  @error, @bytes, @workerId, @createdAt, @startedAt, @completedAt
+  @error, @bytes, @workerId, @createdAt, @startedAt, @completedAt,
+  @workflow, @steps, @denoise, @cfg, @width, @height
 )`);
 
 const selectStmt = db.prepare('SELECT * FROM enhanced_images WHERE imageId = ?');
@@ -34,7 +36,23 @@ const countsStmt = db.prepare(`
 const COLUMNS = new Set([
   'status', 'type', 'engine', 'presetId', 'prompt', 'sourceUrl', 'outputUrl',
   'error', 'bytes', 'workerId', 'startedAt', 'completedAt',
+  'workflow', 'steps', 'denoise', 'cfg', 'width', 'height', 'logs',
 ]);
+
+// Append a log line to the row's `logs` JSON array. Cap at the most recent
+// 80 entries to keep the column small.
+const logsSelectStmt = db.prepare('SELECT logs FROM enhanced_images WHERE imageId = ?');
+const logsUpdateStmt = db.prepare('UPDATE enhanced_images SET logs = ? WHERE imageId = ?');
+export function appendImageLog(imageId, line) {
+  const row = logsSelectStmt.get(imageId);
+  if (!row) return null;
+  let arr = [];
+  try { arr = JSON.parse(row.logs || '[]'); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
+  arr.push({ ts: Date.now(), msg: String(line).slice(0, 300) });
+  if (arr.length > 80) arr = arr.slice(-80);
+  logsUpdateStmt.run(JSON.stringify(arr), imageId);
+  return arr;
+}
 
 export function createImage(data) {
   const row = {
@@ -52,6 +70,12 @@ export function createImage(data) {
     createdAt: new Date().toISOString(),
     startedAt: null,
     completedAt: null,
+    workflow: null,
+    steps: null,
+    denoise: null,
+    cfg: null,
+    width: null,
+    height: null,
     ...data,
   };
   insertStmt.run(row);

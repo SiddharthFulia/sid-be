@@ -286,5 +286,13 @@ function addColumnIfMissing(table, column, definition) {
 }
 addColumnIfMissing('jobs', 'withMusic',   'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('jobs', 'musicPrompt', 'TEXT');
+// Atelier workflow + fine-tunes + log feed for the image-enhance lane
+addColumnIfMissing('enhanced_images', 'workflow', 'TEXT');
+addColumnIfMissing('enhanced_images', 'steps',    'INTEGER');
+addColumnIfMissing('enhanced_images', 'denoise',  'REAL');
+addColumnIfMissing('enhanced_images', 'cfg',      'REAL');
+addColumnIfMissing('enhanced_images', 'width',    'INTEGER');
+addColumnIfMissing('enhanced_images', 'height',   'INTEGER');
+addColumnIfMissing('enhanced_images', 'logs',     'TEXT');   // JSON array
 
 logger.info(`SQLite: ${DB_PATH} ready`);

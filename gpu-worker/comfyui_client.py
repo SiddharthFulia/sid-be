@@ -616,44 +616,139 @@ def _mochi_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: fl
 # These are built around `LoadImage → process → SaveImage` instead of the
 # T2V / I2V dance. Used by the image_enhance_queue lane.
 
-def _image_fast_enhance_workflow(image_filename: str) -> dict[str, Any]:
-    """RealESRGAN x4 upscale. Pure GAN upscaler — no diffusion, no prompts,
-    no safety filters. Works on portraits (no IMAGE_OTHER refusals like Gemini).
-    Output: 4× wider+taller than source, sharper edges, recovered detail."""
+def _image_upscale_workflow(image_filename: str, model_filename: str) -> dict[str, Any]:
+    """Generic GAN upscale workflow. Parameterized by which `.pth` model file
+    to load (Real-ESRGAN x4, 4x-UltraSharp, NMKD-Siax, etc.). No diffusion,
+    no prompt, no safety filter. ~10s on the 5090."""
     return {
         "1": {"class_type": "LoadImage",
               "inputs": {"image": image_filename}},
         "2": {"class_type": "UpscaleModelLoader",
-              "inputs": {"model_name": "RealESRGAN_x4.pth"}},
+              "inputs": {"model_name": model_filename}},
         "3": {"class_type": "ImageUpscaleWithModel",
               "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
         "4": {"class_type": "SaveImage",
-              "inputs": {"filename_prefix": "enhanced_fast", "images": ["3", 0]}},
+              "inputs": {"filename_prefix": "enhanced_upscale", "images": ["3", 0]}},
     }
 
 
-def _image_face_sharpen_workflow(image_filename: str) -> dict[str, Any]:
-    """4x-UltraSharp upscaler — community-tuned for portraits. Better at
-    preserving skin texture / hair strands than RealESRGAN_x4plus on faces."""
+def _image_sdxl_polish_workflow(image_filename: str, prompt: str,
+                                 steps: int, denoise: float, cfg: float) -> dict[str, Any]:
+    """SDXL img2img polish via JuggernautXL. Low denoise (~0.20) preserves
+    identity and composition while sharpening details. Higher denoise gives
+    more reinterpretation."""
+    seed = random.randint(1, 1_000_000_000)
+    pos = prompt or "masterpiece, photo-realistic, high detail, sharp focus, natural lighting"
+    neg = "low quality, blurry, distorted, plastic skin, oversmoothed, watermark, text"
     return {
-        "1": {"class_type": "LoadImage",
-              "inputs": {"image": image_filename}},
-        "2": {"class_type": "UpscaleModelLoader",
-              "inputs": {"model_name": "4x-UltraSharp.pth"}},
-        "3": {"class_type": "ImageUpscaleWithModel",
-              "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
-        "4": {"class_type": "SaveImage",
-              "inputs": {"filename_prefix": "enhanced_face", "images": ["3", 0]}},
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+        "3": {"class_type": "VAEEncode", "inputs": {"pixels": ["2", 0], "vae": ["1", 2]}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["1", 1]}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["1", 1]}},
+        "6": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": int(max(steps, 8)), "cfg": float(cfg or 5.0),
+                         "sampler_name": "dpmpp_2m", "scheduler": "karras",
+                         "denoise": float(max(0.05, min(denoise, 0.95))),
+                         "model": ["1", 0],
+                         "positive": ["4", 0], "negative": ["5", 0],
+                         "latent_image": ["3", 0]}},
+        "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
+        "8": {"class_type": "SaveImage",
+              "inputs": {"filename_prefix": "enhanced_sdxl_polish", "images": ["7", 0]}},
     }
 
 
-def build_image_workflow(image_type: str, image_filename: str) -> dict[str, Any]:
-    """Dispatch by mode. 'fast' → RealESRGAN, 'quality' → UltraSharp,
-    others fall back to fast for now (cinematic/edit are next phases)."""
-    t = (image_type or "fast").lower()
-    if t == "quality":
-        return _image_face_sharpen_workflow(image_filename)
-    return _image_fast_enhance_workflow(image_filename)
+def _image_sdxl_t2i_workflow(prompt: str, steps: int, cfg: float,
+                              width: int, height: int) -> dict[str, Any]:
+    """Pure text-to-image via JuggernautXL. No source image, no denoise —
+    runs on an empty latent at the target dimensions."""
+    seed = random.randint(1, 1_000_000_000)
+    neg = "low quality, blurry, distorted, watermark, text, deformed"
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"}},
+        "2": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": int(width), "height": int(height), "batch_size": 1}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["1", 1]}},
+        "5": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": int(max(steps, 12)), "cfg": float(cfg or 5.0),
+                         "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0,
+                         "model": ["1", 0],
+                         "positive": ["3", 0], "negative": ["4", 0],
+                         "latent_image": ["2", 0]}},
+        "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        "7": {"class_type": "SaveImage",
+              "inputs": {"filename_prefix": "sdxl_t2i", "images": ["6", 0]}},
+    }
+
+
+def _image_flux_kontext_workflow(image_filename: str, prompt: str,
+                                  steps: int, cfg: float) -> dict[str, Any]:
+    """Flux Kontext Dev — the open-source Gemini-2.5-flash-image equivalent.
+    Image + text prompt → edited image. Identity-preserving by design.
+    No safety filter. ~45s on the 5090."""
+    seed = random.randint(1, 1_000_000_000)
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "flux1-dev-kontext_fp8_scaled.safetensors",
+                         "weight_dtype": "default"}},
+        "2": {"class_type": "DualCLIPLoader",
+              "inputs": {"clip_name1": "clip_l.safetensors",
+                         "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+                         "type": "flux"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+        "5": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["4", 0]}},
+        "6": {"class_type": "VAEEncode", "inputs": {"pixels": ["5", 0], "vae": ["3", 0]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "8": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["7", 0], "latent": ["6", 0]}},
+        "9": {"class_type": "FluxGuidance",
+              "inputs": {"conditioning": ["8", 0], "guidance": float(cfg or 2.5)}},
+        "10": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["7", 0]}},
+        "11": {"class_type": "KSampler",
+               "inputs": {"seed": seed, "steps": int(max(steps, 16)), "cfg": 1.0,
+                          "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                          "model": ["1", 0],
+                          "positive": ["9", 0], "negative": ["10", 0],
+                          "latent_image": ["6", 0]}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
+        "13": {"class_type": "SaveImage",
+               "inputs": {"filename_prefix": "flux_kontext", "images": ["12", 0]}},
+    }
+
+
+# Map atelier workflow id → (callable, kind). 'kind' tells the worker
+# which tunings the workflow consumes.
+def build_image_workflow(workflow_id: str, image_filename: str | None,
+                         prompt: str = "", steps: int = 20, denoise: float = 0.20,
+                         cfg: float = 5.0, width: int = 1024, height: int = 1024) -> dict[str, Any]:
+    wid = (workflow_id or "realesrgan-x4").lower()
+    upscale_models = {
+        "realesrgan-x4":  "RealESRGAN_x4.pth",
+        "ultrasharp-x4":  "4x-UltraSharp.pth",
+        "nmkd-siax":      "4x_NMKD-Siax_200k.pth",
+        # Legacy ids from the first version of this module
+        "fast":           "RealESRGAN_x4.pth",
+        "quality":        "4x-UltraSharp.pth",
+    }
+    if wid in upscale_models:
+        if not image_filename:
+            raise RuntimeError(f"workflow {wid} needs an input image")
+        return _image_upscale_workflow(image_filename, upscale_models[wid])
+    if wid == "sdxl-polish":
+        if not image_filename:
+            raise RuntimeError("sdxl-polish needs an input image")
+        return _image_sdxl_polish_workflow(image_filename, prompt, steps, denoise, cfg)
+    if wid == "sdxl-t2i":
+        return _image_sdxl_t2i_workflow(prompt, steps, cfg, width, height)
+    if wid == "flux-kontext-edit":
+        if not image_filename:
+            raise RuntimeError("flux-kontext-edit needs an input image")
+        return _image_flux_kontext_workflow(image_filename, prompt, steps, cfg)
+    raise RuntimeError(f"unknown image workflow: {wid}")
 
 
 def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: int, cfg: float,
@@ -896,18 +991,26 @@ def _find_image_file(entry: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-async def generate_image(image_type: str, source_image_url: str) -> bytes:
-    """Run an image-enhance workflow on the 5090.
+async def generate_image(workflow_id: str, source_image_url: str | None = None, *,
+                          prompt: str = "", steps: int = 20, denoise: float = 0.20,
+                          cfg: float = 5.0, width: int = 1024, height: int = 1024) -> bytes:
+    """Run an image workflow on the 5090.
 
-    Pipeline: download `source_image_url` → upload to ComfyUI → submit
-    workflow built from `image_type` ('fast' / 'quality' / etc) → poll
-    /history for completion → return the enhanced image bytes.
+    Pipeline: optionally download source → upload to ComfyUI → build workflow
+    by id (`realesrgan-x4`, `sdxl-polish`, `sdxl-t2i`, `flux-kontext-edit`,
+    etc.) → poll /history for completion → return the resulting PNG bytes.
     """
     async with httpx.AsyncClient() as client:
-        img_bytes = await _download_image(client, source_image_url)
-        comfy_filename = await _upload_image_to_comfy(client, img_bytes,
-                                                       filename=f"enh_{int(time.time())}.png")
-        workflow = build_image_workflow(image_type, comfy_filename)
+        comfy_filename = None
+        if source_image_url:
+            img_bytes = await _download_image(client, source_image_url)
+            comfy_filename = await _upload_image_to_comfy(
+                client, img_bytes, filename=f"enh_{int(time.time())}.png")
+        workflow = build_image_workflow(
+            workflow_id, comfy_filename,
+            prompt=prompt, steps=steps, denoise=denoise, cfg=cfg,
+            width=width, height=height,
+        )
         prompt_id = await _queue_prompt(client, workflow)
         entry = await _poll_history(client, prompt_id)
         file = _find_image_file(entry)

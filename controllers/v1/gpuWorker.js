@@ -18,7 +18,7 @@ import logger from '../../helpers/logger.js';
 import { recordFailure } from '../../services/aiVideo/failureStore.js';
 import { recordVideo } from '../../services/aiVideo/videoStore.js';
 import { generateGroqCaption } from '../../services/aiVideo/caption.js';
-import { updateImage } from '../../services/aiVideo/enhancedImageStore.js';
+import { updateImage, appendImageLog } from '../../services/aiVideo/enhancedImageStore.js';
 
 const WORKER_FILES_DIR = path.join(process.cwd(), 'gpu-worker');
 const ALLOWED_FILES = new Set([
@@ -210,6 +210,18 @@ export const postJobProgress = async (req, res) => {
   const job = await updateInflightJob(jobId, updates);
   if (!job) return error(res, 'Job not found', 404);
   return success(res, job);
+};
+
+// Live log feed for image jobs (mirrors postJobProgress for video jobs)
+export const postImageProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { imageId, logLine, status } = req.body || {};
+  if (!imageId) return error(res, 'imageId required', 400);
+  if (logLine) appendImageLog(imageId, String(logLine));
+  if (status === 'processing') {
+    updateImage(imageId, { status: 'processing', startedAt: new Date().toISOString() });
+  }
+  return success(res, { ok: true });
 };
 
 // Image-enhance worker callbacks (mirrors postJobComplete/postJobFailed for videos)
