@@ -77,3 +77,23 @@ def upload_video(buffer: bytes, public_id: str,
         "bytes": res.get("bytes"),
         "format": res.get("format"),
     }
+
+
+def upload_image(buffer: bytes, public_id: str) -> dict[str, Any]:
+    """Upload a PNG/JPG buffer. Used by the image_enhance lane after ComfyUI
+    produces an enhanced image. Returns {url, publicId, bytes, format}."""
+    configure()
+    res = cloudinary.uploader.upload(
+        io.BytesIO(buffer).getvalue(),
+        resource_type="image",
+        public_id=public_id,
+        folder=f"{FOLDER}/enhanced",
+        format="png",
+        tags=["enhanced", "image"],
+    )
+    return {
+        "url": res.get("secure_url"),
+        "publicId": res.get("public_id"),
+        "bytes": res.get("bytes"),
+        "format": res.get("format"),
+    }

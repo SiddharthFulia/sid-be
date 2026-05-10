@@ -32,6 +32,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 # Format: amqps://user:pass@host/vhost
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "").strip()
 RABBITMQ_QUEUES = ["video_fast_queue", "video_quality_queue"]   # fast first → priority
+RABBITMQ_IMAGE_QUEUE = "image_enhance_queue"
 
 try:
     import pika   # only required when RABBITMQ_URL is set
@@ -428,12 +429,20 @@ class BrokerHandle:
             self.channel.exchange_declare(exchange="video.dlx", exchange_type="fanout", durable=True)
             self.channel.queue_declare(queue="video_failed_queue", durable=True)
             self.channel.queue_bind(queue="video_failed_queue", exchange="video.dlx")
+            self.channel.exchange_declare(exchange="image.dlx", exchange_type="fanout", durable=True)
+            self.channel.queue_declare(queue="image_failed_queue", durable=True)
+            self.channel.queue_bind(queue="image_failed_queue", exchange="image.dlx")
             for q in RABBITMQ_QUEUES:
                 self.channel.queue_declare(
                     queue=q, durable=True,
                     arguments={"x-dead-letter-exchange": "video.dlx"},
                 )
-            print(f"[broker] connected → {', '.join(RABBITMQ_QUEUES)} (DLQ: video_failed_queue)")
+            self.channel.queue_declare(
+                queue=RABBITMQ_IMAGE_QUEUE, durable=True,
+                arguments={"x-dead-letter-exchange": "image.dlx"},
+            )
+            print(f"[broker] connected → {', '.join(RABBITMQ_QUEUES + [RABBITMQ_IMAGE_QUEUE])} "
+                  f"(DLQs: video_failed_queue, image_failed_queue)")
             return True
         except Exception as e:
             now = time.monotonic()
@@ -467,6 +476,27 @@ class BrokerHandle:
             self.channel = None
             return None, None
 
+    def get_image(self) -> tuple[dict | None, object]:
+        """Pull the next image-enhance trigger. Same shape as get() but only
+        from image_enhance_queue."""
+        if not self.connect():
+            return None, None
+        try:
+            import json
+            method, _props, body = self.channel.basic_get(queue=RABBITMQ_IMAGE_QUEUE, auto_ack=False)
+            if method:
+                try:
+                    msg = json.loads(body.decode("utf-8"))
+                except Exception:
+                    msg = {}
+                return msg, (RABBITMQ_IMAGE_QUEUE, method.delivery_tag)
+            return None, None
+        except Exception as e:
+            print(f"[broker] image basic_get error: {e}")
+            self.connection = None
+            self.channel = None
+            return None, None
+
     def ack(self, tag) -> None:
         if not tag or not self.channel:
             return
@@ -483,6 +513,96 @@ class BrokerHandle:
             self.channel.basic_nack(delivery_tag=tag[1], requeue=False)
         except Exception as e:
             print(f"[broker] nack failed: {e}")
+
+
+def report_image_complete(client: httpx.Client, image_id: str, output_url: str) -> None:
+    try:
+        r = client.post(
+            f"{MAIN_BACKEND_URL}/api/gpu-worker/image-complete",
+            headers=_headers(),
+            json={"imageId": image_id, "outputUrl": output_url},
+            timeout=20,
+        )
+        print(f"[image-complete] {image_id}: {r.status_code}")
+    except Exception as e:
+        print(f"[image-complete] error: {e}")
+
+
+def report_image_failed(client: httpx.Client, image_id: str, err_msg: str) -> None:
+    try:
+        r = client.post(
+            f"{MAIN_BACKEND_URL}/api/gpu-worker/image-failed",
+            headers=_headers(),
+            json={"imageId": image_id, "error": err_msg},
+            timeout=20,
+        )
+        print(f"[image-failed] {image_id}: {r.status_code}")
+    except Exception as e:
+        print(f"[image-failed] error: {e}")
+
+
+def get_image_by_id(client: httpx.Client, image_id: str) -> dict[str, Any] | None:
+    """Fetch the full enhanced_images row for a given imageId from the BE."""
+    try:
+        r = client.get(f"{MAIN_BACKEND_URL}/api/image-enhance/status/{image_id}", timeout=10)
+        if r.status_code != 200:
+            return None
+        return r.json().get("data")
+    except Exception as e:
+        print(f"[get-image] {image_id} error: {e}")
+        return None
+
+
+def process_image_job(client: httpx.Client, msg: dict) -> None:
+    """Run an image enhance job end-to-end: download source → ComfyUI → upload
+    enhanced output to Cloudinary → POST job-complete to BE."""
+    image_id = msg.get("imageId")
+    if not image_id:
+        return
+    # The broker only sent the trigger; pull the full row from BE
+    job = get_image_by_id(client, image_id)
+    if not job:
+        print(f"[image] {image_id}: not found on BE — already processed or expired")
+        return
+    if job.get("status") not in ("queued", "processing"):
+        print(f"[image] {image_id}: status={job.get('status')} — skipping")
+        return
+
+    image_type = job.get("type") or "fast"
+    source_url = job.get("sourceUrl")
+    if not source_url:
+        report_image_failed(client, image_id, "no sourceUrl on job")
+        return
+
+    print(f"\n[image] {image_id}  type={image_type}  source={source_url[:80]}")
+    started = time.monotonic()
+    try:
+        png_bytes = asyncio.run(comfyui_client.generate_image(image_type, source_url))
+    except Exception as e:
+        traceback.print_exc()
+        report_image_failed(client, image_id, f"ComfyUI failed: {str(e)[:300]}")
+        return
+
+    # Upload to Cloudinary
+    public_id = f"enhanced_{image_id}"
+    try:
+        # Reuse the source-image upload path (it accepts dataURL, but we have raw bytes)
+        # so write a tiny adapter inline:
+        import base64
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        data_url = f"data:image/png;base64,{b64}"
+        upload = cloudinary_upload.upload_image_data_url(data_url, public_id) \
+            if hasattr(cloudinary_upload, "upload_image_data_url") \
+            else cloudinary_upload.upload_image(png_bytes, public_id)
+        output_url = upload.get("url") or upload.get("secure_url") or upload.get("imageUrl")
+    except Exception as e:
+        traceback.print_exc()
+        report_image_failed(client, image_id, f"Cloudinary upload failed: {str(e)[:300]}")
+        return
+
+    elapsed = round(time.monotonic() - started, 1)
+    print(f"[image-done] {image_id} → {output_url} ({elapsed}s)")
+    report_image_complete(client, image_id, output_url)
 
 
 def main() -> None:
@@ -506,6 +626,19 @@ def main() -> None:
 
         while True:
             try:
+                # Image queue first — fast (~30s) so they don't get stuck behind a long video
+                img_msg, img_tag = broker.get_image()
+                if img_msg:
+                    try:
+                        process_image_job(client, img_msg)
+                        broker.ack(img_tag)
+                    except Exception as e:
+                        print(f"[image] process raised — NACK to DLQ: {e}")
+                        broker.nack_to_dlq(img_tag)
+                    consecutive_failures = 0
+                    register(client)
+                    continue
+
                 # Prefer broker pickup (sub-100ms) over HTTP polling (5s avg).
                 broker_msg, delivery_tag = broker.get()
                 if broker_msg:

@@ -18,6 +18,7 @@ import logger from '../../helpers/logger.js';
 import { recordFailure } from '../../services/aiVideo/failureStore.js';
 import { recordVideo } from '../../services/aiVideo/videoStore.js';
 import { generateGroqCaption } from '../../services/aiVideo/caption.js';
+import { updateImage } from '../../services/aiVideo/enhancedImageStore.js';
 
 const WORKER_FILES_DIR = path.join(process.cwd(), 'gpu-worker');
 const ALLOWED_FILES = new Set([
@@ -209,6 +210,35 @@ export const postJobProgress = async (req, res) => {
   const job = await updateInflightJob(jobId, updates);
   if (!job) return error(res, 'Job not found', 404);
   return success(res, job);
+};
+
+// Image-enhance worker callbacks (mirrors postJobComplete/postJobFailed for videos)
+export const postImageComplete = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { imageId, outputUrl } = req.body || {};
+  if (!imageId || !outputUrl) return error(res, 'imageId and outputUrl required', 400);
+  const row = updateImage(imageId, {
+    status: 'completed',
+    outputUrl,
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Image not found', 404);
+  logger.info(`Image ${imageId} completed by worker → ${outputUrl}`);
+  return success(res, row);
+};
+
+export const postImageFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { imageId, error: errMsg } = req.body || {};
+  if (!imageId) return error(res, 'imageId required', 400);
+  const row = updateImage(imageId, {
+    status: 'failed',
+    error: String(errMsg || 'unknown').slice(0, 800),
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Image not found', 404);
+  logger.warn(`Image ${imageId} failed: ${errMsg}`);
+  return success(res, row);
 };
 
 export const getWorkerFile = (req, res) => {

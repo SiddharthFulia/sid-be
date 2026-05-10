@@ -5,7 +5,7 @@ import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controll
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById } from '../../controllers/v1/aiVideo.js';
-import { postRegister, getNextJob, postJobComplete, postJobFailed, getWorkerFile, postJobProgress } from '../../controllers/v1/gpuWorker.js';
+import { postRegister, getNextJob, postJobComplete, postJobFailed, getWorkerFile, postJobProgress, postImageComplete, postImageFailed } from '../../controllers/v1/gpuWorker.js';
 
 const router = Router();
 
@@ -53,6 +53,8 @@ router.get('/gpu-worker/next-job', getNextJob);
 router.post('/gpu-worker/job-complete', postJobComplete);
 router.post('/gpu-worker/job-failed', postJobFailed);
 router.post('/gpu-worker/job-progress', postJobProgress);
+router.post('/gpu-worker/image-complete', postImageComplete);
+router.post('/gpu-worker/image-failed',   postImageFailed);
 router.get('/gpu-worker/files/:filename', getWorkerFile);
 
 // Face Detection

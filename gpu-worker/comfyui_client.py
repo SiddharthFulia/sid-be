@@ -612,6 +612,50 @@ def _mochi_workflow(prompt: str, aspect: str, duration: int, steps: int, cfg: fl
     }
 
 
+# ── Image enhancement workflows (separate from video pipeline) ──────────
+# These are built around `LoadImage → process → SaveImage` instead of the
+# T2V / I2V dance. Used by the image_enhance_queue lane.
+
+def _image_fast_enhance_workflow(image_filename: str) -> dict[str, Any]:
+    """RealESRGAN x4 upscale. Pure GAN upscaler — no diffusion, no prompts,
+    no safety filters. Works on portraits (no IMAGE_OTHER refusals like Gemini).
+    Output: 4× wider+taller than source, sharper edges, recovered detail."""
+    return {
+        "1": {"class_type": "LoadImage",
+              "inputs": {"image": image_filename}},
+        "2": {"class_type": "UpscaleModelLoader",
+              "inputs": {"model_name": "RealESRGAN_x4.pth"}},
+        "3": {"class_type": "ImageUpscaleWithModel",
+              "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+        "4": {"class_type": "SaveImage",
+              "inputs": {"filename_prefix": "enhanced_fast", "images": ["3", 0]}},
+    }
+
+
+def _image_face_sharpen_workflow(image_filename: str) -> dict[str, Any]:
+    """4x-UltraSharp upscaler — community-tuned for portraits. Better at
+    preserving skin texture / hair strands than RealESRGAN_x4plus on faces."""
+    return {
+        "1": {"class_type": "LoadImage",
+              "inputs": {"image": image_filename}},
+        "2": {"class_type": "UpscaleModelLoader",
+              "inputs": {"model_name": "4x-UltraSharp.pth"}},
+        "3": {"class_type": "ImageUpscaleWithModel",
+              "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+        "4": {"class_type": "SaveImage",
+              "inputs": {"filename_prefix": "enhanced_face", "images": ["3", 0]}},
+    }
+
+
+def build_image_workflow(image_type: str, image_filename: str) -> dict[str, Any]:
+    """Dispatch by mode. 'fast' → RealESRGAN, 'quality' → UltraSharp,
+    others fall back to fast for now (cinematic/edit are next phases)."""
+    t = (image_type or "fast").lower()
+    if t == "quality":
+        return _image_face_sharpen_workflow(image_filename)
+    return _image_fast_enhance_workflow(image_filename)
+
+
 def build_workflow(model: str, prompt: str, aspect: str, duration: int, steps: int, cfg: float,
                    resolution: str = "720p", image_filename: str | None = None) -> dict[str, Any]:
     m = (model or "ltx-video").lower()
@@ -835,4 +879,38 @@ async def generate(prompt: str, model: str = "ltx-video", aspect: str = "9:16",
         file = _find_video_file(entry)
         if not file:
             raise RuntimeError("ComfyUI completed but no video file in outputs")
+        return await _download(client, file)
+
+
+def _find_image_file(entry: dict[str, Any]) -> dict[str, str] | None:
+    """Walk the /history outputs looking for an image file (png/jpg/webp).
+    Used by generate_image() since SaveImage outputs land under different node
+    keys depending on the workflow."""
+    for node_out in (entry.get("outputs") or {}).values():
+        for kind in ("images", "files"):
+            for f in node_out.get(kind, []) or []:
+                name = f.get("filename") or ""
+                if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    return {"filename": name, "subfolder": f.get("subfolder", ""),
+                            "type": f.get("type", "output")}
+    return None
+
+
+async def generate_image(image_type: str, source_image_url: str) -> bytes:
+    """Run an image-enhance workflow on the 5090.
+
+    Pipeline: download `source_image_url` → upload to ComfyUI → submit
+    workflow built from `image_type` ('fast' / 'quality' / etc) → poll
+    /history for completion → return the enhanced image bytes.
+    """
+    async with httpx.AsyncClient() as client:
+        img_bytes = await _download_image(client, source_image_url)
+        comfy_filename = await _upload_image_to_comfy(client, img_bytes,
+                                                       filename=f"enh_{int(time.time())}.png")
+        workflow = build_image_workflow(image_type, comfy_filename)
+        prompt_id = await _queue_prompt(client, workflow)
+        entry = await _poll_history(client, prompt_id)
+        file = _find_image_file(entry)
+        if not file:
+            raise RuntimeError("ComfyUI completed but no image file in outputs")
         return await _download(client, file)
