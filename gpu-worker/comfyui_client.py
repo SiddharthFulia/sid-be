@@ -726,13 +726,27 @@ def build_image_workflow(workflow_id: str, image_filename: str | None,
                          prompt: str = "", steps: int = 20, denoise: float = 0.20,
                          cfg: float = 5.0, width: int = 1024, height: int = 1024) -> dict[str, Any]:
     wid = (workflow_id or "realesrgan-x4").lower()
+
+    # Family-name aliases — when the BE row's workflow column is null and the
+    # worker falls back to `type` (family), map to the sensible default for
+    # that family. Keeps the lane working even if BE hasn't been redeployed
+    # with the workflow column / value yet.
+    family_aliases = {
+        "upscale":   "realesrgan-x4",
+        "img2img":   "sdxl-polish",
+        "t2i":       "sdxl-t2i",
+        "edit":      "flux-kontext-edit",
+        # Legacy ids from the first version of this module
+        "fast":      "realesrgan-x4",
+        "quality":   "ultrasharp-x4",
+        "cinematic": "sdxl-polish",
+    }
+    wid = family_aliases.get(wid, wid)
+
     upscale_models = {
         "realesrgan-x4":  "RealESRGAN_x4.pth",
         "ultrasharp-x4":  "4x-UltraSharp.pth",
         "nmkd-siax":      "4x_NMKD-Siax_200k.pth",
-        # Legacy ids from the first version of this module
-        "fast":           "RealESRGAN_x4.pth",
-        "quality":        "4x-UltraSharp.pth",
     }
     if wid in upscale_models:
         if not image_filename:
