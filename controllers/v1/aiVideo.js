@@ -24,6 +24,7 @@ import {
   isCloudinaryConfigured as isCdnConfigured, uploadSourceImage as cdnUpload,
   deleteImageByUrl as cdnDeleteImage,
 } from '../../services/aiVideo/cloudinaryStore.js';
+import { classifyPrompt as classifyNsfw } from '../../services/auth/nsfwFilter.js';
 
 const ALIASES = {
   gpu: 'worker', comfyui: 'worker',
@@ -81,14 +82,18 @@ export const postGenerateVideo = async (req, res) => {
       return error(res, 'Cloudinary not configured on server', 503);
     }
 
-    // Vault flag: client opts in via `vault: true` in body. Gating it server-side:
-    // setting vault=true requires a valid JWT (maybeVault sets req.vault).
-    // Without the flag → public row (always allowed, no auth needed).
-    const wantsVault = !!req.body?.vault;
-    if (wantsVault && !req.vault) {
-      return error(res, 'vault auth required to save to private board', 401);
+    // Auth model: not logged in → NSFW filter blocks unsafe prompts; output → public.
+    // Logged in → no filter; output always lands in private Vault library.
+    const nsfw = classifyNsfw(prompt);
+    if (nsfw && !req.vault) {
+      return res.status(401).json({
+        status: false,
+        message: `Looks NSFW — log in to bypass (detected: ${nsfw.category})`,
+        code: 'NSFW_BLOCKED',
+        category: nsfw.category,
+      });
     }
-    const vaultFlag = wantsVault;
+    const vaultFlag = !!req.vault;
     let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: vaultFlag };
 
     // For the 'optimized' provider, apply mode-based speed defaults BEFORE dispatch.
@@ -266,8 +271,6 @@ async function handleAsyncWorker(req, res, opts, role, originalProvider) {
     // ignore them today). worker.py reads job.withMusic + job.musicPrompt.
     withMusic: !!opts.withMusic,
     musicPrompt: (opts.musicPrompt || '').slice(0, 400),
-    // Vault flag — propagated from the auth middleware. Used to filter
-    // public list endpoints by default.
     vault: opts.vault ? 1 : 0,
   });
 
@@ -555,12 +558,22 @@ export const postImageEnhance = async (req, res) => {
       type = 'fast', engine = 'cloud',
       workflow, steps, denoise, cfg, width, height,
       model: customModel,
-      vault: wantsVault,
     } = req.body || {};
-    // vault=true in body requires a valid JWT; otherwise reject.
-    if (wantsVault && !req.vault) {
-      return error(res, 'vault auth required to save to private board', 401);
+
+    // Auth model:
+    //   • Not logged in → NSFW prompt filter blocks unsafe inputs; output → public library
+    //   • Logged in    → no filter; output ALWAYS lands in private Vault library
+    // No client-side flag needed; the auth token (Authorization header) does both.
+    const nsfw = classifyNsfw(prompt);
+    if (nsfw && !req.vault) {
+      return res.status(401).json({
+        status: false,
+        message: `Looks NSFW — log in to bypass (detected: ${nsfw.category})`,
+        code: 'NSFW_BLOCKED',
+        category: nsfw.category,
+      });
     }
+    const vaultFlag = !!req.vault;   // logged-in → vault row
     // Accept legacy 'local' as an alias for 'atelier'.
     const eng = engine === 'local' ? 'atelier' : engine;
     if (!['cloud', 'atelier'].includes(eng)) {
@@ -608,7 +621,7 @@ export const postImageEnhance = async (req, res) => {
       width: typeof width === 'number' ? width : null,
       height: typeof height === 'number' ? height : null,
       customModel: typeof customModel === 'string' && customModel.trim() ? customModel.trim() : null,
-      vault: wantsVault ? 1 : 0,
+      vault: vaultFlag ? 1 : 0,
       startedAt: eng === 'cloud' ? new Date().toISOString() : null,
     });
 
@@ -695,12 +708,8 @@ export const getImageStatus = (req, res) => {
   }
 };
 
-// Library listing — paginated, filterable. Defaults to completed only.
-// Visibility:
-//   public (default, anonymous safe) — vault=0 items only
-//   vault — vault=1 items only; requires auth header (maybeVault middleware
-//           sets req.vault when token is valid). Without auth, returns empty.
-//   all  — everything; ignored unless req.vault (auth required)
+// Library listing. Public callers see vault=0; logged-in callers can request
+// `?visibility=vault` to see their private items. Default = public for safety.
 export const getImageList = (req, res) => {
   try {
     const status = req.query.status || 'completed';
@@ -710,18 +719,16 @@ export const getImageList = (req, res) => {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
 
-    // Auth gate for vault visibility — silently downgrade if no token
-    const effectiveVisibility = req.vault ? visibility : 'public';
-    const vault = effectiveVisibility === 'vault' ? 1
-                : effectiveVisibility === 'all'   ? undefined
-                : 0;
+    // Auth required for vault view; silently downgrade if no token.
+    const effective = req.vault ? visibility : 'public';
+    const vault = effective === 'vault' ? 1 : effective === 'all' ? undefined : 0;
 
     const result = listImages({
       status: status === 'all' ? undefined : status,
       type, engine, vault, page, limit,
     });
     result.counts = getImageCounts();
-    result.visibility = effectiveVisibility;
+    result.visibility = effective;
     return success(res, result);
   } catch (err) {
     return error(res, err.message);
