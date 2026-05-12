@@ -44,9 +44,13 @@ router.post('/auth/vault-login', (req, res) => {
 });
 router.get('/auth/vault-status', requireVault, (_req, res) => success(res, { ok: true }));
 
-// AI Video — public reads, vault-gated writes. maybeVault sets req.vault
-// on reads when a valid token is present so list/jobs can return private
-// items to authenticated users.
+// AI Video — fully public CRUD. maybeVault sets req.vault on every request
+// when a valid token is present; controllers use it to:
+//   • return vault items in list/status when ?visibility=vault is requested
+//   • allow `vault: true` flag on /generate (otherwise the flag is ignored)
+// Routes themselves are NEVER blocked by auth — visitors can browse + create
+// + delete public content without logging in. Auth only unlocks the private
+// vault lane.
 router.get('/ai-video/status/:jobId',   maybeVault, getJobStatus);
 router.get('/ai-video/today',           getTodayVideo);
 router.get('/ai-video/list',            maybeVault, getVideoList);
@@ -54,18 +58,18 @@ router.get('/ai-video/queue',           maybeVault, getJobQueue);
 router.get('/ai-video/failures',        maybeVault, getFailuresList);
 router.get('/ai-video/jobs',            maybeVault, getJobsFeed);
 router.get('/ai-video/providers',       getVideoProviders);
-router.post('/ai-video/generate',       requireVault, postGenerateVideo);
-router.delete('/ai-video/:videoId',     requireVault, deleteVideoById);
-router.post('/ai-video/upload-image',   requireVault, postUploadSourceImage);
+router.post('/ai-video/generate',       maybeVault, postGenerateVideo);
+router.delete('/ai-video/:videoId',     maybeVault, deleteVideoById);
+router.post('/ai-video/upload-image',   maybeVault, postUploadSourceImage);
 
-// Image Studio
+// Image Studio — same pattern
 router.get('/image-enhance/status/:imageId',  maybeVault, getImageStatus);
 router.get('/image-enhance/list',             maybeVault, getImageList);
-router.post('/image-enhance',                 requireVault, postImageEnhance);
-router.delete('/image-enhance/:imageId',      requireVault, deleteImageById);
+router.post('/image-enhance',                 maybeVault, postImageEnhance);
+router.delete('/image-enhance/:imageId',      maybeVault, deleteImageById);
 
-// Music
-router.post('/music/generate',                requireVault, postMusicGenerate);
+// Music — public, no auth needed
+router.post('/music/generate',                postMusicGenerate);
 
 // GPU worker — polling client endpoints (called by Lightning AI worker)
 router.post('/gpu-worker/register', postRegister);

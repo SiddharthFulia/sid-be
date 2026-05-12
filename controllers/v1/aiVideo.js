@@ -81,7 +81,15 @@ export const postGenerateVideo = async (req, res) => {
       return error(res, 'Cloudinary not configured on server', 503);
     }
 
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: !!req.vault };
+    // Vault flag: client opts in via `vault: true` in body. Gating it server-side:
+    // setting vault=true requires a valid JWT (maybeVault sets req.vault).
+    // Without the flag → public row (always allowed, no auth needed).
+    const wantsVault = !!req.body?.vault;
+    if (wantsVault && !req.vault) {
+      return error(res, 'vault auth required to save to private board', 401);
+    }
+    const vaultFlag = wantsVault;
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: vaultFlag };
 
     // For the 'optimized' provider, apply mode-based speed defaults BEFORE dispatch.
     // The user can still override via explicit fields, but blank fields get the mode's recommendation.
@@ -547,7 +555,12 @@ export const postImageEnhance = async (req, res) => {
       type = 'fast', engine = 'cloud',
       workflow, steps, denoise, cfg, width, height,
       model: customModel,
+      vault: wantsVault,
     } = req.body || {};
+    // vault=true in body requires a valid JWT; otherwise reject.
+    if (wantsVault && !req.vault) {
+      return error(res, 'vault auth required to save to private board', 401);
+    }
     // Accept legacy 'local' as an alias for 'atelier'.
     const eng = engine === 'local' ? 'atelier' : engine;
     if (!['cloud', 'atelier'].includes(eng)) {
@@ -595,7 +608,7 @@ export const postImageEnhance = async (req, res) => {
       width: typeof width === 'number' ? width : null,
       height: typeof height === 'number' ? height : null,
       customModel: typeof customModel === 'string' && customModel.trim() ? customModel.trim() : null,
-      vault: req.vault ? 1 : 0,
+      vault: wantsVault ? 1 : 0,
       startedAt: eng === 'cloud' ? new Date().toISOString() : null,
     });
 
