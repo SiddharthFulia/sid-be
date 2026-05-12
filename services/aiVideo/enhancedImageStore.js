@@ -24,13 +24,24 @@ const deleteStmt = db.prepare('DELETE FROM enhanced_images WHERE imageId = ?');
 const nextQueuedStmt = db.prepare(
   "SELECT * FROM enhanced_images WHERE engine = 'local' AND status = 'queued' ORDER BY createdAt ASC LIMIT 1"
 );
-const countsStmt = db.prepare(`
+// Two count statements — one for public rows, one for vault rows. Library
+// FE picks the right set based on which tab the user is viewing.
+const countsAllStmt = db.prepare(`
   SELECT
     SUM(CASE WHEN status='queued'     THEN 1 ELSE 0 END) AS queued,
     SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing,
     SUM(CASE WHEN status='completed'  THEN 1 ELSE 0 END) AS completed,
     SUM(CASE WHEN status='failed'     THEN 1 ELSE 0 END) AS failed
   FROM enhanced_images
+`);
+const countsVaultStmt = db.prepare(`
+  SELECT
+    SUM(CASE WHEN status='queued'     THEN 1 ELSE 0 END) AS queued,
+    SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing,
+    SUM(CASE WHEN status='completed'  THEN 1 ELSE 0 END) AS completed,
+    SUM(CASE WHEN status='failed'     THEN 1 ELSE 0 END) AS failed
+  FROM enhanced_images
+  WHERE vault = ?
 `);
 
 const COLUMNS = new Set([
@@ -131,12 +142,15 @@ export function listImages({ status, type, engine, vault, page = 1, limit = 24 }
   return { items, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) };
 }
 
-export function getImageCounts() {
-  const r = countsStmt.get();
+export function getImageCounts(vault) {
+  // vault = undefined → all rows; 0 → public only; 1 → vault only
+  const r = vault === 0 || vault === 1
+    ? countsVaultStmt.get(vault)
+    : countsAllStmt.get();
   return {
-    queued:     r.queued || 0,
-    processing: r.processing || 0,
-    completed:  r.completed || 0,
-    failed:     r.failed || 0,
+    queued:     r?.queued || 0,
+    processing: r?.processing || 0,
+    completed:  r?.completed || 0,
+    failed:     r?.failed || 0,
   };
 }

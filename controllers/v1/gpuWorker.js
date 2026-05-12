@@ -212,14 +212,27 @@ export const postJobProgress = async (req, res) => {
   return success(res, job);
 };
 
-// Live log feed for image jobs (mirrors postJobProgress for video jobs)
-export const postImageProgress = (req, res) => {
+// Live log feed for image jobs (mirrors postJobProgress for video jobs).
+// Auto-promotes the row from queued → processing the moment the first log
+// arrives — so the FE spinner shows the right label without the worker
+// having to send an explicit status update.
+export const postImageProgress = async (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
   const { imageId, logLine, status } = req.body || {};
   if (!imageId) return error(res, 'imageId required', 400);
   if (logLine) appendImageLog(imageId, String(logLine));
+
+  // Promote queued → processing on first log (worker has the job in hand).
+  // Explicit status field from the worker still wins if provided.
   if (status === 'processing') {
     updateImage(imageId, { status: 'processing', startedAt: new Date().toISOString() });
+  } else if (logLine) {
+    // Read current row; if still queued, flip.
+    const { getImage } = await import('../../services/aiVideo/enhancedImageStore.js');
+    const row = getImage(imageId);
+    if (row && row.status === 'queued') {
+      updateImage(imageId, { status: 'processing', startedAt: new Date().toISOString() });
+    }
   }
   return success(res, { ok: true });
 };

@@ -727,7 +727,9 @@ export const getImageList = (req, res) => {
       status: status === 'all' ? undefined : status,
       type, engine, vault, page, limit,
     });
-    result.counts = getImageCounts();
+    // Counts must match the visibility being viewed — Vault tab should NOT
+    // show public counts. Pass the same vault filter into getImageCounts.
+    result.counts = getImageCounts(vault);
     result.visibility = effective;
     return success(res, result);
   } catch (err) {
