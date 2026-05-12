@@ -286,6 +286,12 @@ function addColumnIfMissing(table, column, definition) {
 }
 addColumnIfMissing('jobs', 'withMusic',   'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('jobs', 'musicPrompt', 'TEXT');
+// vault=1 means this job was created via vault auth → listings hide it from
+// anonymous visitors. Propagated from jobs → videos / failures on completion.
+addColumnIfMissing('jobs',            'vault', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('videos',          'vault', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('failures',        'vault', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('enhanced_images', 'vault', 'INTEGER NOT NULL DEFAULT 0');
 // Atelier workflow + fine-tunes + log feed for the image-enhance lane
 addColumnIfMissing('enhanced_images', 'workflow', 'TEXT');
 addColumnIfMissing('enhanced_images', 'steps',    'INTEGER');
@@ -294,5 +300,6 @@ addColumnIfMissing('enhanced_images', 'cfg',      'REAL');
 addColumnIfMissing('enhanced_images', 'width',    'INTEGER');
 addColumnIfMissing('enhanced_images', 'height',   'INTEGER');
 addColumnIfMissing('enhanced_images', 'logs',     'TEXT');   // JSON array
+addColumnIfMissing('enhanced_images', 'customModel', 'TEXT'); // checkpoint override
 
 logger.info(`SQLite: ${DB_PATH} ready`);

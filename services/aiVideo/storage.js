@@ -38,7 +38,7 @@ const COLUMN_SET = new Set([
   'imageUrl', 'generateCaption', 'attemptCount', 'createdAt', 'startedAt',
   'completedAt', 'videoUrl', 'caption', 'error', 'workerId',
   'estimatedSeconds', 'progressMessage', 'progressStep', 'progressTotal',
-  'logs', 'withMusic', 'musicPrompt',
+  'logs', 'withMusic', 'musicPrompt', 'vault',
 ]);
 
 export async function createInflightJob(jobData) {

@@ -633,16 +633,17 @@ def _image_upscale_workflow(image_filename: str, model_filename: str) -> dict[st
 
 
 def _image_sdxl_polish_workflow(image_filename: str, prompt: str,
-                                 steps: int, denoise: float, cfg: float) -> dict[str, Any]:
+                                 steps: int, denoise: float, cfg: float,
+                                 checkpoint: str | None = None) -> dict[str, Any]:
     """SDXL img2img polish via JuggernautXL. Low denoise (~0.20) preserves
     identity and composition while sharpening details. Higher denoise gives
     more reinterpretation."""
     seed = random.randint(1, 1_000_000_000)
     pos = prompt or "masterpiece, photo-realistic, high detail, sharp focus, natural lighting"
     neg = "low quality, blurry, distorted, plastic skin, oversmoothed, watermark, text"
+    ckpt = checkpoint or "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
     return {
-        "1": {"class_type": "CheckpointLoaderSimple",
-              "inputs": {"ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"}},
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
         "2": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
         "3": {"class_type": "VAEEncode", "inputs": {"pixels": ["2", 0], "vae": ["1", 2]}},
         "4": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["1", 1]}},
@@ -661,14 +662,15 @@ def _image_sdxl_polish_workflow(image_filename: str, prompt: str,
 
 
 def _image_sdxl_t2i_workflow(prompt: str, steps: int, cfg: float,
-                              width: int, height: int) -> dict[str, Any]:
+                              width: int, height: int,
+                              checkpoint: str | None = None) -> dict[str, Any]:
     """Pure text-to-image via JuggernautXL. No source image, no denoise —
     runs on an empty latent at the target dimensions."""
     seed = random.randint(1, 1_000_000_000)
     neg = "low quality, blurry, distorted, watermark, text, deformed"
+    ckpt = checkpoint or "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
     return {
-        "1": {"class_type": "CheckpointLoaderSimple",
-              "inputs": {"ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"}},
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
         "2": {"class_type": "EmptyLatentImage",
               "inputs": {"width": int(width), "height": int(height), "batch_size": 1}},
         "3": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
@@ -724,19 +726,16 @@ def _image_flux_kontext_workflow(image_filename: str, prompt: str,
 # which tunings the workflow consumes.
 def build_image_workflow(workflow_id: str, image_filename: str | None,
                          prompt: str = "", steps: int = 20, denoise: float = 0.20,
-                         cfg: float = 5.0, width: int = 1024, height: int = 1024) -> dict[str, Any]:
+                         cfg: float = 5.0, width: int = 1024, height: int = 1024,
+                         custom_model: str | None = None) -> dict[str, Any]:
     wid = (workflow_id or "realesrgan-x4").lower()
 
-    # Family-name aliases — when the BE row's workflow column is null and the
-    # worker falls back to `type` (family), map to the sensible default for
-    # that family. Keeps the lane working even if BE hasn't been redeployed
-    # with the workflow column / value yet.
+    # Family-name aliases — fallback when BE row's workflow column is null.
     family_aliases = {
         "upscale":   "realesrgan-x4",
         "img2img":   "sdxl-polish",
         "t2i":       "sdxl-t2i",
         "edit":      "flux-kontext-edit",
-        # Legacy ids from the first version of this module
         "fast":      "realesrgan-x4",
         "quality":   "ultrasharp-x4",
         "cinematic": "sdxl-polish",
@@ -752,12 +751,14 @@ def build_image_workflow(workflow_id: str, image_filename: str | None,
         if not image_filename:
             raise RuntimeError(f"workflow {wid} needs an input image")
         return _image_upscale_workflow(image_filename, upscale_models[wid])
-    if wid == "sdxl-polish":
+    if wid in ("sdxl-polish", "custom-sdxl"):
         if not image_filename:
-            raise RuntimeError("sdxl-polish needs an input image")
-        return _image_sdxl_polish_workflow(image_filename, prompt, steps, denoise, cfg)
-    if wid == "sdxl-t2i":
-        return _image_sdxl_t2i_workflow(prompt, steps, cfg, width, height)
+            raise RuntimeError(f"{wid} needs an input image")
+        return _image_sdxl_polish_workflow(image_filename, prompt, steps, denoise, cfg,
+                                            checkpoint=custom_model)
+    if wid in ("sdxl-t2i", "custom-t2i"):
+        return _image_sdxl_t2i_workflow(prompt, steps, cfg, width, height,
+                                         checkpoint=custom_model)
     if wid == "flux-kontext-edit":
         if not image_filename:
             raise RuntimeError("flux-kontext-edit needs an input image")
@@ -1007,7 +1008,8 @@ def _find_image_file(entry: dict[str, Any]) -> dict[str, str] | None:
 
 async def generate_image(workflow_id: str, source_image_url: str | None = None, *,
                           prompt: str = "", steps: int = 20, denoise: float = 0.20,
-                          cfg: float = 5.0, width: int = 1024, height: int = 1024) -> bytes:
+                          cfg: float = 5.0, width: int = 1024, height: int = 1024,
+                          custom_model: str | None = None) -> bytes:
     """Run an image workflow on the 5090.
 
     Pipeline: optionally download source → upload to ComfyUI → build workflow
@@ -1023,7 +1025,7 @@ async def generate_image(workflow_id: str, source_image_url: str | None = None, 
         workflow = build_image_workflow(
             workflow_id, comfy_filename,
             prompt=prompt, steps=steps, denoise=denoise, cfg=cfg,
-            width=width, height=height,
+            width=width, height=height, custom_model=custom_model,
         )
         prompt_id = await _queue_prompt(client, workflow)
         entry = await _poll_history(client, prompt_id)

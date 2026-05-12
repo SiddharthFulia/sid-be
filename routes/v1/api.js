@@ -6,6 +6,8 @@ import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById } from '../../controllers/v1/aiVideo.js';
 import { postRegister, getNextJob, postJobComplete, postJobFailed, getWorkerFile, postJobProgress, postImageComplete, postImageFailed, postImageProgress } from '../../controllers/v1/gpuWorker.js';
+import { checkVaultPassword, signVaultToken, requireVault, maybeVault } from '../../services/auth/vault.js';
+import { success, error } from '../../helpers/res_helper.js';
 
 const router = Router();
 
@@ -30,22 +32,40 @@ router.post('/image-edit', postImageEdit);
 router.post('/tts', postTTS);
 router.post('/summarize', postSummarize);
 
-// AI Video generation (Cloudinary-backed)
-router.post('/ai-video/generate', postGenerateVideo);
-router.get('/ai-video/status/:jobId', getJobStatus);
-router.get('/ai-video/today', getTodayVideo);
-router.get('/ai-video/list', getVideoList);
-router.get('/ai-video/queue', getJobQueue);
-router.get('/ai-video/failures', getFailuresList);
-router.get('/ai-video/jobs', getJobsFeed);
-router.get('/ai-video/providers', getVideoProviders);
-router.delete('/ai-video/:videoId', deleteVideoById);
-router.post('/ai-video/upload-image', postUploadSourceImage);
-router.post('/image-enhance',          postImageEnhance);    // creates job, returns imageId
-router.get('/image-enhance/status/:imageId', getImageStatus);
-router.get('/image-enhance/list',      getImageList);         // paginated library
-router.delete('/image-enhance/:imageId', deleteImageById);
-router.post('/music/generate',         postMusicGenerate);
+// Vault login — returns a JWT used to access the create/delete endpoints.
+// View/list endpoints stay public so the library is still readable to
+// anyone with the link. Only mutating routes are protected.
+router.post('/auth/vault-login', (req, res) => {
+  const { password } = req.body || {};
+  if (!checkVaultPassword(password)) {
+    return error(res, 'Invalid password', 401);
+  }
+  return success(res, { token: signVaultToken() });
+});
+router.get('/auth/vault-status', requireVault, (_req, res) => success(res, { ok: true }));
+
+// AI Video — public reads, vault-gated writes. maybeVault sets req.vault
+// on reads when a valid token is present so list/jobs can return private
+// items to authenticated users.
+router.get('/ai-video/status/:jobId',   maybeVault, getJobStatus);
+router.get('/ai-video/today',           getTodayVideo);
+router.get('/ai-video/list',            maybeVault, getVideoList);
+router.get('/ai-video/queue',           maybeVault, getJobQueue);
+router.get('/ai-video/failures',        maybeVault, getFailuresList);
+router.get('/ai-video/jobs',            maybeVault, getJobsFeed);
+router.get('/ai-video/providers',       getVideoProviders);
+router.post('/ai-video/generate',       requireVault, postGenerateVideo);
+router.delete('/ai-video/:videoId',     requireVault, deleteVideoById);
+router.post('/ai-video/upload-image',   requireVault, postUploadSourceImage);
+
+// Image Studio
+router.get('/image-enhance/status/:imageId',  maybeVault, getImageStatus);
+router.get('/image-enhance/list',             maybeVault, getImageList);
+router.post('/image-enhance',                 requireVault, postImageEnhance);
+router.delete('/image-enhance/:imageId',      requireVault, deleteImageById);
+
+// Music
+router.post('/music/generate',                requireVault, postMusicGenerate);
 
 // GPU worker — polling client endpoints (called by Lightning AI worker)
 router.post('/gpu-worker/register', postRegister);

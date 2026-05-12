@@ -81,7 +81,7 @@ export const postGenerateVideo = async (req, res) => {
       return error(res, 'Cloudinary not configured on server', 503);
     }
 
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt };
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: !!req.vault };
 
     // For the 'optimized' provider, apply mode-based speed defaults BEFORE dispatch.
     // The user can still override via explicit fields, but blank fields get the mode's recommendation.
@@ -258,6 +258,9 @@ async function handleAsyncWorker(req, res, opts, role, originalProvider) {
     // ignore them today). worker.py reads job.withMusic + job.musicPrompt.
     withMusic: !!opts.withMusic,
     musicPrompt: (opts.musicPrompt || '').slice(0, 400),
+    // Vault flag — propagated from the auth middleware. Used to filter
+    // public list endpoints by default.
+    vault: opts.vault ? 1 : 0,
   });
 
   const ws = await getWorkerStatus(role);
@@ -543,6 +546,7 @@ export const postImageEnhance = async (req, res) => {
       dataUrl, imageUrl, prompt, presetId,
       type = 'fast', engine = 'cloud',
       workflow, steps, denoise, cfg, width, height,
+      model: customModel,
     } = req.body || {};
     // Accept legacy 'local' as an alias for 'atelier'.
     const eng = engine === 'local' ? 'atelier' : engine;
@@ -553,12 +557,13 @@ export const postImageEnhance = async (req, res) => {
     const ATELIER_WORKFLOWS = new Set([
       'realesrgan-x4', 'ultrasharp-x4', 'nmkd-siax',
       'sdxl-polish', 'sdxl-t2i', 'flux-kontext-edit',
+      'custom-sdxl', 'custom-t2i',
     ]);
     if (eng === 'atelier' && workflow && !ATELIER_WORKFLOWS.has(workflow)) {
       return error(res, `unknown atelier workflow: ${workflow}`, 400);
     }
-    // Source-image rule: t2i workflow doesn't need an image.
-    const isT2I = workflow === 'sdxl-t2i';
+    // Source-image rule: t2i workflows don't need an image.
+    const isT2I = workflow === 'sdxl-t2i' || workflow === 'custom-t2i';
     if (!isT2I && !dataUrl && !imageUrl) {
       return error(res, 'dataUrl (base64) or imageUrl is required for this workflow', 400);
     }
@@ -589,6 +594,8 @@ export const postImageEnhance = async (req, res) => {
       cfg: typeof cfg === 'number' ? cfg : null,
       width: typeof width === 'number' ? width : null,
       height: typeof height === 'number' ? height : null,
+      customModel: typeof customModel === 'string' && customModel.trim() ? customModel.trim() : null,
+      vault: req.vault ? 1 : 0,
       startedAt: eng === 'cloud' ? new Date().toISOString() : null,
     });
 
@@ -676,18 +683,32 @@ export const getImageStatus = (req, res) => {
 };
 
 // Library listing — paginated, filterable. Defaults to completed only.
+// Visibility:
+//   public (default, anonymous safe) — vault=0 items only
+//   vault — vault=1 items only; requires auth header (maybeVault middleware
+//           sets req.vault when token is valid). Without auth, returns empty.
+//   all  — everything; ignored unless req.vault (auth required)
 export const getImageList = (req, res) => {
   try {
     const status = req.query.status || 'completed';
     const type = req.query.type || undefined;
     const engine = req.query.engine || undefined;
+    const visibility = (req.query.visibility || 'public').toLowerCase();
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
+
+    // Auth gate for vault visibility — silently downgrade if no token
+    const effectiveVisibility = req.vault ? visibility : 'public';
+    const vault = effectiveVisibility === 'vault' ? 1
+                : effectiveVisibility === 'all'   ? undefined
+                : 0;
+
     const result = listImages({
       status: status === 'all' ? undefined : status,
-      type, engine, page, limit,
+      type, engine, vault, page, limit,
     });
     result.counts = getImageCounts();
+    result.visibility = effectiveVisibility;
     return success(res, result);
   } catch (err) {
     return error(res, err.message);

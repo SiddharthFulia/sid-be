@@ -12,11 +12,11 @@ export function newImageId() {
 const insertStmt = db.prepare(`INSERT INTO enhanced_images (
   imageId, status, type, engine, presetId, prompt, sourceUrl, outputUrl,
   error, bytes, workerId, createdAt, startedAt, completedAt,
-  workflow, steps, denoise, cfg, width, height
+  workflow, steps, denoise, cfg, width, height, customModel
 ) VALUES (
   @imageId, @status, @type, @engine, @presetId, @prompt, @sourceUrl, @outputUrl,
   @error, @bytes, @workerId, @createdAt, @startedAt, @completedAt,
-  @workflow, @steps, @denoise, @cfg, @width, @height
+  @workflow, @steps, @denoise, @cfg, @width, @height, @customModel
 )`);
 
 const selectStmt = db.prepare('SELECT * FROM enhanced_images WHERE imageId = ?');
@@ -36,7 +36,8 @@ const countsStmt = db.prepare(`
 const COLUMNS = new Set([
   'status', 'type', 'engine', 'presetId', 'prompt', 'sourceUrl', 'outputUrl',
   'error', 'bytes', 'workerId', 'startedAt', 'completedAt',
-  'workflow', 'steps', 'denoise', 'cfg', 'width', 'height', 'logs',
+  'workflow', 'steps', 'denoise', 'cfg', 'width', 'height', 'logs', 'customModel',
+  'vault',
 ]);
 
 // Append a log line to the row's `logs` JSON array. Cap at the most recent
@@ -76,6 +77,7 @@ export function createImage(data) {
     cfg: null,
     width: null,
     height: null,
+    customModel: null,
     ...data,
   };
   insertStmt.run(row);
@@ -105,14 +107,20 @@ export function getNextQueuedImageJob() {
   return nextQueuedStmt.get() || null;
 }
 
-// Paginated list for the Library/Jobs tabs. Filter by status / type / engine.
-export function listImages({ status, type, engine, page = 1, limit = 24 } = {}) {
+// Paginated list. Filter by status / type / engine / vault.
+//   vault=undefined  → return both public + vault items
+//   vault=0          → public items only (default for anonymous viewers)
+//   vault=1          → vault items only (private, requires auth on the caller side)
+export function listImages({ status, type, engine, vault, page = 1, limit = 24 } = {}) {
   const offset = (Math.max(page, 1) - 1) * limit;
   const where = [];
   const params = { limit, offset };
-  if (status) { where.push('status = @status'); params.status = status; }
-  if (type)   { where.push('type   = @type');   params.type   = type;   }
-  if (engine) { where.push('engine = @engine'); params.engine = engine; }
+  if (status)             { where.push('status = @status'); params.status = status; }
+  if (type)               { where.push('type   = @type');   params.type   = type;   }
+  if (engine)             { where.push('engine = @engine'); params.engine = engine; }
+  if (vault === 0 || vault === 1) {
+    where.push('vault = @vault'); params.vault = vault;
+  }
   const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const items = db.prepare(
     `SELECT * FROM enhanced_images ${whereClause} ORDER BY createdAt DESC LIMIT @limit OFFSET @offset`

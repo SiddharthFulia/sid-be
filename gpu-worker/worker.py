@@ -593,12 +593,14 @@ def process_image_job(client: httpx.Client, msg: dict) -> None:
     workflow = job.get("workflow") or job.get("type") or "realesrgan-x4"
     source_url = job.get("sourceUrl")
     prompt = job.get("prompt", "")
+    custom_model = (job.get("customModel") or "").strip() or None
     tunings = {
         "steps":   job.get("steps")   or 20,
         "denoise": job.get("denoise") if job.get("denoise") is not None else 0.20,
         "cfg":     job.get("cfg")     or 5.0,
         "width":   job.get("width")   or 1024,
         "height":  job.get("height")  or 1024,
+        "custom_model": custom_model,
     }
     # Workflows that need a source image
     if workflow not in ("sdxl-t2i",) and not source_url:
