@@ -591,7 +591,10 @@ export const postImageEnhance = async (req, res) => {
     // Source-image rule: t2i workflows don't need an image.
     const isT2I = workflow === 'sdxl-t2i' || workflow === 'custom-t2i';
     if (!isT2I && !dataUrl && !imageUrl) {
-      return error(res, 'dataUrl (base64) or imageUrl is required for this workflow', 400);
+      const friendly = workflow
+        ? `Workflow "${workflow}" needs a source image. Upload one, or pick a "text→image" workflow.`
+        : 'Upload a source image first.';
+      return error(res, friendly, 400);
     }
     if (!prompt || typeof prompt !== 'string' || prompt.length < 3) {
       return error(res, 'prompt is required', 400);
@@ -640,7 +643,7 @@ export const postImageEnhance = async (req, res) => {
         .catch((err) => logger.warn(`Image publish skipped: ${err.message}`));
     }
 
-    logger.info(`IMAGE_ENHANCE QUEUE | ${job.imageId} | engine=${eng} workflow=${workflow || '-'} type=${type}`);
+    logger.info(`IMAGE_ENHANCE QUEUE | ${job.imageId} | engine=${eng} workflow=${workflow || '-'} type=${type} vault=${vaultFlag ? 'YES' : 'no'} authHeader=${!!req.headers.authorization}`);
     return success(res, {
       imageId: job.imageId,
       status: job.status,
