@@ -5,7 +5,7 @@ import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controll
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById } from '../../controllers/v1/aiVideo.js';
-import { postRegister, getNextJob, postJobComplete, postJobFailed, getWorkerFile, postJobProgress, postImageComplete, postImageFailed, postImageProgress } from '../../controllers/v1/gpuWorker.js';
+import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress } from '../../controllers/v1/gpuWorker.js';
 import { checkVaultPassword, signVaultToken, requireVault, maybeVault } from '../../services/auth/vault.js';
 import { success, error } from '../../helpers/res_helper.js';
 
@@ -80,7 +80,6 @@ router.post('/gpu-worker/job-progress', postJobProgress);
 router.post('/gpu-worker/image-progress', postImageProgress);
 router.post('/gpu-worker/image-complete', postImageComplete);
 router.post('/gpu-worker/image-failed',   postImageFailed);
-router.get('/gpu-worker/files/:filename', getWorkerFile);
 
 // Face Detection
 router.post('/face-analyze', postFaceAnalyze);

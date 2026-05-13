@@ -1,9 +1,0 @@
-.env
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
-worker.log
-*.mp4
-*.webm

@@ -1,5 +1,3 @@
-import path from 'path';
-import fs from 'fs';
 import { success, error } from '../../helpers/res_helper.js';
 import { GPU_WORKER_TOKEN } from '../../helpers/constants.js';
 import {
@@ -19,12 +17,6 @@ import { recordFailure } from '../../services/aiVideo/failureStore.js';
 import { recordVideo } from '../../services/aiVideo/videoStore.js';
 import { generateGroqCaption } from '../../services/aiVideo/caption.js';
 import { updateImage, appendImageLog } from '../../services/aiVideo/enhancedImageStore.js';
-
-const WORKER_FILES_DIR = path.join(process.cwd(), 'gpu-worker');
-const ALLOWED_FILES = new Set([
-  'worker.py', 'comfyui_client.py', 'cloudinary_upload.py',
-  'requirements.txt', 'wake.sh', '.env.example',
-]);
 
 function checkAuth(req) {
   if (!GPU_WORKER_TOKEN) return true;
@@ -266,14 +258,3 @@ export const postImageFailed = (req, res) => {
   return success(res, row);
 };
 
-export const getWorkerFile = (req, res) => {
-  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
-  const fname = req.params.filename;
-  if (!ALLOWED_FILES.has(fname)) return error(res, 'File not allowed', 403);
-  const filePath = path.join(WORKER_FILES_DIR, fname);
-  if (!filePath.startsWith(WORKER_FILES_DIR)) return error(res, 'Forbidden', 403);
-  if (!fs.existsSync(filePath)) return error(res, 'File not found', 404);
-  res.type(fname.endsWith('.sh') ? 'text/x-shellscript' : 'text/plain');
-  res.setHeader('Cache-Control', 'no-store');
-  fs.createReadStream(filePath).pipe(res);
-};

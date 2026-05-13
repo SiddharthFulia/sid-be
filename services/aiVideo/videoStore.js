@@ -12,20 +12,28 @@ import { db } from './db.js';
 
 const insertStmt = db.prepare(`INSERT OR REPLACE INTO videos (
   videoId, publicId, videoUrl, prompt, provider, model, duration, aspectRatio,
-  resolution, style, audio, caption, bytes, createdAt, cloudinaryContext
+  resolution, style, audio, caption, bytes, createdAt, cloudinaryContext, vault
 ) VALUES (
   @videoId, @publicId, @videoUrl, @prompt, @provider, @model, @duration, @aspectRatio,
-  @resolution, @style, @audio, @caption, @bytes, @createdAt, @cloudinaryContext
+  @resolution, @style, @audio, @caption, @bytes, @createdAt, @cloudinaryContext, @vault
 )`);
 
 const listStmt = db.prepare(
   'SELECT * FROM videos ORDER BY createdAt DESC LIMIT @limit OFFSET @offset'
 );
+const listPublicStmt = db.prepare(
+  'SELECT * FROM videos WHERE vault = 0 ORDER BY createdAt DESC LIMIT @limit OFFSET @offset'
+);
 const listByProviderStmt = db.prepare(
   'SELECT * FROM videos WHERE provider = @provider ORDER BY createdAt DESC LIMIT @limit OFFSET @offset'
 );
+const listByProviderPublicStmt = db.prepare(
+  'SELECT * FROM videos WHERE provider = @provider AND vault = 0 ORDER BY createdAt DESC LIMIT @limit OFFSET @offset'
+);
 const countStmt = db.prepare('SELECT COUNT(*) AS n FROM videos');
+const countPublicStmt = db.prepare('SELECT COUNT(*) AS n FROM videos WHERE vault = 0');
 const countByProviderStmt = db.prepare('SELECT COUNT(*) AS n FROM videos WHERE provider = ?');
+const countByProviderPublicStmt = db.prepare('SELECT COUNT(*) AS n FROM videos WHERE provider = ? AND vault = 0');
 const getStmt = db.prepare('SELECT * FROM videos WHERE videoId = ?');
 const deleteStmt = db.prepare('DELETE FROM videos WHERE videoId = ?');
 
@@ -46,6 +54,7 @@ export function recordVideo(meta) {
     bytes: meta.bytes ?? null,
     createdAt: meta.createdAt || new Date().toISOString(),
     cloudinaryContext: meta.cloudinaryContext ? JSON.stringify(meta.cloudinaryContext) : null,
+    vault: meta.vault ? 1 : 0,
   });
 }
 
@@ -70,17 +79,22 @@ function rowToVideo(r) {
   };
 }
 
-export function listLocalVideos({ provider, page = 1, limit = 12 }) {
+export function listLocalVideos({ provider, page = 1, limit = 12, vault = false } = {}) {
   const offset = (Math.max(page, 1) - 1) * limit;
+  // vault=true → caller is authenticated, can see vault rows
   if (provider) {
+    const stmt = vault ? listByProviderStmt : listByProviderPublicStmt;
+    const cnt  = vault ? countByProviderStmt : countByProviderPublicStmt;
     return {
-      items: listByProviderStmt.all({ provider, limit, offset }).map(rowToVideo),
-      total: countByProviderStmt.get(provider).n,
+      items: stmt.all({ provider, limit, offset }).map(rowToVideo),
+      total: cnt.get(provider).n,
     };
   }
+  const stmt = vault ? listStmt : listPublicStmt;
+  const cnt  = vault ? countStmt : countPublicStmt;
   return {
-    items: listStmt.all({ limit, offset }).map(rowToVideo),
-    total: countStmt.get().n,
+    items: stmt.all({ limit, offset }).map(rowToVideo),
+    total: cnt.get().n,
   };
 }
 

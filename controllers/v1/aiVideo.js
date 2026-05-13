@@ -338,12 +338,14 @@ export const getVideoList = async (req, res) => {
     if (includeInflight) {
       let inflight = await listInflightJobs();
       if (provider) {
-        // Match by originalProvider (FE label) first; fall back to role for
-        // legacy jobs that pre-date the originalProvider field.
         inflight = inflight.filter(j => (j.originalProvider || j.provider) === provider);
       }
-      // Show only mid-flight states; completed should already be on Cloudinary.
       inflight = inflight.filter(j => ['queued', 'processing', 'failed'].includes(j.status));
+      // Vault filter: hide vault items unless caller is authenticated (req.vault).
+      // This applies to in-flight AND failed jobs — vault content stays vault.
+      if (!req.vault) {
+        inflight = inflight.filter(j => !j.vault);
+      }
       if (inflight.length) {
         // Prepend in-flight jobs to first page (limit total to `limit`)
         const merged = [...inflight, ...result.items].slice(0, limit);
@@ -371,6 +373,8 @@ export const getJobQueue = async (req, res) => {
     items = items
       .filter(j => ['queued', 'processing'].includes(j.status))
       .filter(j => !provider || (j.originalProvider || j.provider) === provider)
+      // Hide vault items from anonymous viewers
+      .filter(j => req.vault || !j.vault)
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     return success(res, { items, total: items.length });
   } catch (err) {
@@ -401,6 +405,12 @@ export const getJobsFeed = async (req, res) => {
     // Lazy-load to avoid circular imports.
     const { db } = await import('../../services/aiVideo/db.js');
 
+    // Vault filter: anonymous visitors (req.vault=false) only see vault=0 rows.
+    // Authenticated callers see everything. The clause is injected into each
+    // UNION leg so SQLite can still use the per-table indexes.
+    const vClause = req.vault ? '' : ' WHERE vault = 0';
+    const vClauseAnd = req.vault ? '' : ' AND vault = 0';
+
     // We UNION ALL three sources, then sort by ts and page. Each row carries
     // a normalized `status` and `ts` (ms epoch) so the FE can render uniformly.
     const sql = `
@@ -411,7 +421,7 @@ export const getJobsFeed = async (req, res) => {
                videoUrl, error, createdAt,
                COALESCE(completedAt, startedAt, createdAt) AS ts,
                'jobs' AS src
-          FROM jobs
+          FROM jobs${vClause}
         UNION ALL
         SELECT videoId, 'completed' AS status,
                provider AS lane,
@@ -419,7 +429,7 @@ export const getJobsFeed = async (req, res) => {
                videoUrl, NULL AS error, createdAt,
                createdAt AS ts,
                'videos' AS src
-          FROM videos
+          FROM videos${vClause}
         UNION ALL
         SELECT videoId, 'failed' AS status,
                originalProvider AS lane,
@@ -427,7 +437,7 @@ export const getJobsFeed = async (req, res) => {
                NULL AS videoUrl, error, createdAt,
                failedAt AS ts,
                'failures' AS src
-          FROM failures
+          FROM failures${vClause}
       )
       SELECT * FROM unified
       ${status === 'all' ? '' : 'WHERE status = @status'}
@@ -436,9 +446,9 @@ export const getJobsFeed = async (req, res) => {
     `;
     const countSql = `
       WITH unified AS (
-        SELECT videoId, status FROM jobs
-        UNION ALL SELECT videoId, 'completed' FROM videos
-        UNION ALL SELECT videoId, 'failed'    FROM failures
+        SELECT videoId, status FROM jobs${vClause}
+        UNION ALL SELECT videoId, 'completed' FROM videos${vClause}
+        UNION ALL SELECT videoId, 'failed'    FROM failures${vClause}
       )
       SELECT COUNT(*) AS n FROM unified
       ${status === 'all' ? '' : 'WHERE status = @status'}
@@ -452,10 +462,10 @@ export const getJobsFeed = async (req, res) => {
       pages: Math.max(1, Math.ceil(total / limit)),
       counts: db.prepare(`
         SELECT
-          (SELECT COUNT(*) FROM jobs WHERE status='queued')     AS queued,
-          (SELECT COUNT(*) FROM jobs WHERE status='processing') AS processing,
-          (SELECT COUNT(*) FROM videos)                          AS completed,
-          (SELECT COUNT(*) FROM failures)                        AS failed
+          (SELECT COUNT(*) FROM jobs     WHERE status='queued'    ${vClauseAnd}) AS queued,
+          (SELECT COUNT(*) FROM jobs     WHERE status='processing'${vClauseAnd}) AS processing,
+          (SELECT COUNT(*) FROM videos   WHERE 1=1                ${vClauseAnd}) AS completed,
+          (SELECT COUNT(*) FROM failures WHERE 1=1                ${vClauseAnd}) AS failed
       `).get(),
     });
   } catch (err) {
@@ -472,7 +482,7 @@ export const getFailuresList = (req, res) => {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
     const provider = req.query.provider;
-    const result = listFailures({ provider, page, limit });
+    const result = listFailures({ provider, page, limit, vault: !!req.vault });
     return success(res, result);
   } catch (err) {
     logger.error('Failures list failed', err.message);
