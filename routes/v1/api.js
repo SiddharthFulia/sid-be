@@ -4,7 +4,7 @@ import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postP
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
-import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById } from '../../controllers/v1/aiVideo.js';
+import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
 import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress } from '../../controllers/v1/gpuWorker.js';
 import { checkVaultPassword, signVaultToken, requireVault, maybeVault } from '../../services/auth/vault.js';
 import { success, error } from '../../helpers/res_helper.js';
@@ -66,12 +66,30 @@ router.get('/ai-video/providers',       getVideoProviders);
 router.post('/ai-video/generate',       maybeVault, postGenerateVideo);
 router.delete('/ai-video/:videoId',     maybeVault, deleteVideoById);
 router.post('/ai-video/upload-image',   maybeVault, postUploadSourceImage);
+// Bulk actions — move-to-vault / make-public require auth; delete does not.
+// requireVault sits inside the controller via the action discriminator, so
+// the route uses maybeVault and the controller rejects unauthenticated
+// move/public calls (defensive check below).
+router.post('/ai-video/bulk',           maybeVault, (req, res, next) => {
+  const a = req.body?.action;
+  if ((a === 'move-to-vault' || a === 'make-public') && !req.vault) {
+    return res.status(401).json({ status: false, message: 'Vault login required for this action' });
+  }
+  return postVideoBulkAction(req, res, next);
+});
 
 // Image Studio — same pattern
 router.get('/image-enhance/status/:imageId',  maybeVault, getImageStatus);
 router.get('/image-enhance/list',             maybeVault, getImageList);
 router.post('/image-enhance',                 maybeVault, postImageEnhance);
 router.delete('/image-enhance/:imageId',      maybeVault, deleteImageById);
+router.post('/image-enhance/bulk',            maybeVault, (req, res, next) => {
+  const a = req.body?.action;
+  if ((a === 'move-to-vault' || a === 'make-public') && !req.vault) {
+    return res.status(401).json({ status: false, message: 'Vault login required for this action' });
+  }
+  return postImageBulkAction(req, res, next);
+});
 
 // Music — public, no auth needed
 router.post('/music/generate',                postMusicGenerate);

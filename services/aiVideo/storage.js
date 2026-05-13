@@ -95,3 +95,25 @@ export async function getNextQueuedForRole(role) {
 export async function listInflightJobs() {
   return listAllStmt.all().map(rowToJob);
 }
+
+// Bulk vault toggle on inflight jobs (queued/processing). Returns rows updated.
+export async function setInflightVault(ids, vault) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const v = vault ? 1 : 0;
+  const placeholders = ids.map(() => '?').join(',');
+  const stmt = db.prepare(`UPDATE jobs SET vault = ? WHERE videoId IN (${placeholders})`);
+  return stmt.run(v, ...ids).changes;
+}
+
+// Bulk delete inflight jobs. Used by the Jobs / Queue UI when the user
+// cancels a batch. Returns rows removed.
+export async function removeInflightJobs(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const stmt = db.prepare('DELETE FROM jobs WHERE videoId = ?');
+  const tx = db.transaction((batch) => {
+    let n = 0;
+    for (const id of batch) n += stmt.run(id).changes;
+    return n;
+  });
+  return tx(ids);
+}

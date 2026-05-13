@@ -3,6 +3,7 @@ import { generateZskyVideo } from '../../services/aiVideo/zsky.js';
 import { generateGroqCaption } from '../../services/aiVideo/caption.js';
 import {
   newVideoId, createInflightJob, getInflightJob, listInflightJobs, removeInflightJob,
+  setInflightVault, removeInflightJobs,
 } from '../../services/aiVideo/storage.js';
 import {
   uploadVideoBuffer, listVideos, getVideo, deleteVideo,
@@ -19,7 +20,11 @@ import { generateMusicViaHF } from '../../services/aiVideo/musicGen.js';
 import {
   createImage, getImage, updateImage, deleteImage as deleteImageRow,
   listImages, getImageCounts,
+  setImagesVault, deleteImages as deleteImagesBulk, getImagesByIds,
 } from '../../services/aiVideo/enhancedImageStore.js';
+import {
+  setVideosVault, deleteLocalVideos, getLocalVideosByIds,
+} from '../../services/aiVideo/videoStore.js';
 import {
   isCloudinaryConfigured as isCdnConfigured, uploadSourceImage as cdnUpload,
   deleteImageByUrl as cdnDeleteImage,
@@ -82,8 +87,10 @@ export const postGenerateVideo = async (req, res) => {
       return error(res, 'Cloudinary not configured on server', 503);
     }
 
-    // Auth model: not logged in → NSFW filter blocks unsafe prompts; output → public.
-    // Logged in → no filter; output always lands in private Vault library.
+    // Auth model: not logged in → NSFW filter blocks unsafe prompts.
+    // Logged in → filter bypassed. All NEW jobs land in the public library
+    // regardless of auth — the user can then explicitly "Move to Vault" from
+    // the library if they want it hidden. This is simpler than guessing intent.
     const nsfw = classifyNsfw(prompt);
     if (nsfw && !req.vault) {
       return res.status(401).json({
@@ -93,8 +100,7 @@ export const postGenerateVideo = async (req, res) => {
         category: nsfw.category,
       });
     }
-    const vaultFlag = !!req.vault;
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: vaultFlag };
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: false };
 
     // For the 'optimized' provider, apply mode-based speed defaults BEFORE dispatch.
     // The user can still override via explicit fields, but blank fields get the mode's recommendation.
@@ -568,6 +574,7 @@ export const postImageEnhance = async (req, res) => {
       type = 'fast', engine = 'cloud',
       workflow, steps, denoise, cfg, width, height,
       model: customModel,
+      negativePrompt,
     } = req.body || {};
 
     // Auth model:
@@ -583,7 +590,10 @@ export const postImageEnhance = async (req, res) => {
         category: nsfw.category,
       });
     }
-    const vaultFlag = !!req.vault;   // logged-in → vault row
+    // All NEW image jobs land public. Logged-in users can flip them to Vault
+    // explicitly via the library's "Move to Vault" action — see
+    // postImageBulkAction. No more automatic vault routing on submit.
+    const vaultFlag = false;
     // Accept legacy 'local' as an alias for 'atelier'.
     const eng = engine === 'local' ? 'atelier' : engine;
     if (!['cloud', 'atelier'].includes(eng)) {
@@ -634,6 +644,7 @@ export const postImageEnhance = async (req, res) => {
       width: typeof width === 'number' ? width : null,
       height: typeof height === 'number' ? height : null,
       customModel: typeof customModel === 'string' && customModel.trim() ? customModel.trim() : null,
+      negativePrompt: typeof negativePrompt === 'string' && negativePrompt.trim() ? negativePrompt.trim() : null,
       vault: vaultFlag ? 1 : 0,
       startedAt: eng === 'cloud' ? new Date().toISOString() : null,
     });
@@ -765,6 +776,92 @@ export const deleteImage = async (req, res) => {
     ]).catch(e => logger.warn(`Cloudinary cleanup partial: ${e.message}`));
     return success(res, { ok: true });
   } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+// ─── Bulk actions (images) ────────────────────────────────────────
+// One endpoint handles three actions to keep the FE plumbing tiny:
+//   action: 'move-to-vault' | 'make-public' | 'delete'
+//   ids:    array of imageId
+// move-to-vault and make-public REQUIRE a valid vault token (requireVault
+// middleware on the route). delete is open — same as the existing single
+// delete route.
+export const postImageBulkAction = async (req, res) => {
+  try {
+    const { action, ids } = req.body || {};
+    if (!action || !['move-to-vault', 'make-public', 'delete'].includes(action)) {
+      return error(res, 'action must be move-to-vault | make-public | delete', 400);
+    }
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return error(res, 'ids array is required', 400);
+    }
+    if (ids.length > 100) return error(res, 'max 100 ids per call', 400);
+
+    if (action === 'delete') {
+      // Fetch first so we know which Cloudinary URLs to clean up
+      const rows = getImagesByIds(ids);
+      const removed = deleteImagesBulk(ids);
+      // Fire-and-forget Cloudinary cleanup
+      const cdnPromises = [];
+      for (const row of rows) {
+        if (row.sourceUrl) cdnPromises.push(cdnDeleteImage(row.sourceUrl));
+        if (row.outputUrl) cdnPromises.push(cdnDeleteImage(row.outputUrl));
+      }
+      Promise.all(cdnPromises).catch(e => logger.warn(`Cloudinary bulk cleanup partial: ${e.message}`));
+      logger.info(`IMAGE BULK delete | ${removed}/${ids.length} rows`);
+      return success(res, { ok: true, action, affected: removed });
+    }
+
+    // move-to-vault / make-public — route is gated by requireVault upstream,
+    // so getting here means the caller is authenticated.
+    const moveToVault = action === 'move-to-vault';
+    const affected = setImagesVault(ids, moveToVault);
+    logger.info(`IMAGE BULK ${action} | ${affected}/${ids.length} rows`);
+    return success(res, { ok: true, action, affected });
+  } catch (err) {
+    logger.error('Image bulk action failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// ─── Bulk actions (videos) ────────────────────────────────────────
+// Same three actions. Operates across both jobs (in-flight) AND videos
+// (completed) tables so a single bulk call can move/delete items wherever
+// they live in the pipeline.
+export const postVideoBulkAction = async (req, res) => {
+  try {
+    const { action, ids } = req.body || {};
+    if (!action || !['move-to-vault', 'make-public', 'delete'].includes(action)) {
+      return error(res, 'action must be move-to-vault | make-public | delete', 400);
+    }
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return error(res, 'ids array is required', 400);
+    }
+    if (ids.length > 100) return error(res, 'max 100 ids per call', 400);
+
+    if (action === 'delete') {
+      const rows = getLocalVideosByIds(ids);
+      const inflightRemoved = await removeInflightJobs(ids);
+      const videoRemoved = deleteLocalVideos(ids);
+      // Cloudinary cleanup for completed videos
+      Promise.all(
+        rows.map(r => r.videoId ? deleteVideo(r.videoId) : null).filter(Boolean)
+      ).catch(e => logger.warn(`Cloudinary video bulk cleanup partial: ${e.message}`));
+      const affected = inflightRemoved + videoRemoved;
+      logger.info(`VIDEO BULK delete | inflight=${inflightRemoved} videos=${videoRemoved}`);
+      return success(res, { ok: true, action, affected });
+    }
+
+    // move-to-vault / make-public — flip on BOTH tables in one call
+    const moveToVault = action === 'move-to-vault';
+    const inflightChanged = await setInflightVault(ids, moveToVault);
+    const videosChanged = setVideosVault(ids, moveToVault);
+    const affected = inflightChanged + videosChanged;
+    logger.info(`VIDEO BULK ${action} | inflight=${inflightChanged} videos=${videosChanged}`);
+    return success(res, { ok: true, action, affected });
+  } catch (err) {
+    logger.error('Video bulk action failed', err.message);
     return error(res, err.message);
   }
 };

@@ -12,11 +12,11 @@ export function newImageId() {
 const insertStmt = db.prepare(`INSERT INTO enhanced_images (
   imageId, status, type, engine, presetId, prompt, sourceUrl, outputUrl,
   error, bytes, workerId, createdAt, startedAt, completedAt,
-  workflow, steps, denoise, cfg, width, height, customModel
+  workflow, steps, denoise, cfg, width, height, customModel, negativePrompt
 ) VALUES (
   @imageId, @status, @type, @engine, @presetId, @prompt, @sourceUrl, @outputUrl,
   @error, @bytes, @workerId, @createdAt, @startedAt, @completedAt,
-  @workflow, @steps, @denoise, @cfg, @width, @height, @customModel
+  @workflow, @steps, @denoise, @cfg, @width, @height, @customModel, @negativePrompt
 )`);
 
 const selectStmt = db.prepare('SELECT * FROM enhanced_images WHERE imageId = ?');
@@ -48,7 +48,7 @@ const COLUMNS = new Set([
   'status', 'type', 'engine', 'presetId', 'prompt', 'sourceUrl', 'outputUrl',
   'error', 'bytes', 'workerId', 'startedAt', 'completedAt',
   'workflow', 'steps', 'denoise', 'cfg', 'width', 'height', 'logs', 'customModel',
-  'vault',
+  'vault', 'negativePrompt',
 ]);
 
 // Append a log line to the row's `logs` JSON array. Cap at the most recent
@@ -89,6 +89,7 @@ export function createImage(data) {
     width: null,
     height: null,
     customModel: null,
+    negativePrompt: null,
     ...data,
   };
   insertStmt.run(row);
@@ -112,6 +113,38 @@ export function updateImage(imageId, patch) {
 
 export function deleteImage(imageId) {
   return deleteStmt.run(imageId).changes > 0;
+}
+
+// Set the vault flag on a batch of images. Returns the number of rows updated.
+// Used by the library's "Move to Vault" / "Make Public" toolbar actions and
+// the single-item action buttons. No-op for IDs that don't exist.
+export function setImagesVault(ids, vault) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const v = vault ? 1 : 0;
+  const placeholders = ids.map(() => '?').join(',');
+  const stmt = db.prepare(`UPDATE enhanced_images SET vault = ? WHERE imageId IN (${placeholders})`);
+  return stmt.run(v, ...ids).changes;
+}
+
+// Bulk-fetch rows so the caller can do per-row Cloudinary cleanup after a
+// bulk delete. Returns rows in the order they appear in `ids`.
+export function getImagesByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  const stmt = db.prepare(`SELECT * FROM enhanced_images WHERE imageId IN (${placeholders})`);
+  return stmt.all(...ids);
+}
+
+// Bulk delete — wrapped in a transaction. Returns the count of removed rows.
+export function deleteImages(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const stmt = db.prepare('DELETE FROM enhanced_images WHERE imageId = ?');
+  const tx = db.transaction((batch) => {
+    let n = 0;
+    for (const id of batch) n += stmt.run(id).changes;
+    return n;
+  });
+  return tx(ids);
 }
 
 export function getNextQueuedImageJob() {

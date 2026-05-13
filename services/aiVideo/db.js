@@ -301,5 +301,8 @@ addColumnIfMissing('enhanced_images', 'width',    'INTEGER');
 addColumnIfMissing('enhanced_images', 'height',   'INTEGER');
 addColumnIfMissing('enhanced_images', 'logs',     'TEXT');   // JSON array
 addColumnIfMissing('enhanced_images', 'customModel', 'TEXT'); // checkpoint override
+// Optional negative prompt — forwarded to ComfyUI's negative CLIPTextEncode
+// for SDXL/Pony/Flux workflows. Helps tame "deformed, watermark, blurry" etc.
+addColumnIfMissing('enhanced_images', 'negativePrompt', 'TEXT');
 
 logger.info(`SQLite: ${DB_PATH} ready`);

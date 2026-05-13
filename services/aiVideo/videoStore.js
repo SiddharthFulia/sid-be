@@ -105,3 +105,31 @@ export function getLocalVideo(videoId) {
 export function deleteLocalVideo(videoId) {
   return deleteStmt.run(videoId).changes > 0;
 }
+
+// Flip the vault flag on a batch of completed videos. Returns rows updated.
+export function setVideosVault(ids, vault) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const v = vault ? 1 : 0;
+  const placeholders = ids.map(() => '?').join(',');
+  const stmt = db.prepare(`UPDATE videos SET vault = ? WHERE videoId IN (${placeholders})`);
+  return stmt.run(v, ...ids).changes;
+}
+
+// Bulk-delete completed videos. Cloudinary cleanup is the caller's job.
+export function deleteLocalVideos(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const stmt = db.prepare('DELETE FROM videos WHERE videoId = ?');
+  const tx = db.transaction((batch) => {
+    let n = 0;
+    for (const id of batch) n += stmt.run(id).changes;
+    return n;
+  });
+  return tx(ids);
+}
+
+export function getLocalVideosByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  const stmt = db.prepare(`SELECT * FROM videos WHERE videoId IN (${placeholders})`);
+  return stmt.all(...ids).map(rowToVideo);
+}
