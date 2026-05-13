@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getHealth, getStats } from '../../controllers/v1/health.js';
-import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision } from '../../controllers/v1/ai.js';
+import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postPromptCoach } from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
@@ -25,6 +25,11 @@ router.post('/groq', postGroqChat);
 // AI (Gemini — Google, multimodal)
 router.post('/gemini', postGeminiChat);
 router.post('/gemini/vision', postGeminiVision);
+
+// Prompt coach — turns a plain-English idea into a model-tuned image prompt.
+// Used by the Image Studio "💡 Help me write a prompt" modal. The family field
+// drives which system prompt is used (sdxl / pony / sdxl-hyper / flux).
+router.post('/ai/prompt-coach', postPromptCoach);
 
 // AI Tools (image gen, edit, TTS, summarize)
 router.post('/generate-image', postImageGen);
