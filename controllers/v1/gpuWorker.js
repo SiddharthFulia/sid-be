@@ -19,6 +19,7 @@ import { generateGroqCaption } from '../../services/aiVideo/caption.js';
 import { updateImage, appendImageLog } from '../../services/aiVideo/enhancedImageStore.js';
 import { updateLipsyncJob, appendLipsyncLog } from '../../services/aiVideo/lipsyncStore.js';
 import { updateAudioJob, appendAudioLog } from '../../services/aiVideo/audioStore.js';
+import { appendLog as appendJobLog } from '../../services/aiVideo/logStore.js';
 
 function checkAuth(req) {
   if (!GPU_WORKER_TOKEN) return true;
@@ -188,15 +189,11 @@ export const postJobProgress = async (req, res) => {
   if (typeof step === 'number') updates.progressStep = step;
   if (typeof totalSteps === 'number') updates.progressTotal = totalSteps;
 
-  // Append a structured log entry. The worker streams human-readable lines
-  // here (e.g. "queued by 5090 worker", "ComfyUI step 12/30 @ 1.7s/step",
-  // "uploading to Cloudinary", "https://res.cloudinary.com/...") so the FE
-  // can show a live activity feed for the in-flight job. Cap at the most
-  // recent 80 entries to keep the JSON file from ballooning.
+  // Log lines route through the shared job_logs table (logStore) so the
+  // `jobs` row itself stays lean. Worker streams human-readable lines
+  // here ("queued by 5090 worker", "ComfyUI step 12/30 @ 1.7s/step", etc).
   if (logLine) {
-    const existing = (await getInflightJob(jobId))?.logs || [];
-    const next = [...existing, { ts: Date.now(), msg: String(logLine).slice(0, 300) }];
-    updates.logs = next.slice(-80);
+    appendJobLog(jobId, 'video', logLine);
   }
 
   if (!Object.keys(updates).length) return success(res, { ok: true });

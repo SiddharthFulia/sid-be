@@ -357,6 +357,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_audio_kind_created    ON audio_jobs(kind, createdAt DESC);
 `);
 
+// ─── Unified log feed (added 2026-05) ─────────────────────────
+// Lives in its own table so the main job tables stay lean — without this,
+// each row in jobs/enhanced_images/lipsync_jobs/audio_jobs would carry up
+// to ~25 KB of log JSON in the `logs` column, bloating reads + backups.
+//
+// Single table for ALL four lanes — distinguished by `lane`. Indexed on
+// (jobId, lane, ts DESC) so the per-job tail query (the only one the FE
+// makes) is instant. Append-only — no UPDATE path.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS job_logs (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    jobId  TEXT NOT NULL,
+    lane   TEXT NOT NULL,          -- 'video' | 'image' | 'lipsync' | 'audio'
+    ts     INTEGER NOT NULL,       -- ms epoch
+    msg    TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs(jobId, lane, ts DESC);
+  CREATE INDEX IF NOT EXISTS idx_job_logs_ts  ON job_logs(ts DESC);
+`);
+
 // ─── Cinema mode (Tier 3) ───────────────────────────────────
 // Orchestration on top of the video lane: a master prompt → Groq splits into
 // N shot prompts → render each via the standard video pipeline → ffmpeg stitch.

@@ -25,6 +25,7 @@ import {
 import {
   setVideosVault, deleteLocalVideos, getLocalVideosByIds,
 } from '../../services/aiVideo/videoStore.js';
+import { listRecentLogs, listLogs } from '../../services/aiVideo/logStore.js';
 import {
   isCloudinaryConfigured as isCdnConfigured, uploadSourceImage as cdnUpload,
   deleteImageByUrl as cdnDeleteImage,
@@ -726,7 +727,14 @@ export const getImageStatus = (req, res) => {
   try {
     const row = getImage(req.params.imageId);
     if (!row) return error(res, 'Not found', 404);
-    return success(res, row);
+    // New jobs: logs are in the shared job_logs table.
+    // Old jobs: logs were stored as a JSON string in the row's `logs` column —
+    // fall back to that for back-compat so the gallery still shows history.
+    let logs = listRecentLogs(row.imageId, 'image');
+    if (logs.length === 0 && row.logs) {
+      try { const p = JSON.parse(row.logs); if (Array.isArray(p)) logs = p; } catch {}
+    }
+    return success(res, { ...row, logs });
   } catch (err) {
     return error(res, err.message);
   }

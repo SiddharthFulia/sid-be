@@ -19,6 +19,7 @@ import {
 } from '../../services/aiVideo/cloudinaryStore.js';
 import { publishLipsyncJob, publishAudioJob } from '../../services/aiVideo/messageQueue.js';
 import { chatGroq } from '../../services/groq.js';
+import { listRecentLogs } from '../../services/aiVideo/logStore.js';
 
 // ─── Lip Sync ─────────────────────────────────────────────────────
 // POST /api/lipsync { audioDataUrl | audioUrl, portraitDataUrl | portraitUrl, model? }
@@ -63,10 +64,11 @@ export const postLipsync = async (req, res) => {
 export const getLipsyncStatus = (req, res) => {
   const row = getLipsyncJob(req.params.jobId);
   if (!row) return error(res, 'Not found', 404);
-  // Vault gate — anonymous viewers can't see vault jobs
   if (row.vault && !req.vault) return error(res, 'Not found', 404);
-  let logs = [];
-  try { logs = JSON.parse(row.logs || '[]'); if (!Array.isArray(logs)) logs = []; } catch {}
+  let logs = listRecentLogs(row.jobId, 'lipsync');
+  if (logs.length === 0 && row.logs) {
+    try { const p = JSON.parse(row.logs); if (Array.isArray(p)) logs = p; } catch {}
+  }
   return success(res, { ...row, logs });
 };
 
@@ -131,8 +133,10 @@ export const getAudioStatus = (req, res) => {
   const row = getAudioJob(req.params.jobId);
   if (!row) return error(res, 'Not found', 404);
   if (row.vault && !req.vault) return error(res, 'Not found', 404);
-  let logs = [];
-  try { logs = JSON.parse(row.logs || '[]'); if (!Array.isArray(logs)) logs = []; } catch {}
+  let logs = listRecentLogs(row.jobId, 'audio');
+  if (logs.length === 0 && row.logs) {
+    try { const p = JSON.parse(row.logs); if (Array.isArray(p)) logs = p; } catch {}
+  }
   return success(res, { ...row, logs });
 };
 

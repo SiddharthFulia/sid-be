@@ -51,19 +51,15 @@ const COLUMNS = new Set([
   'vault', 'negativePrompt',
 ]);
 
-// Append a log line to the row's `logs` JSON array. Cap at the most recent
-// 80 entries to keep the column small.
-const logsSelectStmt = db.prepare('SELECT logs FROM enhanced_images WHERE imageId = ?');
-const logsUpdateStmt = db.prepare('UPDATE enhanced_images SET logs = ? WHERE imageId = ?');
+// Append a log line. Writes to the shared `job_logs` table so the
+// `enhanced_images` row stays small. The legacy `logs` column on this
+// table is unused for new writes (kept for back-compat with old rows).
+import { appendLog as _appendLog } from './logStore.js';
 export function appendImageLog(imageId, line) {
-  const row = logsSelectStmt.get(imageId);
-  if (!row) return null;
-  let arr = [];
-  try { arr = JSON.parse(row.logs || '[]'); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
-  arr.push({ ts: Date.now(), msg: String(line).slice(0, 300) });
-  if (arr.length > 80) arr = arr.slice(-80);
-  logsUpdateStmt.run(JSON.stringify(arr), imageId);
-  return arr;
+  _appendLog(imageId, 'image', line);
+  // Return value preserved for callers that expect a value; the real
+  // history lives in job_logs and is read via logStore.listRecentLogs().
+  return true;
 }
 
 export function createImage(data) {

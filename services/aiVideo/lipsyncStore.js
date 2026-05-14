@@ -30,18 +30,12 @@ const COLUMNS = new Set([
   'startedAt', 'completedAt',
 ]);
 
-const logsSelectStmt = db.prepare('SELECT logs FROM lipsync_jobs WHERE jobId = ?');
-const logsUpdateStmt = db.prepare('UPDATE lipsync_jobs SET logs = ? WHERE jobId = ?');
-
+// Routed through the shared job_logs table — see logStore.js. Legacy
+// `logs` column on lipsync_jobs is unused for new writes.
+import { appendLog as _appendLog } from './logStore.js';
 export function appendLipsyncLog(jobId, line) {
-  const row = logsSelectStmt.get(jobId);
-  if (!row) return null;
-  let arr = [];
-  try { arr = JSON.parse(row.logs || '[]'); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
-  arr.push({ ts: Date.now(), msg: String(line).slice(0, 300) });
-  if (arr.length > 80) arr = arr.slice(-80);
-  logsUpdateStmt.run(JSON.stringify(arr), jobId);
-  return arr;
+  _appendLog(jobId, 'lipsync', line);
+  return true;
 }
 
 export function createLipsyncJob(data) {

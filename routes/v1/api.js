@@ -12,6 +12,7 @@ import {
   postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots,
 } from '../../controllers/v1/studio.js';
 import { checkVaultPassword, signVaultToken, requireVault, maybeVault } from '../../services/auth/vault.js';
+import { listLogs } from '../../services/aiVideo/logStore.js';
 import { success, error } from '../../helpers/res_helper.js';
 
 const router = Router();
@@ -53,6 +54,28 @@ router.post('/auth/vault-login', (req, res) => {
   return success(res, { token: signVaultToken() });
 });
 router.get('/auth/vault-status', requireVault, (_req, res) => success(res, { ok: true }));
+
+// ─── Unified log feed (added 2026-05) ──────────────────────────────
+// Lightweight live-tail endpoint. The FE polls this every 1.5s during a job
+// passing `since=<lastTs>` so each response is just the new lines — much
+// cheaper than re-fetching the whole status row.
+//
+//   GET /api/job-logs/:lane/:jobId?since=<ms>&limit=80
+//
+// Lanes: 'video' | 'image' | 'lipsync' | 'audio'.
+// Returns: { logs: [{ts, msg}, ...], nextSince } in chronological order.
+router.get('/job-logs/:lane/:jobId', maybeVault, (req, res) => {
+  const lane = String(req.params.lane || '').toLowerCase();
+  const jobId = req.params.jobId;
+  if (!['video', 'image', 'lipsync', 'audio'].includes(lane)) {
+    return error(res, "lane must be 'video' | 'image' | 'lipsync' | 'audio'", 400);
+  }
+  if (!jobId) return error(res, 'jobId required', 400);
+  const sinceTs = parseInt(req.query.since, 10) || 0;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 80, 500);
+  const logs = listLogs({ jobId, lane, sinceTs, limit });
+  return success(res, { logs, nextSince: logs.length ? logs[logs.length - 1].ts : sinceTs });
+});
 
 // AI Video — fully public CRUD. maybeVault sets req.vault on every request
 // when a valid token is present; controllers use it to:
