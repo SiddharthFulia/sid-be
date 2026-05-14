@@ -22,8 +22,12 @@ const QUEUE_QUALITY = 'video_quality_queue';
 const QUEUE_FAILED = 'video_failed_queue';
 const QUEUE_IMAGE = 'image_enhance_queue';
 const QUEUE_IMAGE_FAILED = 'image_failed_queue';
+const QUEUE_LIPSYNC = 'lipsync_queue';
+const QUEUE_AUDIO   = 'audio_queue';
 const EXCHANGE_DLX = 'video.dlx';
 const EXCHANGE_IMAGE_DLX = 'image.dlx';
+const EXCHANGE_LIPSYNC_DLX = 'lipsync.dlx';
+const EXCHANGE_AUDIO_DLX   = 'audio.dlx';
 
 let connection = null;
 let channel = null;
@@ -111,7 +115,19 @@ async function ensureChannel() {
       // Image work queue (single queue, type/engine fields on the message dispatch)
       await channel.assertQueue(QUEUE_IMAGE,   { durable: true, deadLetterExchange: EXCHANGE_IMAGE_DLX });
 
-      logger.info('RabbitMQ ready — both video queues connected');
+      // Lip Sync DLX + queue (Tier 3, added 2026-05)
+      await channel.assertExchange(EXCHANGE_LIPSYNC_DLX, 'fanout', { durable: true });
+      await channel.assertQueue('lipsync_failed_queue', { durable: true });
+      await channel.bindQueue('lipsync_failed_queue', EXCHANGE_LIPSYNC_DLX, '');
+      await channel.assertQueue(QUEUE_LIPSYNC, { durable: true, deadLetterExchange: EXCHANGE_LIPSYNC_DLX });
+
+      // Audio DLX + queue (Tier 3, added 2026-05)
+      await channel.assertExchange(EXCHANGE_AUDIO_DLX, 'fanout', { durable: true });
+      await channel.assertQueue('audio_failed_queue', { durable: true });
+      await channel.bindQueue('audio_failed_queue', EXCHANGE_AUDIO_DLX, '');
+      await channel.assertQueue(QUEUE_AUDIO, { durable: true, deadLetterExchange: EXCHANGE_AUDIO_DLX });
+
+      logger.info('RabbitMQ ready — video/image/lipsync/audio queues connected');
       return channel;
     } catch (err) {
       logger.error('RabbitMQ connect failed (workers will fall back to HTTP polling)', err.message);
@@ -220,6 +236,44 @@ export async function publishImageJob({ imageId, type, engine, presetId }) {
     }
   }
   logger.error(`RabbitMQ image publish failed after ${PUBLISH_MAX_ATTEMPTS} attempts: ${lastErr}`);
+  return false;
+}
+
+// Publish a lip-sync trigger. Worker pulls full job row from BE via HTTP.
+export async function publishLipsyncJob({ jobId, model }) {
+  if (!isConfigured()) return false;
+  const body = Buffer.from(JSON.stringify({ jobId, model, enqueuedAt: Date.now() }));
+  for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
+    const ch = await ensureChannel();
+    if (!ch) return false;
+    try {
+      const ok = ch.sendToQueue(QUEUE_LIPSYNC, body, { persistent: true, contentType: 'application/json' });
+      if (ok) return true;
+    } catch (err) { channel = null; }
+    if (attempt < PUBLISH_MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, PUBLISH_RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+    }
+  }
+  logger.error('RabbitMQ lipsync publish failed');
+  return false;
+}
+
+// Publish an audio-gen trigger.
+export async function publishAudioJob({ jobId, kind, model }) {
+  if (!isConfigured()) return false;
+  const body = Buffer.from(JSON.stringify({ jobId, kind, model, enqueuedAt: Date.now() }));
+  for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
+    const ch = await ensureChannel();
+    if (!ch) return false;
+    try {
+      const ok = ch.sendToQueue(QUEUE_AUDIO, body, { persistent: true, contentType: 'application/json' });
+      if (ok) return true;
+    } catch (err) { channel = null; }
+    if (attempt < PUBLISH_MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, PUBLISH_RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+    }
+  }
+  logger.error('RabbitMQ audio publish failed');
   return false;
 }
 

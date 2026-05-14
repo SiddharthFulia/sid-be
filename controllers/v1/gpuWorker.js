@@ -17,6 +17,8 @@ import { recordFailure } from '../../services/aiVideo/failureStore.js';
 import { recordVideo } from '../../services/aiVideo/videoStore.js';
 import { generateGroqCaption } from '../../services/aiVideo/caption.js';
 import { updateImage, appendImageLog } from '../../services/aiVideo/enhancedImageStore.js';
+import { updateLipsyncJob, appendLipsyncLog } from '../../services/aiVideo/lipsyncStore.js';
+import { updateAudioJob, appendAudioLog } from '../../services/aiVideo/audioStore.js';
 
 function checkAuth(req) {
   if (!GPU_WORKER_TOKEN) return true;
@@ -255,6 +257,86 @@ export const postImageFailed = (req, res) => {
   });
   if (!row) return error(res, 'Image not found', 404);
   logger.warn(`Image ${imageId} failed: ${errMsg}`);
+  return success(res, row);
+};
+
+// ─── Lip Sync worker callbacks ────────────────────────────────────
+export const postLipsyncProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, logLine } = req.body || {};
+  if (!jobId || !logLine) return error(res, 'jobId + logLine required', 400);
+  // Auto-flip queued→processing on first log
+  const existing = updateLipsyncJob(jobId, {});
+  if (existing && existing.status === 'queued') {
+    updateLipsyncJob(jobId, { status: 'processing', startedAt: new Date().toISOString() });
+  }
+  appendLipsyncLog(jobId, logLine);
+  return success(res, { ok: true });
+};
+
+export const postLipsyncComplete = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, outputUrl, durationMs, bytes } = req.body || {};
+  if (!jobId || !outputUrl) return error(res, 'jobId + outputUrl required', 400);
+  const row = updateLipsyncJob(jobId, {
+    status: 'completed', outputUrl,
+    durationMs: durationMs || null, bytes: bytes || null,
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Lipsync job not found', 404);
+  logger.info(`Lipsync ${jobId} completed → ${outputUrl}`);
+  return success(res, row);
+};
+
+export const postLipsyncFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, error: errMsg } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const row = updateLipsyncJob(jobId, {
+    status: 'failed', error: String(errMsg || 'unknown').slice(0, 800),
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Lipsync job not found', 404);
+  logger.warn(`Lipsync ${jobId} failed: ${errMsg}`);
+  return success(res, row);
+};
+
+// ─── Audio Studio worker callbacks ────────────────────────────────
+export const postAudioProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, logLine } = req.body || {};
+  if (!jobId || !logLine) return error(res, 'jobId + logLine required', 400);
+  const existing = updateAudioJob(jobId, {});
+  if (existing && existing.status === 'queued') {
+    updateAudioJob(jobId, { status: 'processing', startedAt: new Date().toISOString() });
+  }
+  appendAudioLog(jobId, logLine);
+  return success(res, { ok: true });
+};
+
+export const postAudioComplete = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, outputUrl, bytes } = req.body || {};
+  if (!jobId || !outputUrl) return error(res, 'jobId + outputUrl required', 400);
+  const row = updateAudioJob(jobId, {
+    status: 'completed', outputUrl, bytes: bytes || null,
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Audio job not found', 404);
+  logger.info(`Audio ${jobId} completed → ${outputUrl}`);
+  return success(res, row);
+};
+
+export const postAudioFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, error: errMsg } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const row = updateAudioJob(jobId, {
+    status: 'failed', error: String(errMsg || 'unknown').slice(0, 800),
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Audio job not found', 404);
+  logger.warn(`Audio ${jobId} failed: ${errMsg}`);
   return success(res, row);
 };
 

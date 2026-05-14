@@ -5,7 +5,12 @@ import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controll
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
-import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress } from '../../controllers/v1/gpuWorker.js';
+import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed } from '../../controllers/v1/gpuWorker.js';
+import {
+  postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync,
+  postAudio, getAudioStatus, getAudioList, deleteAudio,
+  postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots,
+} from '../../controllers/v1/studio.js';
 import { checkVaultPassword, signVaultToken, requireVault, maybeVault } from '../../services/auth/vault.js';
 import { success, error } from '../../helpers/res_helper.js';
 
@@ -103,6 +108,32 @@ router.post('/gpu-worker/job-progress', postJobProgress);
 router.post('/gpu-worker/image-progress', postImageProgress);
 router.post('/gpu-worker/image-complete', postImageComplete);
 router.post('/gpu-worker/image-failed',   postImageFailed);
+// Lip Sync worker callbacks
+router.post('/gpu-worker/lipsync-progress', postLipsyncProgress);
+router.post('/gpu-worker/lipsync-complete', postLipsyncComplete);
+router.post('/gpu-worker/lipsync-failed',   postLipsyncFailed);
+// Audio Studio worker callbacks
+router.post('/gpu-worker/audio-progress',   postAudioProgress);
+router.post('/gpu-worker/audio-complete',   postAudioComplete);
+router.post('/gpu-worker/audio-failed',     postAudioFailed);
+
+// ─── Studio lanes (Tier 3) — public submit, vault-aware list ────
+// Lip Sync
+router.post('/lipsync',                     maybeVault, postLipsync);
+router.get('/lipsync/status/:jobId',        maybeVault, getLipsyncStatus);
+router.get('/lipsync/list',                 maybeVault, getLipsyncList);
+router.delete('/lipsync/:jobId',            maybeVault, deleteLipsync);
+// Audio Studio
+router.post('/audio',                       maybeVault, postAudio);
+router.get('/audio/status/:jobId',          maybeVault, getAudioStatus);
+router.get('/audio/list',                   maybeVault, getAudioList);
+router.delete('/audio/:jobId',              maybeVault, deleteAudio);
+// Cinema (multi-shot)
+router.post('/cinema',                      maybeVault, postCinema);
+router.get('/cinema/status/:projectId',     maybeVault, getCinemaStatus);
+router.get('/cinema/list',                  maybeVault, getCinemaList);
+router.delete('/cinema/:projectId',         maybeVault, deleteCinema);
+router.patch('/cinema/:projectId',          maybeVault, patchCinemaShots);
 
 // Face Detection
 router.post('/face-analyze', postFaceAnalyze);

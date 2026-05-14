@@ -305,4 +305,80 @@ addColumnIfMissing('enhanced_images', 'customModel', 'TEXT'); // checkpoint over
 // for SDXL/Pony/Flux workflows. Helps tame "deformed, watermark, blurry" etc.
 addColumnIfMissing('enhanced_images', 'negativePrompt', 'TEXT');
 
+// ─── Lip Sync lane (Tier 3, added 2026-05) ────────────────
+// LatentSync workflow: audio + portrait → talking head video.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS lipsync_jobs (
+    jobId          TEXT PRIMARY KEY,
+    status         TEXT NOT NULL,        -- queued | processing | completed | failed
+    audioUrl       TEXT,                 -- Cloudinary URL of source audio
+    portraitUrl    TEXT,                 -- Cloudinary URL of source portrait
+    outputUrl      TEXT,                 -- Cloudinary URL of resulting talking-head video
+    prompt         TEXT,                 -- optional (LatentSync ignores it; reserved for future models)
+    model          TEXT,                 -- latentsync | musetalk (future)
+    error          TEXT,
+    bytes          INTEGER,
+    workerId       TEXT,
+    durationMs     INTEGER,              -- length of the source audio in ms
+    logs           TEXT,                 -- JSON array {ts, msg}
+    vault          INTEGER NOT NULL DEFAULT 0,
+    createdAt      TEXT NOT NULL,
+    startedAt      TEXT,
+    completedAt    TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_lipsync_status_created ON lipsync_jobs(status, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_lipsync_vault           ON lipsync_jobs(vault, status);
+`);
+
+// ─── Audio Studio lane (Tier 3) ────────────────────────────
+// Stable Audio Open (SFX/ambience) and Bark (TTS) outputs. Distinct from the
+// existing /api/music/generate which is MusicGen-specific. Same SQLite store
+// pattern as the image lane.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS audio_jobs (
+    jobId          TEXT PRIMARY KEY,
+    status         TEXT NOT NULL,
+    kind           TEXT NOT NULL,        -- music | sfx | tts
+    model          TEXT NOT NULL,        -- musicgen | stable-audio | bark
+    prompt         TEXT NOT NULL,
+    duration       INTEGER,              -- seconds (1-47 for stable-audio; up to 30 for musicgen)
+    voice          TEXT,                 -- bark voice preset id (TTS only)
+    outputUrl      TEXT,
+    bytes          INTEGER,
+    error          TEXT,
+    workerId       TEXT,
+    logs           TEXT,
+    vault          INTEGER NOT NULL DEFAULT 0,
+    createdAt      TEXT NOT NULL,
+    startedAt      TEXT,
+    completedAt    TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_audio_status_created ON audio_jobs(status, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_audio_kind_created    ON audio_jobs(kind, createdAt DESC);
+`);
+
+// ─── Cinema mode (Tier 3) ───────────────────────────────────
+// Orchestration on top of the video lane: a master prompt → Groq splits into
+// N shot prompts → render each via the standard video pipeline → ffmpeg stitch.
+// This table tracks the master + child relationship.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS cinema_projects (
+    projectId      TEXT PRIMARY KEY,
+    status         TEXT NOT NULL,        -- planning | rendering | stitching | completed | failed
+    masterPrompt   TEXT NOT NULL,
+    shotCount      INTEGER NOT NULL,
+    shotPrompts    TEXT,                 -- JSON array of strings (Groq output)
+    shotJobIds     TEXT,                 -- JSON array of videoId (the rendered children)
+    outputUrl      TEXT,                 -- final stitched mp4 on Cloudinary
+    error          TEXT,
+    durationPerShot INTEGER,             -- seconds
+    aspectRatio    TEXT,
+    resolution     TEXT,
+    vault          INTEGER NOT NULL DEFAULT 0,
+    createdAt      TEXT NOT NULL,
+    completedAt    TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_cinema_status_created ON cinema_projects(status, createdAt DESC);
+`);
+
 logger.info(`SQLite: ${DB_PATH} ready`);
