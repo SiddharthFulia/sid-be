@@ -80,6 +80,23 @@ export function deleteAudioJob(jobId) {
   return deleteStmt.run(jobId).changes > 0;
 }
 
+export function getAudioJobsByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return db.prepare(`SELECT * FROM audio_jobs WHERE jobId IN (${placeholders})`).all(...ids);
+}
+
+export function deleteAudioJobs(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const stmt = db.prepare('DELETE FROM audio_jobs WHERE jobId = ?');
+  const tx = db.transaction((batch) => {
+    let n = 0;
+    for (const id of batch) n += stmt.run(id).changes;
+    return n;
+  });
+  return tx(ids);
+}
+
 export function getNextQueuedAudioJob() {
   return nextQueuedStmt.get() || null;
 }

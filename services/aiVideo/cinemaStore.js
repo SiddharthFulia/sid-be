@@ -90,6 +90,23 @@ export function deleteCinemaProject(projectId) {
   return deleteStmt.run(projectId).changes > 0;
 }
 
+export function getCinemaProjectsByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return db.prepare(`SELECT * FROM cinema_projects WHERE projectId IN (${placeholders})`).all(...ids).map(deserialize);
+}
+
+export function deleteCinemaProjects(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const stmt = db.prepare('DELETE FROM cinema_projects WHERE projectId = ?');
+  const tx = db.transaction((batch) => {
+    let n = 0;
+    for (const id of batch) n += stmt.run(id).changes;
+    return n;
+  });
+  return tx(ids);
+}
+
 export function listCinemaProjects({ status, vault, page = 1, limit = 24 } = {}) {
   const offset = (Math.max(page, 1) - 1) * limit;
   const where = [];

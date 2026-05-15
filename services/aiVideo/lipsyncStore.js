@@ -81,6 +81,25 @@ export function deleteLipsyncJob(jobId) {
   return deleteStmt.run(jobId).changes > 0;
 }
 
+// Bulk fetch + bulk delete — used by /api/lipsync/bulk so the controller
+// can grab Cloudinary URLs for cleanup before nuking the rows.
+export function getLipsyncJobsByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return db.prepare(`SELECT * FROM lipsync_jobs WHERE jobId IN (${placeholders})`).all(...ids);
+}
+
+export function deleteLipsyncJobs(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const stmt = db.prepare('DELETE FROM lipsync_jobs WHERE jobId = ?');
+  const tx = db.transaction((batch) => {
+    let n = 0;
+    for (const id of batch) n += stmt.run(id).changes;
+    return n;
+  });
+  return tx(ids);
+}
+
 export function getNextQueuedLipsyncJob() {
   return nextQueuedStmt.get() || null;
 }

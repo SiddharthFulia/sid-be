@@ -7,12 +7,15 @@ import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import {
   createLipsyncJob, getLipsyncJob, listLipsyncJobs, updateLipsyncJob, deleteLipsyncJob,
+  getLipsyncJobsByIds, deleteLipsyncJobs,
 } from '../../services/aiVideo/lipsyncStore.js';
 import {
   createAudioJob, getAudioJob, listAudioJobs, updateAudioJob, deleteAudioJob,
+  getAudioJobsByIds, deleteAudioJobs,
 } from '../../services/aiVideo/audioStore.js';
 import {
   createCinemaProject, getCinemaProject, listCinemaProjects, updateCinemaProject, deleteCinemaProject,
+  getCinemaProjectsByIds, deleteCinemaProjects,
 } from '../../services/aiVideo/cinemaStore.js';
 import {
   isCloudinaryConfigured,
@@ -52,11 +55,12 @@ export const postLipsync = async (req, res) => {
       resolvedPortrait = up.url;
     }
 
+    // Lip Sync isn't NSFW-gated — these aren't private; the FE just shows
+    // them in the lane's own library. vault defaults to 0.
     const job = createLipsyncJob({
       audioUrl: resolvedAudio,
       portraitUrl: resolvedPortrait,
       model,
-      vault: req.vault ? 1 : 0,
     });
 
     publishLipsyncJob({ jobId: job.jobId, model }).catch(e =>
@@ -73,7 +77,6 @@ export const postLipsync = async (req, res) => {
 export const getLipsyncStatus = (req, res) => {
   const row = getLipsyncJob(req.params.jobId);
   if (!row) return error(res, 'Not found', 404);
-  if (row.vault && !req.vault) return error(res, 'Not found', 404);
   let logs = listRecentLogs(row.jobId, 'lipsync');
   if (logs.length === 0 && row.logs) {
     try { const p = JSON.parse(row.logs); if (Array.isArray(p)) logs = p; } catch {}
@@ -81,19 +84,38 @@ export const getLipsyncStatus = (req, res) => {
   return success(res, { ...row, logs });
 };
 
+// No vault filter — lipsync isn't a gated lane. Anyone can see anyone's
+// generations (this is your personal box; no multi-tenant separation needed).
 export const getLipsyncList = (req, res) => {
   const status = req.query.status || undefined;
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
-  const visibility = (req.query.visibility || 'public').toLowerCase();
-  const effective = req.vault ? visibility : 'public';
-  const vault = effective === 'vault' ? 1 : effective === 'all' ? undefined : 0;
   const result = listLipsyncJobs({
     status: status === 'all' ? undefined : status,
-    vault, page, limit,
+    page, limit,
   });
-  result.visibility = effective;
   return success(res, result);
+};
+
+// ─── Bulk delete (Lip Sync) ───────────────────────────────────────
+export const postLipsyncBulkAction = async (req, res) => {
+  try {
+    const { action, ids } = req.body || {};
+    if (action !== 'delete') return error(res, "action must be 'delete'", 400);
+    if (!Array.isArray(ids) || ids.length === 0) return error(res, 'ids array is required', 400);
+    if (ids.length > 100) return error(res, 'max 100 ids per call', 400);
+    const rows = getLipsyncJobsByIds(ids);
+    const removed = deleteLipsyncJobs(ids);
+    // Cloudinary cleanup — three URLs per row (audio source + portrait + output)
+    Promise.all(
+      rows.flatMap(r => [r.audioUrl, r.portraitUrl, r.outputUrl].filter(Boolean).map(u => cdnDeleteImage(u)))
+    ).catch(e => logger.warn(`Cloudinary lipsync bulk cleanup partial: ${e.message}`));
+    logger.info(`LIPSYNC BULK delete | ${removed}/${ids.length} rows`);
+    return success(res, { ok: true, action, affected: removed });
+  } catch (err) {
+    logger.error('Lipsync bulk action failed', err.message);
+    return error(res, err.message);
+  }
 };
 
 export const deleteLipsync = async (req, res) => {
@@ -124,7 +146,6 @@ export const postAudio = async (req, res) => {
     const job = createAudioJob({
       kind, model: resolvedModel, prompt: prompt.trim(),
       duration: Math.round(duration), voice: voice || null,
-      vault: req.vault ? 1 : 0,
     });
 
     publishAudioJob({ jobId: job.jobId, kind, model: resolvedModel }).catch(e =>
@@ -141,7 +162,6 @@ export const postAudio = async (req, res) => {
 export const getAudioStatus = (req, res) => {
   const row = getAudioJob(req.params.jobId);
   if (!row) return error(res, 'Not found', 404);
-  if (row.vault && !req.vault) return error(res, 'Not found', 404);
   let logs = listRecentLogs(row.jobId, 'audio');
   if (logs.length === 0 && row.logs) {
     try { const p = JSON.parse(row.logs); if (Array.isArray(p)) logs = p; } catch {}
@@ -154,15 +174,31 @@ export const getAudioList = (req, res) => {
   const kind = req.query.kind || undefined;
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
-  const visibility = (req.query.visibility || 'public').toLowerCase();
-  const effective = req.vault ? visibility : 'public';
-  const vault = effective === 'vault' ? 1 : effective === 'all' ? undefined : 0;
   const result = listAudioJobs({
     status: status === 'all' ? undefined : status,
-    kind, vault, page, limit,
+    kind, page, limit,
   });
-  result.visibility = effective;
   return success(res, result);
+};
+
+// ─── Bulk delete (Audio Studio) ───────────────────────────────────
+export const postAudioBulkAction = async (req, res) => {
+  try {
+    const { action, ids } = req.body || {};
+    if (action !== 'delete') return error(res, "action must be 'delete'", 400);
+    if (!Array.isArray(ids) || ids.length === 0) return error(res, 'ids array is required', 400);
+    if (ids.length > 100) return error(res, 'max 100 ids per call', 400);
+    const rows = getAudioJobsByIds(ids);
+    const removed = deleteAudioJobs(ids);
+    Promise.all(
+      rows.flatMap(r => [r.outputUrl].filter(Boolean).map(u => cdnDeleteImage(u)))
+    ).catch(e => logger.warn(`Cloudinary audio bulk cleanup partial: ${e.message}`));
+    logger.info(`AUDIO BULK delete | ${removed}/${ids.length} rows`);
+    return success(res, { ok: true, action, affected: removed });
+  } catch (err) {
+    logger.error('Audio bulk action failed', err.message);
+    return error(res, err.message);
+  }
 };
 
 export const deleteAudio = async (req, res) => {
@@ -228,7 +264,6 @@ Output rules:
       shotPrompts,
       durationPerShot: Math.round(durationPerShot),
       aspectRatio, resolution,
-      vault: req.vault ? 1 : 0,
     });
 
     logger.info(`CINEMA CREATE | ${project.projectId} | shots=${shotCount}`);
@@ -245,7 +280,6 @@ Output rules:
 export const getCinemaStatus = (req, res) => {
   const row = getCinemaProject(req.params.projectId);
   if (!row) return error(res, 'Not found', 404);
-  if (row.vault && !req.vault) return error(res, 'Not found', 404);
   return success(res, row);
 };
 
@@ -253,15 +287,31 @@ export const getCinemaList = (req, res) => {
   const status = req.query.status || undefined;
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
-  const visibility = (req.query.visibility || 'public').toLowerCase();
-  const effective = req.vault ? visibility : 'public';
-  const vault = effective === 'vault' ? 1 : effective === 'all' ? undefined : 0;
   const result = listCinemaProjects({
     status: status === 'all' ? undefined : status,
-    vault, page, limit,
+    page, limit,
   });
-  result.visibility = effective;
   return success(res, result);
+};
+
+// ─── Bulk delete (Cinema) ─────────────────────────────────────────
+export const postCinemaBulkAction = async (req, res) => {
+  try {
+    const { action, ids } = req.body || {};
+    if (action !== 'delete') return error(res, "action must be 'delete'", 400);
+    if (!Array.isArray(ids) || ids.length === 0) return error(res, 'ids array is required', 400);
+    if (ids.length > 100) return error(res, 'max 100 ids per call', 400);
+    const rows = getCinemaProjectsByIds(ids);
+    const removed = deleteCinemaProjects(ids);
+    Promise.all(
+      rows.flatMap(r => [r.outputUrl].filter(Boolean).map(u => cdnDeleteImage(u)))
+    ).catch(e => logger.warn(`Cloudinary cinema bulk cleanup partial: ${e.message}`));
+    logger.info(`CINEMA BULK delete | ${removed}/${ids.length} rows`);
+    return success(res, { ok: true, action, affected: removed });
+  } catch (err) {
+    logger.error('Cinema bulk action failed', err.message);
+    return error(res, err.message);
+  }
 };
 
 export const deleteCinema = async (req, res) => {

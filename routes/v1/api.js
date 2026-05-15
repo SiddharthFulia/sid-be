@@ -7,9 +7,9 @@ import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../contr
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
 import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed } from '../../controllers/v1/gpuWorker.js';
 import {
-  postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync,
-  postAudio, getAudioStatus, getAudioList, deleteAudio,
-  postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots,
+  postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
+  postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
+  postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots, postCinemaBulkAction,
 } from '../../controllers/v1/studio.js';
 import { checkVaultPassword, signVaultToken, requireVault, maybeVault } from '../../services/auth/vault.js';
 import { listLogs } from '../../services/aiVideo/logStore.js';
@@ -140,23 +140,28 @@ router.post('/gpu-worker/audio-progress',   postAudioProgress);
 router.post('/gpu-worker/audio-complete',   postAudioComplete);
 router.post('/gpu-worker/audio-failed',     postAudioFailed);
 
-// ─── Studio lanes (Tier 3) — public submit, vault-aware list ────
-// Lip Sync
+// ─── Studio lanes (Tier 3) — no vault gating; library + bulk delete ─
+// These lanes don't need NSFW gating — they live in their own libraries.
+// `maybeVault` middleware stays so we still record auth state for telemetry,
+// but the controllers ignore req.vault for visibility decisions.
 router.post('/lipsync',                     maybeVault, postLipsync);
 router.get('/lipsync/status/:jobId',        maybeVault, getLipsyncStatus);
 router.get('/lipsync/list',                 maybeVault, getLipsyncList);
 router.delete('/lipsync/:jobId',            maybeVault, deleteLipsync);
-// Audio Studio
+router.post('/lipsync/bulk',                maybeVault, postLipsyncBulkAction);
+
 router.post('/audio',                       maybeVault, postAudio);
 router.get('/audio/status/:jobId',          maybeVault, getAudioStatus);
 router.get('/audio/list',                   maybeVault, getAudioList);
 router.delete('/audio/:jobId',              maybeVault, deleteAudio);
-// Cinema (multi-shot)
+router.post('/audio/bulk',                  maybeVault, postAudioBulkAction);
+
 router.post('/cinema',                      maybeVault, postCinema);
 router.get('/cinema/status/:projectId',     maybeVault, getCinemaStatus);
 router.get('/cinema/list',                  maybeVault, getCinemaList);
 router.delete('/cinema/:projectId',         maybeVault, deleteCinema);
 router.patch('/cinema/:projectId',          maybeVault, patchCinemaShots);
+router.post('/cinema/bulk',                 maybeVault, postCinemaBulkAction);
 
 // Face Detection
 router.post('/face-analyze', postFaceAnalyze);
