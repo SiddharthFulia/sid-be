@@ -15,7 +15,10 @@ import {
   createCinemaProject, getCinemaProject, listCinemaProjects, updateCinemaProject, deleteCinemaProject,
 } from '../../services/aiVideo/cinemaStore.js';
 import {
-  isCloudinaryConfigured, uploadSourceImage as cdnUpload, deleteImageByUrl as cdnDeleteImage,
+  isCloudinaryConfigured,
+  uploadSourceImage as cdnUploadImage,
+  uploadAudioDataUrl as cdnUploadAudio,
+  deleteImageByUrl as cdnDeleteImage,
 } from '../../services/aiVideo/cloudinaryStore.js';
 import { publishLipsyncJob, publishAudioJob } from '../../services/aiVideo/messageQueue.js';
 import { chatGroq } from '../../services/groq.js';
@@ -33,13 +36,19 @@ export const postLipsync = async (req, res) => {
 
     // Upload audio + portrait to Cloudinary so the worker can fetch them.
     // (Worker doesn't have direct access to FE's blob — it fetches via HTTPS.)
+    //
+    // Audio goes through uploadAudioDataUrl (resource_type=video, no `format:`
+    // param — Cloudinary stores the original mp3/wav/m4a as-is).
+    // Portrait goes through uploadSourceImage (image bucket).
+    // The previous version routed audio through uploadSourceImage too, which
+    // hardcodes format=jpg → transcode mp3→jpg → "unknown format: mpa".
     let resolvedAudio = audioUrl, resolvedPortrait = portraitUrl;
     if (audioDataUrl) {
-      const up = await cdnUpload(audioDataUrl, { resource_type: 'video' });   // Cloudinary stores audio in video bucket
+      const up = await cdnUploadAudio(audioDataUrl);
       resolvedAudio = up.url;
     }
     if (portraitDataUrl) {
-      const up = await cdnUpload(portraitDataUrl);
+      const up = await cdnUploadImage(portraitDataUrl);
       resolvedPortrait = up.url;
     }
 

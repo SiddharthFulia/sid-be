@@ -128,18 +128,18 @@ export async function uploadVideoBuffer(buffer, videoId, meta = {}, opts = {}) {
 /**
  * Upload a raw audio buffer (mp3 / wav / ogg). Used by /api/music/generate
  * to persist HF Inference output. Returns { url, publicId, bytes }.
+ *
+ * DO NOT pass `format:` — that asks Cloudinary to transcode and chokes with
+ * "unknown format: mpa" on certain codecs. Storing as-is just works.
  */
 export async function uploadAudioBuffer(buffer, mimeType = 'audio/mpeg') {
   configure();
-  const ext = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : 'mp3';
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
-        // Cloudinary stores audio under the 'video' resource_type bucket.
-        resource_type: 'video',
+        resource_type: 'video',                       // Cloudinary's audio classification
         folder: `${FOLDER}/audio`,
         public_id: `music_${Date.now()}`,
-        format: ext,
         context: { kind: 'music', createdAt: new Date().toISOString() },
         tags: ['music', 'standalone'],
       },
@@ -150,6 +150,33 @@ export async function uploadAudioBuffer(buffer, mimeType = 'audio/mpeg') {
     );
     stream.end(buffer);
   });
+}
+
+/**
+ * Upload an audio/video data: URL (mp3/wav/m4a/mp4 etc.) from the FE.
+ * Used by the Lip Sync lane for source audio AND by LivePortrait for the
+ * driver video. resource_type=video covers both audio + video on Cloudinary.
+ *
+ * No `format:` param — Cloudinary keeps the source codec unchanged.
+ * Previously postLipsync routed through uploadSourceImage which hardcodes
+ * format=jpg → tried to transcode mp3 → jpg → "unknown format: mpa".
+ */
+export async function uploadAudioDataUrl(dataUrl) {
+  configure();
+  if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error('Expected a data: URL');
+  }
+  const result = await cloudinary.uploader.upload(dataUrl, {
+    resource_type: 'video',
+    folder: `${FOLDER}/audio/sources`,
+    tags: ['audio', 'lipsync-source'],
+  });
+  return {
+    url: result.secure_url,
+    publicId: result.public_id,
+    bytes: result.bytes,
+    durationSec: result.duration,
+  };
 }
 
 // Build a Cloudinary thumbnail URL from a stored video URL — used by the FE
