@@ -57,11 +57,16 @@ function parseContext(custom = {}) {
   return custom || {};
 }
 
-// ─── Upload source image (used as I2V starting frame) ─────
+// ─── Upload source image (used as I2V starting frame + lipsync portrait) ──
 // Accepts a base64 data URL from the FE, returns a public Cloudinary URL.
-// Cloudinary auto-converts HEIC/WEBP/etc. to a delivered jpg/png; the worker
-// downloads via the resulting secure_url, so any format ComfyUI's PIL backend
-// can read works downstream.
+// Cloudinary auto-converts HEIC/WEBP/AVIF/etc. to a delivered jpg/png; the
+// worker downloads via the resulting secure_url, so any base format works
+// downstream.
+//
+// `quality: 'auto:best'` matters for lipsync — LatentSync's face landmark
+// detector fails on heavily-compressed inputs. Cloudinary's default `auto`
+// optimizes for byte savings (often ~23 KB for a portrait), which can
+// destroy enough detail to break face detection.
 export async function uploadSourceImage(dataUrl) {
   configure();
   if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
@@ -71,8 +76,8 @@ export async function uploadSourceImage(dataUrl) {
     resource_type: 'image',
     folder: `${FOLDER}/sources`,
     tags: ['ai-video-source'],
-    // delivered as jpg for max ComfyUI compatibility (PIL handles all base formats)
-    format: 'jpg',
+    format: 'jpg',                    // PIL/ffmpeg compatibility
+    quality: 'auto:best',             // preserve detail for face detection
   });
   return {
     url: result.secure_url,
