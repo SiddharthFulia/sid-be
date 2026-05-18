@@ -4,7 +4,7 @@ import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postP
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
-import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
+import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, postSpeechToText, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
 import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed } from '../../controllers/v1/gpuWorker.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
@@ -121,6 +121,9 @@ router.post('/image-enhance/bulk',            maybeVault, (req, res, next) => {
 
 // Music — public, no auth needed
 router.post('/music/generate',                postMusicGenerate);
+
+// Speech-to-Text — public, no auth needed. POST audio dataUrl, get transcript.
+router.post('/stt',                           postSpeechToText);
 
 // GPU worker — polling client endpoints (called by Lightning AI worker)
 router.post('/gpu-worker/register', postRegister);

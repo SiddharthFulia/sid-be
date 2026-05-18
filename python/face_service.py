@@ -118,21 +118,69 @@ def detect_mood(landmarks, w, h):
         eye_center_y = (landmarks[159].y * h + landmarks[386].y * h) / 2
         brow_raise = (eye_center_y - (left_brow_y + right_brow_y) / 2) / max(face_h, 1)
 
-        # Decision tree
+        # Decision tree.
+        # NOTE: brow_raise threshold was 0.08 which fired on neutral faces
+        # (most people sit with brows slightly above eye center). Bumped to
+        # 0.16 so only a real frown / pulled-down brow registers as angry.
+        # Also require smile_score to be non-positive (genuine frown) — a
+        # raised brow with a faint smile is more often surprise/expressive
+        # than angry.
         if mouth_ratio > 0.35:
             return 'surprised', min(0.5 + mouth_ratio, 0.95)
         elif smile_score > 0.02:
             return 'happy', min(0.6 + smile_score * 5, 0.98)
         elif smile_score < -0.015:
             return 'sad', min(0.5 + abs(smile_score) * 5, 0.85)
-        elif brow_raise > 0.08:
-            return 'angry', min(0.5 + brow_raise * 3, 0.8)
+        elif brow_raise > 0.16 and smile_score < 0.0:
+            return 'angry', min(0.5 + (brow_raise - 0.16) * 4, 0.8)
         elif eye_openness < 0.15:
             return 'sleepy', 0.7
         else:
             return 'neutral', 0.75
     except Exception:
         return 'neutral', 0.5
+
+
+def estimate_age(landmarks, w, h):
+    """Rough age estimator from facial proportions.
+
+    True age detection wants a CNN (DeepFace / InsightFace / age-net).
+    Until that's wired in, we return a heuristic age band based on:
+      • face length / width ratio (kids have rounder faces)
+      • eye-to-mouth distance vs face height (changes with bone growth)
+    Banded output ("20-29") keeps the UI honest about the precision.
+    """
+    try:
+        def pt(i):
+            return (landmarks[i].x * w, landmarks[i].y * h)
+        top = pt(10)
+        chin = pt(152)
+        left_cheek = pt(234)
+        right_cheek = pt(454)
+        eye_y = (pt(33)[1] + pt(263)[1]) / 2.0
+        mouth_y = (pt(13)[1] + pt(14)[1]) / 2.0
+
+        face_h = abs(chin[1] - top[1])
+        face_w = abs(right_cheek[0] - left_cheek[0])
+        ratio = face_h / max(face_w, 1e-3)             # 1.25–1.45 typical adult
+        eye_mouth = abs(mouth_y - eye_y) / max(face_h, 1e-3)   # 0.18–0.24 typical
+
+        # Heuristic banding. Tuned by inspection; not clinically accurate.
+        if ratio < 1.10 and eye_mouth < 0.18:
+            band, mid = '0-12', 8
+        elif ratio < 1.25 and eye_mouth < 0.20:
+            band, mid = '13-19', 16
+        elif ratio < 1.35:
+            band, mid = '20-29', 25
+        elif ratio < 1.42:
+            band, mid = '30-39', 35
+        elif ratio < 1.48:
+            band, mid = '40-49', 45
+        else:
+            band, mid = '50+', 55
+        return {'band': band, 'estimate': mid, 'method': 'heuristic'}
+    except Exception:
+        return None
 
 
 def get_face_angle(landmarks, w, h):
@@ -189,6 +237,9 @@ def analyze():
                 # Mood
                 mood, mood_conf = detect_mood(lm, w, h)
 
+                # Age (heuristic for now — see estimate_age docstring)
+                age_info = estimate_age(lm, w, h)
+
                 # Face angle
                 angle = get_face_angle(lm, w, h)
 
@@ -224,6 +275,7 @@ def analyze():
                     },
                     'mood': mood,
                     'moodConfidence': round(mood_conf, 2),
+                    'age': age_info,
                     'faceAngle': angle,
                     'features': {
                         'mouthOpen': round(mouth_open_ratio, 3),

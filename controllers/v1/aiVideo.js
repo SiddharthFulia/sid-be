@@ -17,6 +17,7 @@ import { publishJob, publishImageJob } from '../../services/aiVideo/messageQueue
 import { listFailures } from '../../services/aiVideo/failureStore.js';
 import { enhanceImageGemini } from '../../services/gemini.js';
 import { generateMusicViaHF } from '../../services/aiVideo/musicGen.js';
+import { transcribeViaHF } from '../../services/aiVideo/speechToText.js';
 import {
   createImage, getImage, updateImage, deleteImage as deleteImageRow,
   listImages, getImageCounts,
@@ -569,6 +570,34 @@ export const postMusicGenerate = async (req, res) => {
     return success(res, { ...out, elapsedMs });
   } catch (err) {
     logger.error('Music generate failed', err.message);
+    return error(res, err.message, 502);
+  }
+};
+
+// ─── Speech-to-Text (Whisper via HF Inference) ────────────────────────
+// Free, server-side, no GPU on Oracle needed. Defaults to Whisper-large-v3
+// which auto-detects ~99 languages. The FE uploads audio as a data URL +
+// optional `language` hint. Synchronous: response carries the transcript
+// directly so we don't need a queue / job row for typical short clips.
+export const postSpeechToText = async (req, res) => {
+  try {
+    const { dataUrl, language = '' } = req.body || {};
+    if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+      return error(res, 'dataUrl is required (data:audio/... base64)', 400);
+    }
+    // Parse the data URL → { mime, buf }
+    const m = dataUrl.match(/^data:([^;,]+)[^,]*,(.+)$/);
+    if (!m) return error(res, 'Malformed dataUrl', 400);
+    const mime = m[1] || 'audio/mpeg';
+    const buf = Buffer.from(m[2], 'base64');
+
+    const t0 = Date.now();
+    const out = await transcribeViaHF({ buf, mime, language: language.trim() });
+    const elapsedMs = Date.now() - t0;
+    logger.info(`STT | ${out.model} | ${buf.length}B | ${elapsedMs}ms | ${out.text.slice(0, 60)}…`);
+    return success(res, { ...out, elapsedMs });
+  } catch (err) {
+    logger.error('STT failed', err.message);
     return error(res, err.message, 502);
   }
 };
