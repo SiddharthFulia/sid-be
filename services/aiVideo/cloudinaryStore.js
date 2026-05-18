@@ -158,30 +158,61 @@ export async function uploadAudioBuffer(buffer, mimeType = 'audio/mpeg') {
 }
 
 /**
- * Upload an audio/video data: URL (mp3/wav/m4a/mp4 etc.) from the FE.
+ * Upload an audio/video data: URL (mp3/wav/m4a/mp4/webm etc.) from the FE.
  * Used by the Lip Sync lane for source audio AND by LivePortrait for the
  * driver video. resource_type=video covers both audio + video on Cloudinary.
  *
  * No `format:` param — Cloudinary keeps the source codec unchanged.
  * Previously postLipsync routed through uploadSourceImage which hardcodes
  * format=jpg → tried to transcode mp3 → jpg → "unknown format: mpa".
+ *
+ * IMPORTANT: we decode the data URL to a Buffer + upload_stream rather than
+ * handing the raw data URL to cloudinary.uploader.upload(). Cloudinary's SDK
+ * parser chokes on data URLs whose MIME has a `;codecs=…` parameter (e.g.
+ * the `data:audio/webm;codecs=opus;base64,…` strings the browser's
+ * MediaRecorder produces) with "Unsupported source URL". Reading the buffer
+ * ourselves bypasses the parser entirely and Cloudinary just stores the
+ * bytes — Whisper / ffmpeg downstream read the codec from the container.
  */
 export async function uploadAudioDataUrl(dataUrl) {
   configure();
   if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
     throw new Error('Expected a data: URL');
   }
-  const result = await cloudinary.uploader.upload(dataUrl, {
-    resource_type: 'video',
-    folder: `${FOLDER}/audio/sources`,
-    tags: ['audio', 'lipsync-source'],
+  const m = dataUrl.match(/^data:([^,]+),(.+)$/);
+  if (!m) throw new Error('Malformed data: URL');
+  const header = m[1];        // e.g. "audio/webm;codecs=opus;base64"
+  const isBase64 = /;\s*base64/i.test(header);
+  const mime = header.split(';')[0] || 'audio/mpeg';
+  const buf = isBase64
+    ? Buffer.from(m[2], 'base64')
+    : Buffer.from(decodeURIComponent(m[2]), 'utf8');
+
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: 'video',
+        folder: `${FOLDER}/audio/sources`,
+        // No extension in public_id — Cloudinary detects the format from
+        // the buffer and appends it to secure_url. Worker downloads via
+        // secure_url so it gets the right extension automatically.
+        public_id: `src_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        use_filename: false,
+        unique_filename: false,
+        tags: ['audio', 'lipsync-source', `mime-${mime.replace(/[^a-z0-9]/gi, '-')}`],
+      },
+      (err, res) => {
+        if (err) return reject(err);
+        resolve({
+          url: res.secure_url,
+          publicId: res.public_id,
+          bytes: res.bytes,
+          durationSec: res.duration,
+        });
+      },
+    );
+    stream.end(buf);
   });
-  return {
-    url: result.secure_url,
-    publicId: result.public_id,
-    bytes: result.bytes,
-    durationSec: result.duration,
-  };
 }
 
 // Build a Cloudinary thumbnail URL from a stored video URL — used by the FE
