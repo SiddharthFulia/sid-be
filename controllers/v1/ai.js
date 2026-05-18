@@ -165,6 +165,17 @@ Rules:
 - 25-50 words. Plain prose, not a list.
 - Example: "A samurai walks through a misty bamboo forest at dawn, discovers an abandoned shrine, and finds a mysterious light pulsing from within."
 - DO NOT output a NEG: line.`,
+
+  video: `You are an expert prompt engineer for AI video models (LTX-Video, Wan 2.2, HunyuanVideo, Mochi).
+
+Rules:
+- Output ONE single-line prompt for a SHORT clip (5-10 seconds), not a multi-shot story.
+- Describe: subject, motion / action, lighting, camera framing, mood. Be sensory.
+- Keep it tight: 15-40 words. Lowercase, comma-separated, no period.
+- Prefer concrete nouns + verbs ("waves crashing", "petals drifting") over abstract adjectives ("beautiful", "amazing").
+- Mention camera language when it fits: "shallow depth of field", "drone shot", "slow motion", "macro lens", "low-angle".
+- AVOID multi-scene language ("then", "and then", "next") — video models render ONE continuous moment.
+- DO NOT output a NEG: line — most video models ignore negatives.`,
 };
 
 export const postPromptCoach = async (req, res) => {

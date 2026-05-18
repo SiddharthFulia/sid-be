@@ -201,9 +201,15 @@ export function thumbnailFromVideoUrl(videoUrl, opts = {}) {
 // We fetch all pages up to a soft cap, then slice locally for page numbers.
 export async function listVideos({ provider, page = 1, limit = 12 } = {}) {
   configure();
+  // `folder:${FOLDER}` is an exact match (doesn't recurse into subfolders), so
+  // lipsync outputs uploaded to `${FOLDER}/lipsync/...` are already excluded.
+  // We ALSO exclude any `lipsync_*` public_ids defensively — covers older
+  // outputs that were uploaded into the root folder before the lipsync
+  // worker started using a subfolder.
   const expression = [
     'resource_type:video',
     `folder:${FOLDER}`,
+    `-public_id:${FOLDER}/lipsync_*`,
     provider ? `tags:${provider}` : '',
   ].filter(Boolean).join(' AND ');
 
