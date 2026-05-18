@@ -310,13 +310,27 @@ async function handleAsyncWorker(req, res, opts, role, originalProvider) {
 
 // ─── Status ─────────────────────────────────────────────────
 // Check in-flight first (queued/processing); fall through to Cloudinary (completed).
+// Logs come from the shared job_logs table (logStore), not the legacy
+// `jobs.logs` column. Keep the column read as a fallback for any in-flight
+// rows that were created before the unified table existed.
 export const getJobStatus = async (req, res) => {
   try {
     const id = req.params.jobId;
     const inflight = await getInflightJob(id);
-    if (inflight) return success(res, inflight);
+    if (inflight) {
+      let logs = listRecentLogs(id, 'video');
+      if (logs.length === 0 && Array.isArray(inflight.logs)) {
+        logs = inflight.logs;
+      }
+      return success(res, { ...inflight, logs });
+    }
     const completed = await getVideo(id);
-    if (completed) return success(res, completed);
+    if (completed) {
+      // Surface historical logs on completed videos too — lets the new
+      // /ai-video/:videoId detail page show the full render transcript.
+      const logs = listRecentLogs(id, 'video');
+      return success(res, { ...completed, logs });
+    }
     return error(res, 'Not found', 404);
   } catch (err) {
     return error(res, err.message);
