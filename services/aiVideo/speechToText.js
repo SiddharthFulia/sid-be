@@ -43,16 +43,22 @@ function _normalizeMime(mime) {
   return base;
 }
 
-async function _callOnce({ url, buf, mime, language }) {
+async function _callOnce({ url, buf, mime }) {
   const headers = { 'Content-Type': mime };
   if (HF_API_KEY) headers.Authorization = `Bearer ${HF_API_KEY}`;
 
-  const params = new URLSearchParams();
-  if (language) params.set('language', language);
-  params.set('return_timestamps', 'true');
-  const full = params.toString() ? `${url}?${params}` : url;
-
-  let res = await fetch(full, { method: 'POST', headers, body: buf });
+  // NOTE: HF's serverless ASR endpoint accepts the raw audio body but
+  // does NOT accept `language` as a query param — it routes through the
+  // `AutomaticSpeechRecognitionPipeline._sanitize_parameters` which only
+  // recognises a small set of generation kwargs. Passing `language=…`
+  // returns 400 "unexpected keyword argument 'language'".
+  //
+  // `return_timestamps` is also rejected on some hosts, so we omit
+  // EVERY query parameter and rely on Whisper's auto-language detection.
+  // (Auto-detect is excellent for clips ≥10s in practice.) Callers that
+  // need a forced language should target whisper-tiny/.en variants or
+  // deploy their own Inference Endpoint with custom routing.
+  let res = await fetch(url, { method: 'POST', headers, body: buf });
 
   // Cold start: HF returns 503 with estimated_time. Retry once.
   if (res.status === 503) {
@@ -60,7 +66,7 @@ async function _callOnce({ url, buf, mime, language }) {
     const wait = Math.min((info.estimated_time || 20) * 1000, 30000);
     logger.warn(`HF Whisper warming up — retrying in ${wait}ms`);
     await new Promise(r => setTimeout(r, wait));
-    res = await fetch(full, { method: 'POST', headers, body: buf });
+    res = await fetch(url, { method: 'POST', headers, body: buf });
   }
 
   return res;
@@ -91,15 +97,23 @@ export async function transcribeViaHF({ buf, mime = 'audio/mpeg', language = '' 
   let lastErr = null;
   let abort = false;
 
+  if (language) {
+    // Surface it but don't act on it — auto-detect handles most cases
+    // and the raw-audio endpoint can't accept a language hint.
+    logger.info(`STT language hint '${language}' ignored — using Whisper auto-detect`);
+  }
+
   // Outer loop: each candidate model. Inner loop: each endpoint host.
-  // Bail out of BOTH on a non-fallback-worthy error (e.g. 400 about the
-  // input body — that won't get better by switching models or hosts).
+  // Most 4xx errors are model/host specific (e.g. 415 unsupported MIME,
+  // 422 model can't process this clip) and the next model might still
+  // work — so we DON'T abort the chain on them. Only abort on 413
+  // (payload too large) since that's a hard limit.
   for (const model of HF_MODEL_CHAIN) {
     if (abort) break;
     for (const build of ENDPOINTS) {
       const url = build(model);
       try {
-        const res = await _callOnce({ url, buf, mime: sendMime, language });
+        const res = await _callOnce({ url, buf, mime: sendMime });
         if (res.ok) {
           const json = await res.json();
           if (model !== HF_MODEL_CHAIN[0]) {
@@ -109,6 +123,7 @@ export async function transcribeViaHF({ buf, mime = 'audio/mpeg', language = '' 
             text: (json.text || '').trim(),
             chunks: Array.isArray(json.chunks) ? json.chunks : [],
             language: language || null,
+            languageHonored: false,   // raw-audio endpoint can't honor hints
             bytes: buf.length,
             mime: sendMime,
             model,
@@ -120,11 +135,10 @@ export async function transcribeViaHF({ buf, mime = 'audio/mpeg', language = '' 
         const body = await res.text().catch(() => '');
         lastErr = `HF Whisper ${res.status} via ${new URL(url).host} (${model}): ${body.slice(0, 200)}`;
         logger.warn(lastErr);
-        // 404 → model not on this host, try next host then next model.
-        // 401/403 → auth issue, fall through to try next host (some hosts
-        //           accept tokens others don't).
-        // anything else → input-side problem; bail entirely.
-        if (![401, 403, 404].includes(res.status)) { abort = true; break; }
+        // Only abort on payload-too-large — every other 4xx might succeed
+        // on a different model/host (the older / smaller Whisper builds
+        // accept different parameter sets).
+        if (res.status === 413) { abort = true; break; }
       } catch (e) {
         lastErr = `HF Whisper fetch via ${new URL(url).host} (${model}) failed: ${e.message}`;
         logger.warn(lastErr);
