@@ -1,22 +1,34 @@
 // Speech-to-Text via Hugging Face Inference (Whisper).
 // No GPU on the BE — HF runs the model server-side. Set HF_TOKEN in .env;
-// without it many models 401 / 404 because they're gated.
+// without it many models 401 because they're gated.
 //
-// Tries both Inference endpoints because HF has been migrating models:
-//   1. router.huggingface.co/hf-inference/models/…   (current "router")
-//   2. api-inference.huggingface.co/models/…         (legacy)
-// Whichever responds 200 wins; if both fail we propagate the most
-// informative error to the FE.
+// Why a model FALLBACK chain instead of a single model: HF removed
+// `openai/whisper-large-v3` from free serverless inference in late 2024
+// (they moved it to paid Inference Providers — fal-ai / replicate). The
+// smaller Whisper variants are still on the free serverless tier, so we
+// try big → small until one responds. The user gets the best available
+// model their HF_TOKEN has access to without having to know any of this.
+//
+// Override the chain via HF_STT_MODEL=<single-model-id> in .env to force
+// a specific model (useful if you have an Inference Endpoint deployed).
 
 import logger from '../../helpers/logger.js';
 
 const HF_API_KEY = process.env.HF_TOKEN || process.env.HF_API_KEY || '';
-// Whisper large-v3 is the most accurate; distil-whisper-large-v3 is ~2x
-// faster with slightly less accuracy if you want to flip via env.
-const HF_MODEL = process.env.HF_STT_MODEL || 'openai/whisper-large-v3';
+
+// Quality order — try the best first, fall back to smaller models that
+// are still on the free serverless tier. distil-large-v3 is the closest
+// to large quality but is sometimes still served; whisper-small / -base /
+// -tiny are the reliable free serverless fallbacks.
+const HF_MODEL_CHAIN = (process.env.HF_STT_MODEL || [
+  'openai/whisper-large-v3',
+  'distil-whisper/distil-large-v3',
+  'openai/whisper-small',
+  'openai/whisper-base',
+  'openai/whisper-tiny',
+].join(',')).split(',').map(s => s.trim()).filter(Boolean);
 
 const ENDPOINTS = [
-  // Router first — Whisper-large-v3 lives behind the new router only.
   (model) => `https://router.huggingface.co/hf-inference/models/${model}`,
   (model) => `https://api-inference.huggingface.co/models/${model}`,
 ];
@@ -77,33 +89,46 @@ export async function transcribeViaHF({ buf, mime = 'audio/mpeg', language = '' 
 
   const sendMime = _normalizeMime(mime);
   let lastErr = null;
+  let abort = false;
 
-  for (const build of ENDPOINTS) {
-    const url = build(HF_MODEL);
-    try {
-      const res = await _callOnce({ url, buf, mime: sendMime, language });
-      if (res.ok) {
-        const json = await res.json();
-        return {
-          text: (json.text || '').trim(),
-          chunks: Array.isArray(json.chunks) ? json.chunks : [],
-          language: language || null,
-          bytes: buf.length,
-          mime: sendMime,
-          model: HF_MODEL,
-          provider: 'hf',
-          endpoint: url,
-        };
+  // Outer loop: each candidate model. Inner loop: each endpoint host.
+  // Bail out of BOTH on a non-fallback-worthy error (e.g. 400 about the
+  // input body — that won't get better by switching models or hosts).
+  for (const model of HF_MODEL_CHAIN) {
+    if (abort) break;
+    for (const build of ENDPOINTS) {
+      const url = build(model);
+      try {
+        const res = await _callOnce({ url, buf, mime: sendMime, language });
+        if (res.ok) {
+          const json = await res.json();
+          if (model !== HF_MODEL_CHAIN[0]) {
+            logger.info(`HF Whisper fell back to ${model} (first choice unavailable)`);
+          }
+          return {
+            text: (json.text || '').trim(),
+            chunks: Array.isArray(json.chunks) ? json.chunks : [],
+            language: language || null,
+            bytes: buf.length,
+            mime: sendMime,
+            model,
+            provider: 'hf',
+            endpoint: url,
+            fellBack: model !== HF_MODEL_CHAIN[0],
+          };
+        }
+        const body = await res.text().catch(() => '');
+        lastErr = `HF Whisper ${res.status} via ${new URL(url).host} (${model}): ${body.slice(0, 200)}`;
+        logger.warn(lastErr);
+        // 404 → model not on this host, try next host then next model.
+        // 401/403 → auth issue, fall through to try next host (some hosts
+        //           accept tokens others don't).
+        // anything else → input-side problem; bail entirely.
+        if (![401, 403, 404].includes(res.status)) { abort = true; break; }
+      } catch (e) {
+        lastErr = `HF Whisper fetch via ${new URL(url).host} (${model}) failed: ${e.message}`;
+        logger.warn(lastErr);
       }
-      const body = await res.text().catch(() => '');
-      lastErr = `HF Whisper ${res.status} via ${new URL(url).host}: ${body.slice(0, 300)}`;
-      logger.warn(lastErr);
-      // 401/403/404 → try the next endpoint. Anything else → bail (4xx
-      // about input shape won't get better by switching hosts).
-      if (![401, 403, 404].includes(res.status)) break;
-    } catch (e) {
-      lastErr = `HF Whisper fetch via ${new URL(url).host} failed: ${e.message}`;
-      logger.warn(lastErr);
     }
   }
 
