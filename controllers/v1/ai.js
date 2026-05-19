@@ -284,7 +284,8 @@ export const getOneConversation = (req, res) => {
 export const patchConversation = (req, res) => {
   try {
     const body = req.body || {};
-    const { title, model, provider, pinned, archived, temperature, maxTokens } = body;
+    const { title, model, provider, pinned, archived, temperature, maxTokens,
+            imageGenEnabled, imageGenModel } = body;
     const patch = {};
     if (typeof title === 'string') patch.title = title.slice(0, 200);
     if (typeof model === 'string') patch.model = model;
@@ -302,6 +303,16 @@ export const patchConversation = (req, res) => {
       if (maxTokens === null) patch.maxTokens = null;
       else if (Number.isInteger(maxTokens) && maxTokens >= 16 && maxTokens <= 32000) {
         patch.maxTokens = maxTokens;
+      }
+    }
+    // Image generation opt-in (0 / 1) + Cloudflare model slug.
+    if ('imageGenEnabled' in body) {
+      patch.imageGenEnabled = imageGenEnabled ? 1 : 0;
+    }
+    if ('imageGenModel' in body) {
+      if (imageGenModel === null) patch.imageGenModel = null;
+      else if (typeof imageGenModel === 'string' && imageGenModel.length < 200) {
+        patch.imageGenModel = imageGenModel;
       }
     }
     const conv = updateConversation(req.params.chatId, patch);
@@ -518,14 +529,13 @@ export const postCompactFinalize = (req, res) => {
   }
 };
 
-// System nudge prepended to every chat dispatch so the model knows the
-// platform handles file downloads + can generate real images. Without
-// this, base models say "I can't create files / images" by default
-// (true of them in isolation — but our app handles it). Kept short so
-// token budget impact stays small.
-const DOWNLOAD_AWARE_SYSTEM = [
+// System prompt is split into two halves so we can include / exclude
+// the image-gen section based on the conversation's opt-in flag. Tokens
+// matter on every turn — there's no point telling a model to emit a
+// `generate-image` fence when the user hasn't enabled it.
+const DOWNLOAD_SYSTEM_PART = [
   'You are running inside a chat app that auto-detects structured data',
-  'in your replies and renders generated images inline. Specifically:',
+  'in your replies. Specifically:',
   '',
   '── Files & downloads ────────────────────────────',
   'When the user asks for a spreadsheet, table, CSV, Excel, or any',
@@ -536,13 +546,15 @@ const DOWNLOAD_AWARE_SYSTEM = [
   '     objects. The Download button will appear automatically.',
   '  3. Keep the data clean: header row + data rows. Avoid mixing',
   '     prose explanations inside the table body.',
-  '',
+].join('\n');
+
+const IMAGE_GEN_SYSTEM_PART = [
   '── Image generation ──────────────────────────────',
   'When the user asks you to generate, create, draw, render, make,',
   'paint, or produce an image / picture / photo / illustration /',
   'artwork / poster / logo:',
   '  1. Do NOT say you cannot make images — the app calls a real image',
-  '     model (Flux) on your behalf.',
+  '     model on your behalf.',
   '  2. Output ONLY a code fence with a vivid, specific visual prompt',
   '     (1-2 sentences max, no commentary):',
   '       ```generate-image',
@@ -550,24 +562,31 @@ const DOWNLOAD_AWARE_SYSTEM = [
   '       ```',
   '  3. After the fence you may add ONE short line of context (≤15',
   '     words). The rendered image will appear in the chat automatically.',
-  '',
-  'For any other request, answer normally in markdown.',
 ].join('\n');
 
+// Build the runtime system prompt — image part only included when the
+// conversation has opted in. Tail line nudges plain markdown elsewhere.
+function buildSystemPrompt({ imageGenEnabled = false } = {}) {
+  const parts = [DOWNLOAD_SYSTEM_PART];
+  if (imageGenEnabled) parts.push(IMAGE_GEN_SYSTEM_PART);
+  parts.push('\nFor any other request, answer normally in markdown.');
+  return parts.join('\n\n');
+}
+
 // Detects ```generate-image\n<prompt>\n``` in a reply, kicks off image
-// generation via Cloudflare Flux, uploads the result to Cloudinary, and
-// returns { cleanedContent, imageUrl, imagePrompt }. Returns null when
-// no marker present or the generation fails (caller falls back to text-
-// only assistant reply).
+// generation, uploads the result to Cloudinary, and returns the cleaned
+// reply + Cloudinary URL. `model` is the Cloudflare slug (Flux Schnell
+// when unspecified). Returns null when no marker, generation fails, or
+// the caller passed imageGenEnabled=false.
 const IMAGE_MARKER_RE = /```\s*generate-image\s*\n([\s\S]*?)\n\s*```/i;
-async function maybeRenderImage(reply) {
+async function maybeRenderImage(reply, { model } = {}) {
   if (!reply) return null;
   const m = String(reply).match(IMAGE_MARKER_RE);
   if (!m) return null;
   const imagePrompt = m[1].trim();
   if (!imagePrompt) return null;
   try {
-    const img = await runImageGen(imagePrompt, { provider: 'cloudflare' });
+    const img = await runImageGen(imagePrompt, { provider: 'cloudflare', model });
     const up = await cdnUploadDataUrl(img.image);
     const cleaned = reply.replace(m[0], '').trim()
                  || `🎨 Generated: "${imagePrompt}"`;
@@ -651,11 +670,14 @@ export const postSendMessage = async (req, res) => {
     // ── 5090 async path ──
     if (provider === '5090') {
       const history = listMessages(chatId).map(m => ({ role: m.role, content: m.content }));
-      // Prepend the download-aware system nudge so local Ollama models
-      // surface tables / CSV / JSON when the user asks for downloads,
-      // instead of the default "I can't make files" disclaimer.
+      // Build the system prompt for this dispatch. Only includes the
+      // image-gen section when the conversation has opted in, so we
+      // don't waste tokens on chats that never want images.
+      const sysPrompt = buildSystemPrompt({
+        imageGenEnabled: !!conv.imageGenEnabled,
+      });
       const dispatchMessages = [
-        { role: 'system', content: DOWNLOAD_AWARE_SYSTEM },
+        { role: 'system', content: sysPrompt },
         ...history,
       ];
       // Per-conversation overrides forwarded to the worker via chat_jobs.
@@ -691,7 +713,9 @@ export const postSendMessage = async (req, res) => {
     // null (default), we omit the field entirely so the helper's own
     // default kicks in.
     const refreshed = getConversation(chatId);
-    const opts = { system: DOWNLOAD_AWARE_SYSTEM };
+    const opts = {
+      system: buildSystemPrompt({ imageGenEnabled: !!refreshed?.imageGenEnabled }),
+    };
     if (typeof refreshed?.temperature === 'number') opts.temperature = refreshed.temperature;
     if (Number.isInteger(refreshed?.maxTokens))     opts.maxTokens   = refreshed.maxTokens;
     const start = Date.now();
@@ -717,10 +741,13 @@ export const postSendMessage = async (req, res) => {
       return error(res, cloudErr.message, 502);
     }
     const elapsedMs = Date.now() - start;
-    // If the model emitted an image-gen fence, render the image, upload
-    // it to Cloudinary, and attach to the assistant message. The
-    // original marker is stripped from the displayed text.
-    const rendered = await maybeRenderImage(reply);
+    // If the model emitted an image-gen fence AND this conversation has
+    // opted in, render the image via the conversation's chosen model.
+    // Without opt-in we skip — the marker is left as plain text and the
+    // user sees the prompt, no Cloudflare call made.
+    const rendered = refreshed?.imageGenEnabled
+      ? await maybeRenderImage(reply, { model: refreshed.imageGenModel || undefined })
+      : null;
     const finalContent = rendered?.cleanedContent ?? reply ?? '(empty reply)';
     const assistantMsg = appendMessage({
       chatId, role: 'assistant', content: finalContent,

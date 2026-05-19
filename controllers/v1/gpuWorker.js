@@ -364,23 +364,25 @@ export const postAudioFailed = (req, res) => {
 // ─── Chat (Ollama on 5090) ────────────────────────────────────
 // Worker posts back the assistant reply + token counts here.
 import { getChatJob, updateChatJob } from '../../services/aiVideo/chatStore.js';
-import { appendMessage as appendChatMessage } from '../../services/aiVideo/chatConversations.js';
+import {
+  appendMessage as appendChatMessage,
+  getConversation as getChatConversation,
+} from '../../services/aiVideo/chatConversations.js';
 import { generateImage as runImageGen } from '../../services/imageGen/index.js';
 import { uploadChatAttachment as cdnUploadDataUrl } from '../../services/aiVideo/cloudinaryStore.js';
 
 // Mirrors maybeRenderImage in ai.js — kept local to avoid a circular
-// import. When the worker's reply contains a ```generate-image fence,
-// we call Cloudflare Flux, upload to Cloudinary, and surface the URL
-// to the chat-complete appender so it lands on the assistant row.
+// import. Caller passes the conversation's chosen Cloudflare model
+// slug; null falls back to Flux Schnell inside the imageGen service.
 const IMAGE_MARKER_RE_W = /```\s*generate-image\s*\n([\s\S]*?)\n\s*```/i;
-async function maybeRenderImageW(reply) {
+async function maybeRenderImageW(reply, { model } = {}) {
   if (!reply) return null;
   const m = String(reply).match(IMAGE_MARKER_RE_W);
   if (!m) return null;
   const imagePrompt = m[1].trim();
   if (!imagePrompt) return null;
   try {
-    const img = await runImageGen(imagePrompt, { provider: 'cloudflare' });
+    const img = await runImageGen(imagePrompt, { provider: 'cloudflare', model });
     const up = await cdnUploadDataUrl(img.image);
     const cleaned = reply.replace(m[0], '').trim()
                  || `🎨 Generated: "${imagePrompt}"`;
@@ -420,18 +422,21 @@ export const postChatComplete = async (req, res) => {
   const { jobId, reply, elapsedMs, tokensIn, tokensOut } = req.body || {};
   if (!jobId || typeof reply !== 'string') return error(res, 'jobId + reply required', 400);
 
-  // Image-gen fence in the reply → render via Cloudflare Flux + upload
-  // to Cloudinary so the chat bubble shows the actual image. Skipped
-  // for jobs with no chatId (compact summaries etc.) since those don't
-  // hit the chat UI.
+  // Image-gen fence → render only when the parent conversation has
+  // opted in. Compact-summary jobs have chatId=null so they're skipped
+  // automatically; non-opted-in chats still see the marker as plain
+  // text but no Cloudflare call is made.
   let finalReply = reply;
   let imageUrl = null;
   const row0 = getChatJob(jobId);
   if (row0?.chatId) {
-    const rendered = await maybeRenderImageW(reply);
-    if (rendered) {
-      finalReply = rendered.cleanedContent;
-      imageUrl   = rendered.imageUrl;
+    const conv = getChatConversation(row0.chatId);
+    if (conv?.imageGenEnabled) {
+      const rendered = await maybeRenderImageW(reply, { model: conv.imageGenModel || undefined });
+      if (rendered) {
+        finalReply = rendered.cleanedContent;
+        imageUrl   = rendered.imageUrl;
+      }
     }
   }
 

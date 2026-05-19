@@ -407,6 +407,11 @@ addColumnIfMissing('chat_messages', 'compacted', 'INTEGER NOT NULL DEFAULT 0');
 // forward the param). Set by the user from the "⚙ Advanced" popover.
 addColumnIfMissing('chat_conversations', 'temperature', 'REAL');
 addColumnIfMissing('chat_conversations', 'maxTokens',   'INTEGER');
+// Image-gen opt-in: off by default so visitors don't burn Cloudflare quota
+// on accidental "draw" matches. When enabled, imageGenModel selects which
+// Cloudflare AI slug runs (Flux Schnell by default).
+addColumnIfMissing('chat_conversations', 'imageGenEnabled', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('chat_conversations', 'imageGenModel',   'TEXT');
 
 // ─── Lip Sync lane (Tier 3, added 2026-05) ────────────────
 // LatentSync workflow: audio + portrait → talking head video.

@@ -19,6 +19,7 @@ const convDeleteStmt = db.prepare('DELETE FROM chat_conversations WHERE chatId =
 const CONV_COLS = new Set([
   'title', 'model', 'provider', 'pinned', 'archived', 'vault', 'updatedAt',
   'temperature', 'maxTokens',
+  'imageGenEnabled', 'imageGenModel',
 ]);
 
 export function createConversation({ title = 'New chat', model = null, provider = null } = {}) {
@@ -90,7 +91,8 @@ export function listConversations({ archived = 0, page = 1, limit = 50 } = {}) {
   const offset = (Math.max(page, 1) - 1) * limit;
   const items = db.prepare(`
     SELECT chatId, title, model, provider, pinned, archived, vault,
-           temperature, maxTokens, createdAt, updatedAt
+           temperature, maxTokens, imageGenEnabled, imageGenModel,
+           createdAt, updatedAt
       FROM chat_conversations
      WHERE archived = @archived
      ORDER BY pinned DESC, updatedAt DESC
