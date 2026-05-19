@@ -339,48 +339,123 @@ export const postConversationsBulk = (req, res) => {
   } catch (err) { return error(res, err.message); }
 };
 
-// POST /api/chat/conversations/:chatId/compact  { keepLastN? = 4 }
-// Summarizes every non-compacted message older than the last N, marks
-// them as `compacted=1`, and inserts a single system "[Earlier
-// conversation compacted]" message in their place. Future turns send
-// only the summary + the recent tail, keeping the model fast.
+// Picks a small + fast local model from whatever the 5090 has loaded.
+// Preference order: 14B-class general text → 7B → phi4 → gemma2 → first
+// non-vision-non-embedding. Returns null if no online worker has any
+// usable model — caller falls back to cloud.
+const PREFERRED_COMPACT_MODELS = [
+  'qwen2.5:14b-instruct-q4_K_M',
+  'qwen2.5:7b-instruct-q4_K_M',
+  'phi4:14b',
+  'gemma2:27b-instruct-q4_K_M',
+  'mistral-small:24b-instruct-q4_K_M',
+  'llama3.3:70b-instruct-q4_K_M',
+];
+function pickLocalCompactModel() {
+  const statuses = getAllWorkerStatuses() || [];
+  for (const ws of statuses) {
+    if (!ws.online) continue;
+    const installed = (ws.ollamaModels || []).map(m => m.name || m.id).filter(Boolean);
+    if (!installed.length) continue;
+    for (const wanted of PREFERRED_COMPACT_MODELS) {
+      if (installed.includes(wanted)) return wanted;
+    }
+    // Fall back to the first installed non-vision / non-embedding model
+    const fallback = installed.find(n => !/vision|vl|llava|minicpm-v|bge-|embed/i.test(n));
+    if (fallback) return fallback;
+  }
+  return null;
+}
+
+const COMPACT_SYSTEM_PROMPT =
+  `You are a conversation summarizer. Compress the dialogue below into a concise, faithful summary that lets a future turn continue the discussion with full context. Keep technical decisions, file paths, error messages, code snippets, and named entities verbatim. Drop pleasantries and repetition. Output plain text only — no headers, no lists unless they were in the original.`;
+const COMPACT_USER_PROMPT = (transcript) =>
+  `Summarize the following conversation in 400-700 words. Preserve everything the next turn would need to know:\n\n${transcript}`;
+
+function buildCompactTranscript(toSummarize) {
+  // Cap each message body so a 200KB document attachment doesn't blow
+  // the summarizer's context window.
+  return toSummarize.map(m => {
+    const body = String(m.content || '').slice(0, 4000);
+    return `${m.role.toUpperCase()}: ${body}`;
+  }).join('\n\n');
+}
+
+// POST /api/chat/conversations/:chatId/compact
+//   { keepLastN? = 4, mode? = 'auto' | 'local' | 'cloud' }
 //
-// The summary itself is always built via Groq (Llama 3.1 8B-Instant) —
-// it's fast, free, and works whether the chat is on 5090 or cloud.
-// Falls back to Gemini Flash if Groq errors.
+// Two paths:
+//   - LOCAL (5090): enqueues a chat_job with chatId=null so the worker
+//     callback DOESN'T auto-append the summary to chat_messages. Returns
+//     { mode: 'local', jobId, model } — FE polls /chat/status/:jobId
+//     and then calls /compact/finalize with the jobId.
+//   - CLOUD (Groq → Gemini fallback): summarises inline + returns the
+//     completed compact in one shot.
+//
+// `mode: 'auto'` (default) prefers local when a 5090 model is available.
 export const postCompactConversation = async (req, res) => {
   try {
     const { chatId } = req.params;
     const conv = getConversation(chatId);
     if (!conv) return error(res, 'Conversation not found', 404);
     const keepLastN = Math.max(2, Math.min(parseInt(req.body?.keepLastN, 10) || 4, 20));
+    const mode = (req.body?.mode || 'auto').toString();
 
     const live = listMessages(chatId);
     if (live.length <= keepLastN + 1) {
       return error(res, `Only ${live.length} messages — at least ${keepLastN + 2} needed to compact`, 400);
     }
     const toSummarize = live.slice(0, live.length - keepLastN);
-    // Build a compact transcript — cap each message body so a runaway
-    // 200KB document attachment doesn't blow the summarizer's context.
-    const transcript = toSummarize.map(m => {
-      const body = String(m.content || '').slice(0, 4000);
-      return `${m.role.toUpperCase()}: ${body}`;
-    }).join('\n\n');
+    const transcript = buildCompactTranscript(toSummarize);
 
-    const systemPrompt = `You are a conversation summarizer. Compress the dialogue below into a concise, faithful summary that lets a future turn continue the discussion with full context. Keep technical decisions, file paths, error messages, code snippets, and named entities verbatim. Drop pleasantries and repetition. Output plain text only — no headers, no lists unless they were in the original.`;
-    const userPrompt = `Summarize the following conversation in 400-700 words. Preserve everything the next turn would need to know:\n\n${transcript}`;
+    // ── Local 5090 path ──
+    if (mode === 'auto' || mode === 'local') {
+      const localModel = pickLocalCompactModel();
+      if (localModel) {
+        const messages = [
+          { role: 'system', content: COMPACT_SYSTEM_PROMPT },
+          { role: 'user',   content: COMPACT_USER_PROMPT(transcript) },
+        ];
+        // chatId is null so chat-complete callback won't auto-append
+        // the summary to chat_messages. The /compact/finalize endpoint
+        // does the actual table mutation once the worker is done.
+        const job = createChatJob({
+          model: localModel,
+          messages,
+          chatId: null,
+          messageId: null,
+          provider: '5090',
+          temperature: 0.2,
+          maxTokens: 1500,
+        });
+        publishChatJob({ jobId: job.jobId, model: localModel }).catch(e =>
+          logger.warn(`Compact publish skipped: ${e.message}`));
+        logger.info(`CHAT COMPACT START (local) | conv=${chatId} | job=${job.jobId} | model=${localModel}`);
+        return success(res, {
+          mode: 'local',
+          jobId: job.jobId,
+          model: localModel,
+          kept: keepLastN,
+          toCompact: toSummarize.length,
+        });
+      }
+      if (mode === 'local') {
+        return error(res, 'No 5090 models online — try mode: "cloud" or wait for the worker.', 503);
+      }
+    }
 
+    // ── Cloud fallback (Groq → Gemini) ──
     let summary = '';
     try {
-      const r = await chatGroq(userPrompt, [], 'llama-3.1-8b', {
-        system: systemPrompt, maxTokens: 1500, temperature: 0.2,
+      const r = await chatGroq(COMPACT_USER_PROMPT(transcript), [], 'llama-3.1-8b', {
+        system: COMPACT_SYSTEM_PROMPT, maxTokens: 1500, temperature: 0.2,
       });
       summary = (r.reply || r.message || '').trim();
     } catch (groqErr) {
       logger.warn(`Compact Groq failed, falling back to Gemini: ${groqErr.message}`);
       try {
-        const r = await chatGemini(userPrompt, [], 'gemini-flash', {
-          system: systemPrompt, maxTokens: 1500, temperature: 0.2,
+        const r = await chatGemini(COMPACT_USER_PROMPT(transcript), [], 'gemini-flash', {
+          system: COMPACT_SYSTEM_PROMPT, maxTokens: 1500, temperature: 0.2,
         });
         summary = (r.reply || r.message || '').trim();
       } catch (gemErr) {
@@ -390,14 +465,53 @@ export const postCompactConversation = async (req, res) => {
     if (!summary) return error(res, 'Summarizer returned an empty response', 502);
 
     const result = compactConversation({ chatId, summary, keepLastN });
-    logger.info(`CHAT COMPACT | conv=${chatId} | compacted=${result.compacted} | kept=${keepLastN} | summary=${summary.length} chars`);
+    logger.info(`CHAT COMPACT (cloud) | conv=${chatId} | compacted=${result.compacted} | kept=${keepLastN} | summary=${summary.length} chars`);
     return success(res, {
+      mode: 'cloud',
       compacted: result.compacted,
       kept: keepLastN,
       summaryMessage: result.summaryMessage,
     });
   } catch (err) {
     logger.error('Compact failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// POST /api/chat/conversations/:chatId/compact/finalize  { jobId, keepLastN? }
+// Called by the FE once a local compact job (started by
+// postCompactConversation) reaches `completed`. Reads the worker's
+// reply from chat_jobs, then performs the actual table mutation +
+// inserts the synthetic system summary in place of the older messages.
+export const postCompactFinalize = (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const conv = getConversation(chatId);
+    if (!conv) return error(res, 'Conversation not found', 404);
+    const { jobId } = req.body || {};
+    if (!jobId) return error(res, 'jobId required', 400);
+    const keepLastN = Math.max(2, Math.min(parseInt(req.body?.keepLastN, 10) || 4, 20));
+
+    const job = getChatJob(jobId);
+    if (!job) return error(res, 'Compact job not found', 404);
+    if (job.status !== 'completed') {
+      return error(res, `Compact job not ready (status: ${job.status})`, 409);
+    }
+    const summary = String(job.reply || '').trim();
+    if (!summary) return error(res, 'Compact job returned empty summary', 502);
+
+    const result = compactConversation({ chatId, summary, keepLastN });
+    logger.info(`CHAT COMPACT FINALIZE | conv=${chatId} | job=${jobId} | compacted=${result.compacted} | kept=${keepLastN}`);
+    return success(res, {
+      mode: 'local',
+      compacted: result.compacted,
+      kept: keepLastN,
+      summaryMessage: result.summaryMessage,
+      model: job.model,
+      elapsedMs: job.elapsedMs,
+    });
+  } catch (err) {
+    logger.error('Compact finalize failed', err.message);
     return error(res, err.message);
   }
 };

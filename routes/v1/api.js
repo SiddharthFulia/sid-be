@@ -5,7 +5,7 @@ import {
   postChatLocal, getChatStatus, getLocalModels,
   postCreateConversation, getListConversations, getOneConversation,
   patchConversation, deleteOneConversation, postConversationsBulk, postSendMessage,
-  postCompactConversation,
+  postCompactConversation, postCompactFinalize,
 } from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { postExport } from '../../controllers/v1/export.js';
@@ -44,7 +44,8 @@ router.get('/chat/conversations/:chatId',    getOneConversation);
 router.patch('/chat/conversations/:chatId',  patchConversation);
 router.delete('/chat/conversations/:chatId', deleteOneConversation);
 router.post('/chat/conversations/:chatId/messages', postSendMessage);
-router.post('/chat/conversations/:chatId/compact',  postCompactConversation);
+router.post('/chat/conversations/:chatId/compact',          postCompactConversation);
+router.post('/chat/conversations/:chatId/compact/finalize', postCompactFinalize);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);
