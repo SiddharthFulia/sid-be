@@ -28,6 +28,10 @@ const COLUMNS = new Set([
   'status', 'kind', 'model', 'prompt', 'duration', 'voice',
   'outputUrl', 'bytes', 'error', 'workerId', 'logs', 'vault',
   'startedAt', 'completedAt',
+  // STT-specific columns (added 2026-05-19). transcript holds the text
+  // result for kind=stt jobs; sourceUrl holds the Cloudinary URL of the
+  // uploaded audio so the worker can fetch + transcribe.
+  'transcript', 'sourceUrl',
 ]);
 
 // Routed through the shared job_logs table — see logStore.js.

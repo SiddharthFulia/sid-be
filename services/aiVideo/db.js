@@ -305,6 +305,13 @@ addColumnIfMissing('enhanced_images', 'customModel', 'TEXT'); // checkpoint over
 // for SDXL/Pony/Flux workflows. Helps tame "deformed, watermark, blurry" etc.
 addColumnIfMissing('enhanced_images', 'negativePrompt', 'TEXT');
 
+// Speech-to-Text result. `audio_jobs.kind='stt'` rows store the transcribed
+// text here instead of in a Cloudinary URL — the "output" of STT is plain
+// text. `sourceUrl` carries the Cloudinary URL of the uploaded audio so the
+// worker can fetch the file to transcribe.
+addColumnIfMissing('audio_jobs', 'transcript', 'TEXT');
+addColumnIfMissing('audio_jobs', 'sourceUrl',  'TEXT');
+
 // ─── Lip Sync lane (Tier 3, added 2026-05) ────────────────
 // LatentSync workflow: audio + portrait → talking head video.
 db.exec(`

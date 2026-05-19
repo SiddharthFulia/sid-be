@@ -313,14 +313,22 @@ export const postAudioProgress = (req, res) => {
 
 export const postAudioComplete = (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
-  const { jobId, outputUrl, bytes } = req.body || {};
-  if (!jobId || !outputUrl) return error(res, 'jobId + outputUrl required', 400);
-  const row = updateAudioJob(jobId, {
-    status: 'completed', outputUrl, bytes: bytes || null,
+  const { jobId, outputUrl, bytes, transcript } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  // STT jobs return a `transcript` string instead of a Cloudinary URL.
+  // Music / SFX / TTS continue to return outputUrl.
+  if (!outputUrl && typeof transcript !== 'string') {
+    return error(res, 'outputUrl or transcript required', 400);
+  }
+  const patch = {
+    status: 'completed',
     completedAt: new Date().toISOString(),
-  });
+  };
+  if (outputUrl) { patch.outputUrl = outputUrl; patch.bytes = bytes || null; }
+  if (typeof transcript === 'string') patch.transcript = transcript;
+  const row = updateAudioJob(jobId, patch);
   if (!row) return error(res, 'Audio job not found', 404);
-  logger.info(`Audio ${jobId} completed → ${outputUrl}`);
+  logger.info(`Audio ${jobId} completed → ${outputUrl || `transcript (${transcript.length} chars)`}`);
   return success(res, row);
 };
 

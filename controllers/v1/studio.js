@@ -131,11 +131,50 @@ export const deleteLipsync = async (req, res) => {
 };
 
 // ─── Audio Studio ─────────────────────────────────────────────────
-// POST /api/audio { kind: 'music'|'sfx'|'tts', model, prompt, duration?, voice? }
+// POST /api/audio
+//   { kind: 'music'|'sfx'|'tts', model, prompt, duration?, voice? }
+//   { kind: 'stt', model: 'whisper-local', audioDataUrl, language? }   ← 5090 path
+//
+// STT-on-5090 path: caller sends the audio dataUrl, BE uploads it to
+// Cloudinary, queues a job. The worker pulls whisper-large-v3 weights
+// the first time, then transcribes locally and posts back the text via
+// /api/gpu-worker/audio-complete with a `transcript` field.
 export const postAudio = async (req, res) => {
   try {
-    const { kind = 'music', model, prompt, duration = 10, voice } = req.body || {};
-    if (!['music', 'sfx', 'tts'].includes(kind)) return error(res, "kind must be 'music' | 'sfx' | 'tts'", 400);
+    const { kind = 'music', model, prompt, duration = 10, voice, audioDataUrl, language } = req.body || {};
+    if (!['music', 'sfx', 'tts', 'stt'].includes(kind)) {
+      return error(res, "kind must be 'music' | 'sfx' | 'tts' | 'stt'", 400);
+    }
+
+    // STT branch — audio in, text out. Skips the prompt/duration validation
+    // path (those don't apply) and uploads the audio so the worker can fetch.
+    if (kind === 'stt') {
+      if (!audioDataUrl) return error(res, 'audioDataUrl is required for kind=stt', 400);
+      let uploadedUrl = null;
+      try {
+        const up = await cdnUploadAudio(audioDataUrl);
+        uploadedUrl = up.url;
+      } catch (e) {
+        return error(res, `Could not upload audio: ${e.message}`, 502);
+      }
+      const sttModel = model || 'whisper-large-v3';
+      const job = createAudioJob({
+        kind: 'stt',
+        model: sttModel,
+        prompt: language || '',                  // reuse `prompt` column as language hint
+        duration: 0,
+        voice: null,
+      });
+      // Persist the source URL so the worker can download the audio bytes.
+      updateAudioJob(job.jobId, { sourceUrl: uploadedUrl });
+      publishAudioJob({ jobId: job.jobId, kind: 'stt', model: sttModel }).catch(e =>
+        logger.warn(`Audio publish skipped: ${e.message}`));
+
+      logger.info(`STT QUEUE | ${job.jobId} | model=${sttModel}`);
+      return success(res, { jobId: job.jobId, status: job.status, kind: 'stt', model: sttModel });
+    }
+
+    // Original music / sfx / tts path
     if (!prompt || prompt.trim().length < 2) return error(res, 'prompt is required', 400);
     if (duration < 1 || duration > 60) return error(res, 'duration must be 1-60 seconds', 400);
 
