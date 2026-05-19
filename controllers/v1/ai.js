@@ -1,5 +1,5 @@
 import { success, error } from '../../helpers/res_helper.js';
-import { chat, rawQuery } from '../../services/ollama.js';
+import { chat as ollamaChat, rawQuery } from '../../services/ollama.js';
 import { chatGroq } from '../../services/groq.js';
 import { chatGemini, analyzeImageGemini } from '../../services/gemini.js';
 import logger from '../../helpers/logger.js';
@@ -325,7 +325,19 @@ export const postConversationsBulk = (req, res) => {
 
 // POST /api/chat/conversations/:chatId/messages
 //   { content, model, provider, imageDataUrl?, docName?, docText? }
-// Returns { messageId (user), jobId (inference), assistantMessageId (pending) }
+//
+// Two flow shapes, picked by `provider`:
+//
+//   '5090' → async via chat_queue. Returns { userMessage, jobId, status }.
+//             FE polls /chat/status/:jobId until completed; worker callback
+//             appends the assistant message server-side.
+//
+//   cloud-*  → SYNC. BE calls Groq / Gemini / Oracle Ollama inline,
+//              appends both user + assistant messages, returns
+//              { userMessage, assistantMessage } so FE renders the
+//              reply without a separate poll. Keeps every chat (cloud
+//              or local) in the same chat_messages table → unified
+//              sidebar, unified search later.
 export const postSendMessage = async (req, res) => {
   try {
     const { chatId } = req.params;
@@ -372,33 +384,65 @@ export const postSendMessage = async (req, res) => {
     if (conv.title === 'New chat' && content) {
       updateConversation(chatId, { title: content.slice(0, 60), model, provider });
     } else {
-      // Always update the conversation's current default model/provider
       updateConversation(chatId, { model, provider });
     }
 
-    // Build the messages array Ollama will see (full history)
-    const history = listMessages(chatId).map(m => ({
-      role: m.role,
-      content: m.content,
-      // Note: imageUrl is attached on the worker side using the LAST
-      // user message's imageUrl (set on the chat_job row), to match
-      // Ollama's expected shape.
-    }));
+    // ── 5090 async path ──
+    if (provider === '5090') {
+      const history = listMessages(chatId).map(m => ({ role: m.role, content: m.content }));
+      const job = createChatJob({
+        model, messages: history, imageUrl,
+        chatId, messageId: userMsg.messageId, provider,
+      });
+      publishChatJob({ jobId: job.jobId, model }).catch(e =>
+        logger.warn(`Chat publish skipped: ${e.message}`));
+      logger.info(`CHAT MSG (5090) | conv=${chatId} | ${userMsg.messageId} → job=${job.jobId} | model=${model}`);
+      return success(res, {
+        userMessage: userMsg,
+        jobId: job.jobId,
+        status: job.status,
+        model,
+        provider,
+      });
+    }
 
-    const job = createChatJob({
-      model, messages: history, imageUrl,
-      chatId, messageId: userMsg.messageId, provider,
+    // ── Cloud sync paths — Groq / Gemini / Oracle Ollama ──
+    // Build history excluding the message we just inserted (we pass
+    // content directly to the cloud helpers, which expect the latest
+    // user turn as a separate arg).
+    const allMsgs = listMessages(chatId);
+    const historyForCloud = allMsgs.slice(0, -1).map(m => ({ role: m.role, content: m.content }));
+    const start = Date.now();
+    let reply = '';
+    try {
+      if (provider === 'cloud-groq') {
+        const r = await chatGroq(fullContent, historyForCloud, model);
+        reply = r.reply || r.message || '';
+      } else if (provider === 'cloud-gemini') {
+        const r = await chatGemini(fullContent, historyForCloud, model);
+        reply = r.reply || r.message || '';
+      } else if (provider === 'oracle-ollama') {
+        const r = await ollamaChat(fullContent, historyForCloud, model);
+        reply = r.reply || r.message || '';
+      } else {
+        return error(res, `Unknown provider: ${provider}`, 400);
+      }
+    } catch (cloudErr) {
+      logger.error(`Cloud chat failed (${provider})`, cloudErr.message);
+      return error(res, cloudErr.message, 502);
+    }
+    const elapsedMs = Date.now() - start;
+    const assistantMsg = appendMessage({
+      chatId, role: 'assistant', content: reply || '(empty reply)',
+      model, provider, elapsedMs,
     });
-    publishChatJob({ jobId: job.jobId, model }).catch(e =>
-      logger.warn(`Chat publish skipped: ${e.message}`));
-
-    logger.info(`CHAT MSG | conv=${chatId} | ${userMsg.messageId} → job=${job.jobId} | model=${model}`);
+    logger.info(`CHAT MSG (${provider}) | conv=${chatId} | ${elapsedMs}ms | ${reply.length} chars`);
     return success(res, {
       userMessage: userMsg,
-      jobId: job.jobId,
-      status: job.status,
+      assistantMessage: assistantMsg,
       model,
       provider,
+      elapsedMs,
     });
   } catch (err) {
     logger.error('Send message failed', err.message);

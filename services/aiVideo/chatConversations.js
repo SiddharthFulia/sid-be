@@ -52,15 +52,31 @@ export function updateConversation(chatId, patch) {
   return convSelectStmt.get(chatId);
 }
 
+// Conversation delete: 3 tables touched in one transaction.
+//   - chat_messages    → CASCADE FK handles it automatically
+//   - chat_jobs        → plain TEXT chatId, no FK; nuke manually
+//   - chat_conversations → the row itself
+// Cloudinary-stored images / docs referenced by deleted messages are
+// NOT cleaned up — they may be referenced elsewhere and orphan files
+// cost almost nothing. A future cron can prune unreferenced URLs.
 export function deleteConversation(chatId) {
-  // CASCADE on the FK handles chat_messages cleanup
-  return convDeleteStmt.run(chatId).changes > 0;
+  const tx = db.transaction((id) => {
+    db.prepare('DELETE FROM chat_jobs WHERE chatId = ?').run(id);
+    // CASCADE handles chat_messages
+    return convDeleteStmt.run(id).changes;
+  });
+  return tx(chatId) > 0;
 }
 
 export function deleteConversations(ids) {
   if (!Array.isArray(ids) || !ids.length) return 0;
   const placeholders = ids.map(() => '?').join(',');
-  return db.prepare(`DELETE FROM chat_conversations WHERE chatId IN (${placeholders})`).run(...ids).changes;
+  const tx = db.transaction((arr) => {
+    db.prepare(`DELETE FROM chat_jobs WHERE chatId IN (${placeholders})`).run(...arr);
+    return db.prepare(`DELETE FROM chat_conversations WHERE chatId IN (${placeholders})`)
+      .run(...arr).changes;
+  });
+  return tx(ids);
 }
 
 export function listConversations({ archived = 0, page = 1, limit = 50 } = {}) {
