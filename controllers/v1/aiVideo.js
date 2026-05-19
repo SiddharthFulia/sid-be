@@ -104,20 +104,20 @@ export const postGenerateVideo = async (req, res) => {
     }
     let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: false };
 
-    // For the 'optimized' provider, apply mode-based speed defaults BEFORE dispatch.
-    // The user can still override via explicit fields, but blank fields get the mode's recommendation.
+    // For the 'optimized' provider, mode picks the MODEL + STEPS (the
+    // actual "speed" knobs). The user's duration / resolution / aspect
+    // ratio from the form are respected — they're visible UI controls
+    // and people kept picking 7s/1080p only to get 5s/720p back.
     if (provider === 'optimized') {
       const overrides = OPTIMIZED_MODES[(mode || 'balanced').toLowerCase()] || OPTIMIZED_MODES.balanced;
-      // Mode is the SOLE source of truth for the optimized lane. The FE always
-      // sends defaults (steps=30, resolution=720p) so we can't tell whether the
-      // user touched the slider — and if they're on this lane, they wanted the
-      // mode's tuning, not their stale slider state. Force every knob.
       opts = {
         ...opts,
         model: overrides.model,
         steps: overrides.steps,
-        resolution: overrides.resolution,
-        duration: overrides.duration,
+        // duration, resolution, aspectRatio come straight from req.body
+        // — no override. If the user picks something the mode's model
+        // can't render well (e.g. 10s on ltx-distilled), they get
+        // whatever quality that produces; we don't silently clamp.
       };
     }
 
