@@ -402,7 +402,29 @@ export const postCompactConversation = async (req, res) => {
   }
 };
 
-// POST /api/chat/conversations/:chatId/messages
+// System nudge prepended to every chat dispatch so the model knows the
+// UI auto-detects tables/JSON/CSV and offers Excel/CSV/JSON downloads.
+// Without this, base models say "I can't create files" (which is true
+// of them in isolation — but our app handles it). Kept short so token
+// budget impact is negligible.
+const DOWNLOAD_AWARE_SYSTEM = [
+  'You are running inside a chat app that auto-detects structured data',
+  'in your replies and gives the user a Download button for Excel,',
+  'CSV, or JSON.',
+  '',
+  'When the user asks for a spreadsheet, table, CSV, Excel, or any',
+  'kind of downloadable / exportable data:',
+  '  1. Do NOT say you cannot create files — the app handles downloads.',
+  '  2. Output the data as a markdown table OR inside a ```csv code',
+  '     fence OR a ```json code fence containing an array of row',
+  '     objects. The Download button will appear automatically.',
+  '  3. Keep the data clean: header row + data rows. Avoid mixing',
+  '     prose explanations inside the table body.',
+  '',
+  'For any non-tabular request, answer normally in markdown.',
+].join('\n');
+
+// POST /api/chat/conversations/:chatId/compact  { keepLastN? = 4 }
 //   { content, model, provider, imageDataUrl?, docName?, docText? }
 //
 // Two flow shapes, picked by `provider`:
@@ -469,12 +491,19 @@ export const postSendMessage = async (req, res) => {
     // ── 5090 async path ──
     if (provider === '5090') {
       const history = listMessages(chatId).map(m => ({ role: m.role, content: m.content }));
+      // Prepend the download-aware system nudge so local Ollama models
+      // surface tables / CSV / JSON when the user asks for downloads,
+      // instead of the default "I can't make files" disclaimer.
+      const dispatchMessages = [
+        { role: 'system', content: DOWNLOAD_AWARE_SYSTEM },
+        ...history,
+      ];
       // Per-conversation overrides forwarded to the worker via chat_jobs.
       // The worker reads `temperature` and `maxTokens` off the row and
       // hands them to Ollama; both null → Ollama's per-model defaults.
       const convNow = getConversation(chatId);
       const job = createChatJob({
-        model, messages: history, imageUrl,
+        model, messages: dispatchMessages, imageUrl,
         chatId, messageId: userMsg.messageId, provider,
         temperature: typeof convNow?.temperature === 'number' ? convNow.temperature : null,
         maxTokens:   Number.isInteger(convNow?.maxTokens)      ? convNow.maxTokens   : null,
@@ -502,7 +531,7 @@ export const postSendMessage = async (req, res) => {
     // null (default), we omit the field entirely so the helper's own
     // default kicks in.
     const refreshed = getConversation(chatId);
-    const opts = {};
+    const opts = { system: DOWNLOAD_AWARE_SYSTEM };
     if (typeof refreshed?.temperature === 'number') opts.temperature = refreshed.temperature;
     if (Number.isInteger(refreshed?.maxTokens))     opts.maxTokens   = refreshed.maxTokens;
     const start = Date.now();
