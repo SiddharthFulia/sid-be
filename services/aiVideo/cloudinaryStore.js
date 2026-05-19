@@ -174,6 +174,74 @@ export async function uploadAudioBuffer(buffer, mimeType = 'audio/mpeg') {
  * ourselves bypasses the parser entirely and Cloudinary just stores the
  * bytes — Whisper / ffmpeg downstream read the codec from the container.
  */
+/**
+ * Universal data-URL uploader for chat attachments. Auto-picks the right
+ * Cloudinary `resource_type` from the data URL's MIME so a single FE
+ * call works for any of:
+ *   • Images:  jpeg, jpg, png, gif, webp, bmp, heic, heif (iPhone),
+ *              avif, tiff
+ *   • Audio:   webm/opus (MediaRecorder), mp3, wav, m4a, ogg, flac
+ *   • Video:   mp4, mov (iPhone), webm, mkv, avi
+ *
+ * Cloudinary auto-transcodes HEIC → JPG on delivery, so iPhone uploads
+ * "just work" downstream. Returns { url, publicId, bytes, kind }.
+ */
+export async function uploadChatAttachment(dataUrl) {
+  configure();
+  if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error('Expected a data: URL');
+  }
+  const m = dataUrl.match(/^data:([^,]+),(.+)$/);
+  if (!m) throw new Error('Malformed data: URL');
+  const header = m[1];
+  const isBase64 = /;\s*base64/i.test(header);
+  const mime = (header.split(';')[0] || '').toLowerCase();
+  const buf = isBase64
+    ? Buffer.from(m[2], 'base64')
+    : Buffer.from(decodeURIComponent(m[2]), 'utf8');
+
+  // Pick the resource_type Cloudinary expects. `image/*` → 'image';
+  // anything else (audio + video share the 'video' bucket on Cloudinary).
+  let resource_type = 'image';
+  let kind = 'image';
+  if (mime.startsWith('audio/')) { resource_type = 'video'; kind = 'audio'; }
+  else if (mime.startsWith('video/')) { resource_type = 'video'; kind = 'video'; }
+  else if (!mime.startsWith('image/')) {
+    // Fallback for weird MIME types (application/octet-stream from drag-
+    // drops with no extension). Try image first — Cloudinary will tell
+    // us if it can't decode.
+    resource_type = 'image'; kind = 'image';
+  }
+
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        resource_type,
+        folder: `${FOLDER}/chat/${kind}s`,
+        public_id: `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        use_filename: false,
+        unique_filename: false,
+        tags: ['chat-attachment', kind, `mime-${mime.replace(/[^a-z0-9]/gi, '-')}`],
+      },
+      (err, res) => {
+        if (err) return reject(err);
+        resolve({
+          url: res.secure_url,
+          publicId: res.public_id,
+          bytes: res.bytes,
+          kind,
+          mime,
+          width: res.width || null,
+          height: res.height || null,
+          durationSec: res.duration || null,
+          format: res.format,
+        });
+      },
+    );
+    stream.end(buf);
+  });
+}
+
 export async function uploadAudioDataUrl(dataUrl) {
   configure();
   if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {

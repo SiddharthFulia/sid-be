@@ -6,7 +6,7 @@ import logger from '../../helpers/logger.js';
 import { createChatJob, getChatJob } from '../../services/aiVideo/chatStore.js';
 import { publishChatJob } from '../../services/aiVideo/messageQueue.js';
 import { getAllWorkerStatuses, isWorkerOnline } from '../../services/aiVideo/jobStore.js';
-import { uploadAudioDataUrl as cdnUploadDataUrl } from '../../services/aiVideo/cloudinaryStore.js';
+import { uploadChatAttachment as cdnUploadDataUrl } from '../../services/aiVideo/cloudinaryStore.js';
 import {
   createConversation, getConversation, updateConversation,
   deleteConversation, deleteConversations, listConversations,
