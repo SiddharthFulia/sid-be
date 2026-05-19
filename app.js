@@ -7,9 +7,12 @@ import { NODE_ENV, FRONTEND_URL } from './helpers/constants.js';
 
 const app = express();
 
-// CORS
+// CORS — PATCH is required for the chat conversation rename / tune /
+// image-gen toggle endpoints. Without it the browser preflight on PATCH
+// returns 'Failed to fetch' and the FE never even reaches the BE.
 const corsOptions = NODE_ENV === 'production'
-  ? { origin: [FRONTEND_URL, 'https://www.siddharthfulia.com', 'http://localhost:3000'], methods: ['GET', 'POST', 'DELETE'] }
+  ? { origin: [FRONTEND_URL, 'https://www.siddharthfulia.com', 'http://localhost:3000'],
+      methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'] }
   : { origin: true };
 app.use(cors(corsOptions));
 
