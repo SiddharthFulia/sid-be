@@ -7,10 +7,12 @@ import { createChatJob, getChatJob } from '../../services/aiVideo/chatStore.js';
 import { publishChatJob } from '../../services/aiVideo/messageQueue.js';
 import { getAllWorkerStatuses, isWorkerOnline } from '../../services/aiVideo/jobStore.js';
 import { uploadChatAttachment as cdnUploadDataUrl } from '../../services/aiVideo/cloudinaryStore.js';
+import { generateImage as runImageGen } from '../../services/imageGen/index.js';
 import {
   createConversation, getConversation, updateConversation,
   deleteConversation, deleteConversations, listConversations,
   appendMessage, listMessages, compactConversation,
+  getAssistantMessageByJobId,
 } from '../../services/aiVideo/chatConversations.js';
 
 export const postChat = async (req, res) => {
@@ -517,17 +519,17 @@ export const postCompactFinalize = (req, res) => {
 };
 
 // System nudge prepended to every chat dispatch so the model knows the
-// UI auto-detects tables/JSON/CSV and offers Excel/CSV/JSON downloads.
-// Without this, base models say "I can't create files" (which is true
-// of them in isolation — but our app handles it). Kept short so token
-// budget impact is negligible.
+// platform handles file downloads + can generate real images. Without
+// this, base models say "I can't create files / images" by default
+// (true of them in isolation — but our app handles it). Kept short so
+// token budget impact stays small.
 const DOWNLOAD_AWARE_SYSTEM = [
   'You are running inside a chat app that auto-detects structured data',
-  'in your replies and gives the user a Download button for Excel,',
-  'CSV, or JSON.',
+  'in your replies and renders generated images inline. Specifically:',
   '',
+  '── Files & downloads ────────────────────────────',
   'When the user asks for a spreadsheet, table, CSV, Excel, or any',
-  'kind of downloadable / exportable data:',
+  'downloadable data:',
   '  1. Do NOT say you cannot create files — the app handles downloads.',
   '  2. Output the data as a markdown table OR inside a ```csv code',
   '     fence OR a ```json code fence containing an array of row',
@@ -535,8 +537,52 @@ const DOWNLOAD_AWARE_SYSTEM = [
   '  3. Keep the data clean: header row + data rows. Avoid mixing',
   '     prose explanations inside the table body.',
   '',
-  'For any non-tabular request, answer normally in markdown.',
+  '── Image generation ──────────────────────────────',
+  'When the user asks you to generate, create, draw, render, make,',
+  'paint, or produce an image / picture / photo / illustration /',
+  'artwork / poster / logo:',
+  '  1. Do NOT say you cannot make images — the app calls a real image',
+  '     model (Flux) on your behalf.',
+  '  2. Output ONLY a code fence with a vivid, specific visual prompt',
+  '     (1-2 sentences max, no commentary):',
+  '       ```generate-image',
+  '       <visual description>',
+  '       ```',
+  '  3. After the fence you may add ONE short line of context (≤15',
+  '     words). The rendered image will appear in the chat automatically.',
+  '',
+  'For any other request, answer normally in markdown.',
 ].join('\n');
+
+// Detects ```generate-image\n<prompt>\n``` in a reply, kicks off image
+// generation via Cloudflare Flux, uploads the result to Cloudinary, and
+// returns { cleanedContent, imageUrl, imagePrompt }. Returns null when
+// no marker present or the generation fails (caller falls back to text-
+// only assistant reply).
+const IMAGE_MARKER_RE = /```\s*generate-image\s*\n([\s\S]*?)\n\s*```/i;
+async function maybeRenderImage(reply) {
+  if (!reply) return null;
+  const m = String(reply).match(IMAGE_MARKER_RE);
+  if (!m) return null;
+  const imagePrompt = m[1].trim();
+  if (!imagePrompt) return null;
+  try {
+    const img = await runImageGen(imagePrompt, { provider: 'cloudflare' });
+    const up = await cdnUploadDataUrl(img.image);
+    const cleaned = reply.replace(m[0], '').trim()
+                 || `🎨 Generated: "${imagePrompt}"`;
+    logger.info(`IMAGE GEN | provider=${img.provider} | model=${img.model} | prompt="${imagePrompt.slice(0, 80)}…" | url=${up.url}`);
+    return {
+      cleanedContent: cleaned,
+      imageUrl: up.url,
+      imagePrompt,
+      imageModel: img.model,
+    };
+  } catch (e) {
+    logger.warn(`Image gen failed: ${e.message}`);
+    return null;
+  }
+}
 
 // POST /api/chat/conversations/:chatId/compact  { keepLastN? = 4 }
 //   { content, model, provider, imageDataUrl?, docName?, docText? }
@@ -671,11 +717,17 @@ export const postSendMessage = async (req, res) => {
       return error(res, cloudErr.message, 502);
     }
     const elapsedMs = Date.now() - start;
+    // If the model emitted an image-gen fence, render the image, upload
+    // it to Cloudinary, and attach to the assistant message. The
+    // original marker is stripped from the displayed text.
+    const rendered = await maybeRenderImage(reply);
+    const finalContent = rendered?.cleanedContent ?? reply ?? '(empty reply)';
     const assistantMsg = appendMessage({
-      chatId, role: 'assistant', content: reply || '(empty reply)',
+      chatId, role: 'assistant', content: finalContent,
+      imageUrl: rendered?.imageUrl || null,
       model, provider, elapsedMs,
     });
-    logger.info(`CHAT MSG (${provider}) | conv=${chatId} | ${elapsedMs}ms | ${reply.length} chars`);
+    logger.info(`CHAT MSG (${provider}) | conv=${chatId} | ${elapsedMs}ms | ${finalContent.length} chars${rendered ? ' | +image' : ''}`);
     return success(res, {
       userMessage: userMsg,
       assistantMessage: assistantMsg,
@@ -693,12 +745,21 @@ export const postSendMessage = async (req, res) => {
 export const getChatStatus = (req, res) => {
   const row = getChatJob(req.params.jobId);
   if (!row) return error(res, 'Not found', 404);
+  // If the worker emitted an image-gen fence, the Cloudinary URL was
+  // saved on the appended assistant message — pull it back so the FE
+  // poller can show the image without a full conversation reload.
+  let imageUrl = null;
+  if (row.status === 'completed' && row.chatId) {
+    const msg = getAssistantMessageByJobId(row.jobId);
+    if (msg?.imageUrl) imageUrl = msg.imageUrl;
+  }
   return success(res, {
     jobId: row.jobId, status: row.status, model: row.model,
     reply: row.reply, elapsedMs: row.elapsedMs,
     tokensIn: row.tokensIn, tokensOut: row.tokensOut,
     error: row.error, createdAt: row.createdAt, completedAt: row.completedAt,
     chatId: row.chatId, messageId: row.messageId, provider: row.provider,
+    imageUrl,
   });
 };
 

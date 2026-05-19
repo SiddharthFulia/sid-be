@@ -365,6 +365,32 @@ export const postAudioFailed = (req, res) => {
 // Worker posts back the assistant reply + token counts here.
 import { getChatJob, updateChatJob } from '../../services/aiVideo/chatStore.js';
 import { appendMessage as appendChatMessage } from '../../services/aiVideo/chatConversations.js';
+import { generateImage as runImageGen } from '../../services/imageGen/index.js';
+import { uploadChatAttachment as cdnUploadDataUrl } from '../../services/aiVideo/cloudinaryStore.js';
+
+// Mirrors maybeRenderImage in ai.js — kept local to avoid a circular
+// import. When the worker's reply contains a ```generate-image fence,
+// we call Cloudflare Flux, upload to Cloudinary, and surface the URL
+// to the chat-complete appender so it lands on the assistant row.
+const IMAGE_MARKER_RE_W = /```\s*generate-image\s*\n([\s\S]*?)\n\s*```/i;
+async function maybeRenderImageW(reply) {
+  if (!reply) return null;
+  const m = String(reply).match(IMAGE_MARKER_RE_W);
+  if (!m) return null;
+  const imagePrompt = m[1].trim();
+  if (!imagePrompt) return null;
+  try {
+    const img = await runImageGen(imagePrompt, { provider: 'cloudflare' });
+    const up = await cdnUploadDataUrl(img.image);
+    const cleaned = reply.replace(m[0], '').trim()
+                 || `🎨 Generated: "${imagePrompt}"`;
+    logger.info(`IMAGE GEN (worker) | model=${img.model} | prompt="${imagePrompt.slice(0, 80)}…" | url=${up.url}`);
+    return { cleanedContent: cleaned, imageUrl: up.url, imagePrompt };
+  } catch (e) {
+    logger.warn(`Image gen (worker) failed: ${e.message}`);
+    return null;
+  }
+}
 
 export const postChatJob = (req, res) => {
   // Lets the worker pull the full chat_jobs row (including messages JSON
@@ -389,13 +415,29 @@ export const postChatProgress = (req, res) => {
   return success(res, { ok: true });
 };
 
-export const postChatComplete = (req, res) => {
+export const postChatComplete = async (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
   const { jobId, reply, elapsedMs, tokensIn, tokensOut } = req.body || {};
   if (!jobId || typeof reply !== 'string') return error(res, 'jobId + reply required', 400);
+
+  // Image-gen fence in the reply → render via Cloudflare Flux + upload
+  // to Cloudinary so the chat bubble shows the actual image. Skipped
+  // for jobs with no chatId (compact summaries etc.) since those don't
+  // hit the chat UI.
+  let finalReply = reply;
+  let imageUrl = null;
+  const row0 = getChatJob(jobId);
+  if (row0?.chatId) {
+    const rendered = await maybeRenderImageW(reply);
+    if (rendered) {
+      finalReply = rendered.cleanedContent;
+      imageUrl   = rendered.imageUrl;
+    }
+  }
+
   const row = updateChatJob(jobId, {
     status: 'completed',
-    reply,
+    reply: finalReply,
     elapsedMs: typeof elapsedMs === 'number' ? elapsedMs : null,
     tokensIn: typeof tokensIn === 'number' ? tokensIn : null,
     tokensOut: typeof tokensOut === 'number' ? tokensOut : null,
@@ -409,7 +451,8 @@ export const postChatComplete = (req, res) => {
       appendChatMessage({
         chatId: row.chatId,
         role: 'assistant',
-        content: reply,
+        content: finalReply,
+        imageUrl,
         model: row.model,
         provider: row.provider || null,
         tokensIn: typeof tokensIn === 'number' ? tokensIn : null,
@@ -421,7 +464,7 @@ export const postChatComplete = (req, res) => {
       logger.warn(`Chat ${jobId}: assistant append failed: ${e.message}`);
     }
   }
-  logger.info(`Chat ${jobId} done in ${elapsedMs ?? '?'}ms · ${reply.length} chars`);
+  logger.info(`Chat ${jobId} done in ${elapsedMs ?? '?'}ms · ${finalReply.length} chars${imageUrl ? ' | +image' : ''}`);
   return success(res, row);
 };
 

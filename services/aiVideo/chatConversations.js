@@ -211,3 +211,14 @@ const jobToChatStmt = db.prepare(
 export function getJobChat(jobId) {
   return jobToChatStmt.get(jobId) || null;
 }
+
+// Look up the persisted assistant message for a finished chat job —
+// gives the FE access to the Cloudinary imageUrl that image-gen
+// produced, which isn't stored on chat_jobs itself.
+const msgByJobStmt = db.prepare(
+  `SELECT messageId, role, content, imageUrl, model, provider
+     FROM chat_messages WHERE jobId = ? AND role = 'assistant' LIMIT 1`
+);
+export function getAssistantMessageByJobId(jobId) {
+  return msgByJobStmt.get(jobId) || null;
+}
