@@ -10,7 +10,7 @@ import { uploadChatAttachment as cdnUploadDataUrl } from '../../services/aiVideo
 import {
   createConversation, getConversation, updateConversation,
   deleteConversation, deleteConversations, listConversations,
-  appendMessage, listMessages,
+  appendMessage, listMessages, compactConversation,
 } from '../../services/aiVideo/chatConversations.js';
 
 export const postChat = async (req, res) => {
@@ -276,16 +276,32 @@ export const getOneConversation = (req, res) => {
   } catch (err) { return error(res, err.message); }
 };
 
-// PATCH /api/chat/conversations/:chatId  { title?, model?, provider?, pinned?, archived? }
+// PATCH /api/chat/conversations/:chatId
+//   { title?, model?, provider?, pinned?, archived?, temperature?, maxTokens? }
+// Pass `temperature: null` or `maxTokens: null` to clear back to default.
 export const patchConversation = (req, res) => {
   try {
-    const { title, model, provider, pinned, archived } = req.body || {};
+    const body = req.body || {};
+    const { title, model, provider, pinned, archived, temperature, maxTokens } = body;
     const patch = {};
     if (typeof title === 'string') patch.title = title.slice(0, 200);
     if (typeof model === 'string') patch.model = model;
     if (typeof provider === 'string') patch.provider = provider;
     if (pinned === 0 || pinned === 1) patch.pinned = pinned;
     if (archived === 0 || archived === 1) patch.archived = archived;
+    // Allow explicit null to clear; reject obvious garbage; clamp ranges.
+    if ('temperature' in body) {
+      if (temperature === null) patch.temperature = null;
+      else if (typeof temperature === 'number' && temperature >= 0 && temperature <= 2) {
+        patch.temperature = temperature;
+      }
+    }
+    if ('maxTokens' in body) {
+      if (maxTokens === null) patch.maxTokens = null;
+      else if (Number.isInteger(maxTokens) && maxTokens >= 16 && maxTokens <= 32000) {
+        patch.maxTokens = maxTokens;
+      }
+    }
     const conv = updateConversation(req.params.chatId, patch);
     if (!conv) return error(res, 'Not found', 404);
     return success(res, conv);
@@ -321,6 +337,69 @@ export const postConversationsBulk = (req, res) => {
     }
     return error(res, "action must be 'delete' | 'archive' | 'unarchive'", 400);
   } catch (err) { return error(res, err.message); }
+};
+
+// POST /api/chat/conversations/:chatId/compact  { keepLastN? = 4 }
+// Summarizes every non-compacted message older than the last N, marks
+// them as `compacted=1`, and inserts a single system "[Earlier
+// conversation compacted]" message in their place. Future turns send
+// only the summary + the recent tail, keeping the model fast.
+//
+// The summary itself is always built via Groq (Llama 3.1 8B-Instant) —
+// it's fast, free, and works whether the chat is on 5090 or cloud.
+// Falls back to Gemini Flash if Groq errors.
+export const postCompactConversation = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const conv = getConversation(chatId);
+    if (!conv) return error(res, 'Conversation not found', 404);
+    const keepLastN = Math.max(2, Math.min(parseInt(req.body?.keepLastN, 10) || 4, 20));
+
+    const live = listMessages(chatId);
+    if (live.length <= keepLastN + 1) {
+      return error(res, `Only ${live.length} messages — at least ${keepLastN + 2} needed to compact`, 400);
+    }
+    const toSummarize = live.slice(0, live.length - keepLastN);
+    // Build a compact transcript — cap each message body so a runaway
+    // 200KB document attachment doesn't blow the summarizer's context.
+    const transcript = toSummarize.map(m => {
+      const body = String(m.content || '').slice(0, 4000);
+      return `${m.role.toUpperCase()}: ${body}`;
+    }).join('\n\n');
+
+    const systemPrompt = `You are a conversation summarizer. Compress the dialogue below into a concise, faithful summary that lets a future turn continue the discussion with full context. Keep technical decisions, file paths, error messages, code snippets, and named entities verbatim. Drop pleasantries and repetition. Output plain text only — no headers, no lists unless they were in the original.`;
+    const userPrompt = `Summarize the following conversation in 400-700 words. Preserve everything the next turn would need to know:\n\n${transcript}`;
+
+    let summary = '';
+    try {
+      const r = await chatGroq(userPrompt, [], 'llama-3.1-8b', {
+        system: systemPrompt, maxTokens: 1500, temperature: 0.2,
+      });
+      summary = (r.reply || r.message || '').trim();
+    } catch (groqErr) {
+      logger.warn(`Compact Groq failed, falling back to Gemini: ${groqErr.message}`);
+      try {
+        const r = await chatGemini(userPrompt, [], 'gemini-flash', {
+          system: systemPrompt, maxTokens: 1500, temperature: 0.2,
+        });
+        summary = (r.reply || r.message || '').trim();
+      } catch (gemErr) {
+        return error(res, `Summarizer unavailable: ${gemErr.message}`, 502);
+      }
+    }
+    if (!summary) return error(res, 'Summarizer returned an empty response', 502);
+
+    const result = compactConversation({ chatId, summary, keepLastN });
+    logger.info(`CHAT COMPACT | conv=${chatId} | compacted=${result.compacted} | kept=${keepLastN} | summary=${summary.length} chars`);
+    return success(res, {
+      compacted: result.compacted,
+      kept: keepLastN,
+      summaryMessage: result.summaryMessage,
+    });
+  } catch (err) {
+    logger.error('Compact failed', err.message);
+    return error(res, err.message);
+  }
 };
 
 // POST /api/chat/conversations/:chatId/messages
@@ -390,9 +469,15 @@ export const postSendMessage = async (req, res) => {
     // ── 5090 async path ──
     if (provider === '5090') {
       const history = listMessages(chatId).map(m => ({ role: m.role, content: m.content }));
+      // Per-conversation overrides forwarded to the worker via chat_jobs.
+      // The worker reads `temperature` and `maxTokens` off the row and
+      // hands them to Ollama; both null → Ollama's per-model defaults.
+      const convNow = getConversation(chatId);
       const job = createChatJob({
         model, messages: history, imageUrl,
         chatId, messageId: userMsg.messageId, provider,
+        temperature: typeof convNow?.temperature === 'number' ? convNow.temperature : null,
+        maxTokens:   Number.isInteger(convNow?.maxTokens)      ? convNow.maxTokens   : null,
       });
       publishChatJob({ jobId: job.jobId, model }).catch(e =>
         logger.warn(`Chat publish skipped: ${e.message}`));
@@ -412,16 +497,27 @@ export const postSendMessage = async (req, res) => {
     // user turn as a separate arg).
     const allMsgs = listMessages(chatId);
     const historyForCloud = allMsgs.slice(0, -1).map(m => ({ role: m.role, content: m.content }));
+    // Per-conversation overrides — pulled from the updated conv row and
+    // forwarded to whichever cloud helper handles this provider. When
+    // null (default), we omit the field entirely so the helper's own
+    // default kicks in.
+    const refreshed = getConversation(chatId);
+    const opts = {};
+    if (typeof refreshed?.temperature === 'number') opts.temperature = refreshed.temperature;
+    if (Number.isInteger(refreshed?.maxTokens))     opts.maxTokens   = refreshed.maxTokens;
     const start = Date.now();
     let reply = '';
     try {
       if (provider === 'cloud-groq') {
-        const r = await chatGroq(fullContent, historyForCloud, model);
+        const r = await chatGroq(fullContent, historyForCloud, model, opts);
         reply = r.reply || r.message || '';
       } else if (provider === 'cloud-gemini') {
-        const r = await chatGemini(fullContent, historyForCloud, model);
+        const r = await chatGemini(fullContent, historyForCloud, model, opts);
         reply = r.reply || r.message || '';
       } else if (provider === 'oracle-ollama') {
+        // ollamaChat's 4th arg is a `context` string, not an options
+        // object — temperature/maxTokens overrides aren't wired for the
+        // standby lane yet. The model's built-in defaults apply.
         const r = await ollamaChat(fullContent, historyForCloud, model);
         reply = r.reply || r.message || '';
       } else {

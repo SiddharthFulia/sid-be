@@ -5,8 +5,10 @@ import {
   postChatLocal, getChatStatus, getLocalModels,
   postCreateConversation, getListConversations, getOneConversation,
   patchConversation, deleteOneConversation, postConversationsBulk, postSendMessage,
+  postCompactConversation,
 } from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
+import { postExport } from '../../controllers/v1/export.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, postSpeechToText, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
@@ -42,6 +44,7 @@ router.get('/chat/conversations/:chatId',    getOneConversation);
 router.patch('/chat/conversations/:chatId',  patchConversation);
 router.delete('/chat/conversations/:chatId', deleteOneConversation);
 router.post('/chat/conversations/:chatId/messages', postSendMessage);
+router.post('/chat/conversations/:chatId/compact',  postCompactConversation);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);
@@ -142,6 +145,11 @@ router.post('/music/generate',                postMusicGenerate);
 
 // Speech-to-Text — public, no auth needed. POST audio dataUrl, get transcript.
 router.post('/stt',                           postSpeechToText);
+
+// Structured-output exporter — accepts JSON/CSV/MD/XLSX/PDF and returns
+// a downloadable file. Used by AI Chat to let users save model output
+// in whichever format is most useful for them.
+router.post('/export',                        postExport);
 
 // GPU worker — polling client endpoints (called by Lightning AI worker)
 router.post('/gpu-worker/register', postRegister);

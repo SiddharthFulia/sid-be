@@ -14,12 +14,14 @@ const insertStmt = db.prepare(`INSERT INTO chat_jobs (
   jobId, status, model, messages, imageUrl, reply, elapsedMs,
   tokensIn, tokensOut, error, workerId, logs,
   createdAt, startedAt, completedAt,
-  chatId, messageId, provider
+  chatId, messageId, provider,
+  temperature, maxTokens
 ) VALUES (
   @jobId, @status, @model, @messages, @imageUrl, @reply, @elapsedMs,
   @tokensIn, @tokensOut, @error, @workerId, @logs,
   @createdAt, @startedAt, @completedAt,
-  @chatId, @messageId, @provider
+  @chatId, @messageId, @provider,
+  @temperature, @maxTokens
 )`);
 
 const selectStmt = db.prepare('SELECT * FROM chat_jobs WHERE jobId = ?');
@@ -30,10 +32,12 @@ const COLUMNS = new Set([
   'tokensIn', 'tokensOut', 'error', 'workerId', 'logs',
   'startedAt', 'completedAt',
   'chatId', 'messageId', 'provider',
+  'temperature', 'maxTokens',
 ]);
 
 export function createChatJob({ model, messages, imageUrl = null,
-                                chatId = null, messageId = null, provider = null }) {
+                                chatId = null, messageId = null, provider = null,
+                                temperature = null, maxTokens = null }) {
   const row = {
     jobId: newChatJobId(),
     status: 'queued',
@@ -53,6 +57,8 @@ export function createChatJob({ model, messages, imageUrl = null,
     chatId,
     messageId,
     provider,
+    temperature,
+    maxTokens,
   };
   insertStmt.run(row);
   return row;

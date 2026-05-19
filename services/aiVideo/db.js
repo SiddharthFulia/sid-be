@@ -390,9 +390,23 @@ db.exec(`
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing
 // rows from before the conversations feature shipped don't get nuked.
-addColumnIfMissing('chat_jobs', 'chatId',    'TEXT');
-addColumnIfMissing('chat_jobs', 'messageId', 'TEXT');
-addColumnIfMissing('chat_jobs', 'provider',  'TEXT');
+addColumnIfMissing('chat_jobs', 'chatId',      'TEXT');
+addColumnIfMissing('chat_jobs', 'messageId',   'TEXT');
+addColumnIfMissing('chat_jobs', 'provider',    'TEXT');
+// Optional inference overrides forwarded to the worker. NULL = the
+// worker uses Ollama's per-model defaults.
+addColumnIfMissing('chat_jobs', 'temperature', 'REAL');
+addColumnIfMissing('chat_jobs', 'maxTokens',   'INTEGER');
+
+// `compacted = 1` marks a message as part of a compacted slice — it stays
+// in the table for auditing but is excluded from listMessages() and from
+// the history sent to the model. The compaction handler inserts a new
+// role='system' message holding the summary in its place.
+addColumnIfMissing('chat_messages', 'compacted', 'INTEGER NOT NULL DEFAULT 0');
+// Per-conversation generation overrides. NULL = model default (BE doesn't
+// forward the param). Set by the user from the "⚙ Advanced" popover.
+addColumnIfMissing('chat_conversations', 'temperature', 'REAL');
+addColumnIfMissing('chat_conversations', 'maxTokens',   'INTEGER');
 
 // ─── Lip Sync lane (Tier 3, added 2026-05) ────────────────
 // LatentSync workflow: audio + portrait → talking head video.

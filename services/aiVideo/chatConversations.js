@@ -16,7 +16,10 @@ const convInsertStmt = db.prepare(`INSERT INTO chat_conversations
 const convSelectStmt = db.prepare('SELECT * FROM chat_conversations WHERE chatId = ?');
 const convDeleteStmt = db.prepare('DELETE FROM chat_conversations WHERE chatId = ?');
 
-const CONV_COLS = new Set(['title', 'model', 'provider', 'pinned', 'archived', 'vault', 'updatedAt']);
+const CONV_COLS = new Set([
+  'title', 'model', 'provider', 'pinned', 'archived', 'vault', 'updatedAt',
+  'temperature', 'maxTokens',
+]);
 
 export function createConversation({ title = 'New chat', model = null, provider = null } = {}) {
   const now = new Date().toISOString();
@@ -79,10 +82,15 @@ export function deleteConversations(ids) {
   return tx(ids);
 }
 
+// Listing the sidebar — pulls every conversation plus a few cheap
+// aggregates so the FE can sort by "biggest" / "longest read" without a
+// second round-trip. `messageCount` and `totalChars` exclude compacted
+// messages (those are zombies kept for audit, not part of live context).
 export function listConversations({ archived = 0, page = 1, limit = 50 } = {}) {
   const offset = (Math.max(page, 1) - 1) * limit;
   const items = db.prepare(`
-    SELECT chatId, title, model, provider, pinned, archived, vault, createdAt, updatedAt
+    SELECT chatId, title, model, provider, pinned, archived, vault,
+           temperature, maxTokens, createdAt, updatedAt
       FROM chat_conversations
      WHERE archived = @archived
      ORDER BY pinned DESC, updatedAt DESC
@@ -91,14 +99,26 @@ export function listConversations({ archived = 0, page = 1, limit = 50 } = {}) {
   const total = db.prepare('SELECT COUNT(*) AS n FROM chat_conversations WHERE archived = ?').get(archived).n;
   // Attach a quick "lastMessage" snippet for the sidebar (cheap subquery)
   const previewStmt = db.prepare(
-    `SELECT role, content FROM chat_messages WHERE chatId = ? ORDER BY createdAt DESC LIMIT 1`
+    `SELECT role, content FROM chat_messages
+      WHERE chatId = ? AND compacted = 0
+      ORDER BY createdAt DESC LIMIT 1`
+  );
+  const aggStmt = db.prepare(
+    `SELECT COUNT(*) AS messageCount,
+            COALESCE(SUM(LENGTH(content)), 0) AS totalChars,
+            COALESCE(SUM(CASE WHEN compacted = 1 THEN 1 ELSE 0 END), 0) AS compactedCount
+       FROM chat_messages WHERE chatId = ? AND compacted = 0`
   );
   const items2 = items.map(it => {
     const last = previewStmt.get(it.chatId);
+    const agg = aggStmt.get(it.chatId);
     return {
       ...it,
       lastRole: last?.role || null,
       lastSnippet: last?.content ? String(last.content).slice(0, 120) : '',
+      messageCount: agg?.messageCount || 0,
+      totalChars:   agg?.totalChars   || 0,
+      compactedCount: agg?.compactedCount || 0,
     };
   });
   return { items: items2, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) };
@@ -112,7 +132,13 @@ const msgInsertStmt = db.prepare(`INSERT INTO chat_messages
   VALUES (@messageId, @chatId, @role, @content, @imageUrl, @docName, @docText, @model, @provider,
           @tokensIn, @tokensOut, @elapsedMs, @jobId, @createdAt)`);
 
+// Compacted messages are hidden from the FE + from the prompt history;
+// the synthetic system-summary row inserted by compactConversation()
+// takes their place. include=all gives admin access to every row.
 const msgListStmt = db.prepare(
+  `SELECT * FROM chat_messages WHERE chatId = ? AND compacted = 0 ORDER BY createdAt ASC`
+);
+const msgListAllStmt = db.prepare(
   `SELECT * FROM chat_messages WHERE chatId = ? ORDER BY createdAt ASC`
 );
 
@@ -137,8 +163,44 @@ export function appendMessage({
   return row;
 }
 
-export function listMessages(chatId) {
-  return msgListStmt.all(chatId);
+export function listMessages(chatId, { includeCompacted = false } = {}) {
+  return (includeCompacted ? msgListAllStmt : msgListStmt).all(chatId);
+}
+
+// Mark every non-compacted message older than `keepLastN` as compacted,
+// then insert a single role='system' summary message in their place.
+// Atomic — either all marked + summary inserted, or nothing changes.
+// Returns { compacted: N, summaryMessage }. Throws if too few messages.
+export function compactConversation({ chatId, summary, keepLastN = 4 }) {
+  if (!chatId) throw new Error('chatId required');
+  if (!summary || typeof summary !== 'string') throw new Error('summary required');
+
+  const live = msgListStmt.all(chatId);
+  if (live.length <= keepLastN + 1) {
+    throw new Error(`Need more than ${keepLastN + 1} messages to compact (have ${live.length})`);
+  }
+  const toCompact = live.slice(0, live.length - keepLastN);
+  const ids = toCompact.map(m => m.messageId);
+  const summaryRow = {
+    messageId: newMessageId(),
+    chatId,
+    role: 'system',
+    content: `[Earlier conversation compacted — ${ids.length} messages summarized to save context]\n\n${summary}`,
+    imageUrl: null, docName: null, docText: null,
+    model: null, provider: null,
+    tokensIn: null, tokensOut: null, elapsedMs: null, jobId: null,
+    createdAt: new Date().toISOString(),
+  };
+
+  const placeholders = ids.map(() => '?').join(',');
+  const tx = db.transaction(() => {
+    db.prepare(`UPDATE chat_messages SET compacted = 1 WHERE messageId IN (${placeholders})`).run(...ids);
+    msgInsertStmt.run(summaryRow);
+    db.prepare('UPDATE chat_conversations SET updatedAt = ? WHERE chatId = ?')
+      .run(summaryRow.createdAt, chatId);
+  });
+  tx();
+  return { compacted: ids.length, summaryMessage: summaryRow };
 }
 
 // Used by the worker callback flow: find the conversation a chat_job
