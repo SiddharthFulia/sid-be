@@ -141,9 +141,9 @@ export const deleteLipsync = async (req, res) => {
 // /api/gpu-worker/audio-complete with a `transcript` field.
 export const postAudio = async (req, res) => {
   try {
-    const { kind = 'music', model, prompt, duration = 10, voice, audioDataUrl, language } = req.body || {};
-    if (!['music', 'sfx', 'tts', 'stt'].includes(kind)) {
-      return error(res, "kind must be 'music' | 'sfx' | 'tts' | 'stt'", 400);
+    const { kind = 'music', model, prompt, duration = 10, voice, audioDataUrl, language, withLyrics } = req.body || {};
+    if (!['music', 'sfx', 'tts', 'stt', 'separate'].includes(kind)) {
+      return error(res, "kind must be 'music' | 'sfx' | 'tts' | 'stt' | 'separate'", 400);
     }
 
     // STT branch — audio in, text out. Skips the prompt/duration validation
@@ -172,6 +172,38 @@ export const postAudio = async (req, res) => {
 
       logger.info(`STT QUEUE | ${job.jobId} | model=${sttModel}`);
       return success(res, { jobId: job.jobId, status: job.status, kind: 'stt', model: sttModel });
+    }
+
+    // Source-separation branch — drop a song, get back 4 stems (vocals,
+    // drums, bass, other) + optional Whisper lyrics on the vocals stem.
+    // Worker runs Demucs (htdemucs) on the 5090; upload each stem to
+    // Cloudinary; stash the URL map in audio_jobs.stems.
+    if (kind === 'separate') {
+      if (!audioDataUrl) return error(res, 'audioDataUrl is required for kind=separate', 400);
+      let uploadedUrl = null;
+      try {
+        const up = await cdnUploadAudio(audioDataUrl);
+        uploadedUrl = up.url;
+      } catch (e) {
+        return error(res, `Could not upload audio: ${e.message}`, 502);
+      }
+      const sepModel = model || 'htdemucs';
+      // Reuse `voice` column as the withLyrics boolean flag — tiny hack
+      // that avoids a schema change for one optional flag.
+      const lyricsFlag = withLyrics === true || withLyrics === 1 || withLyrics === '1';
+      const job = createAudioJob({
+        kind: 'separate',
+        model: sepModel,
+        prompt: '',
+        duration: 0,
+        voice: lyricsFlag ? 'with-lyrics' : null,
+      });
+      updateAudioJob(job.jobId, { sourceUrl: uploadedUrl });
+      publishAudioJob({ jobId: job.jobId, kind: 'separate', model: sepModel }).catch(e =>
+        logger.warn(`Audio publish skipped: ${e.message}`));
+
+      logger.info(`SEPARATE QUEUE | ${job.jobId} | model=${sepModel} | lyrics=${lyricsFlag}`);
+      return success(res, { jobId: job.jobId, status: job.status, kind: 'separate', model: sepModel });
     }
 
     // Original music / sfx / tts path
@@ -205,7 +237,13 @@ export const getAudioStatus = (req, res) => {
   if (logs.length === 0 && row.logs) {
     try { const p = JSON.parse(row.logs); if (Array.isArray(p)) logs = p; } catch {}
   }
-  return success(res, { ...row, logs });
+  // Source-separation rows store stems as JSON string in SQLite — inflate
+  // it for the FE so it can render the 4 stem URLs without a second parse.
+  let stems = null;
+  if (row.stems) {
+    try { stems = JSON.parse(row.stems); } catch {}
+  }
+  return success(res, { ...row, logs, stems });
 };
 
 export const getAudioList = (req, res) => {

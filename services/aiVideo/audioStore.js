@@ -32,6 +32,9 @@ const COLUMNS = new Set([
   // result for kind=stt jobs; sourceUrl holds the Cloudinary URL of the
   // uploaded audio so the worker can fetch + transcribe.
   'transcript', 'sourceUrl',
+  // Source-separation result (added 2026-05-19). JSON string with the
+  // four stem URLs + optional lyrics. Only used when kind='separate'.
+  'stems',
 ]);
 
 // Routed through the shared job_logs table — see logStore.js.

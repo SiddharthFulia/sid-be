@@ -312,6 +312,13 @@ addColumnIfMissing('enhanced_images', 'negativePrompt', 'TEXT');
 addColumnIfMissing('audio_jobs', 'transcript', 'TEXT');
 addColumnIfMissing('audio_jobs', 'sourceUrl',  'TEXT');
 
+// Source separation result. `audio_jobs.kind='separate'` rows store a
+// JSON object in `stems` like:
+//   { "vocals": "https://…", "drums": "…", "bass": "…", "other": "…",
+//     "lyrics": "I see trees of green …" }
+// Worker writes this after running Demucs (4-stem) + Whisper on the vocals.
+addColumnIfMissing('audio_jobs', 'stems', 'TEXT');
+
 // ─── Lip Sync lane (Tier 3, added 2026-05) ────────────────
 // LatentSync workflow: audio + portrait → talking head video.
 db.exec(`
