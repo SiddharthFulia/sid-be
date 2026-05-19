@@ -13,11 +13,13 @@ export function newChatJobId() {
 const insertStmt = db.prepare(`INSERT INTO chat_jobs (
   jobId, status, model, messages, imageUrl, reply, elapsedMs,
   tokensIn, tokensOut, error, workerId, logs,
-  createdAt, startedAt, completedAt
+  createdAt, startedAt, completedAt,
+  chatId, messageId, provider
 ) VALUES (
   @jobId, @status, @model, @messages, @imageUrl, @reply, @elapsedMs,
   @tokensIn, @tokensOut, @error, @workerId, @logs,
-  @createdAt, @startedAt, @completedAt
+  @createdAt, @startedAt, @completedAt,
+  @chatId, @messageId, @provider
 )`);
 
 const selectStmt = db.prepare('SELECT * FROM chat_jobs WHERE jobId = ?');
@@ -27,9 +29,11 @@ const COLUMNS = new Set([
   'status', 'model', 'messages', 'imageUrl', 'reply', 'elapsedMs',
   'tokensIn', 'tokensOut', 'error', 'workerId', 'logs',
   'startedAt', 'completedAt',
+  'chatId', 'messageId', 'provider',
 ]);
 
-export function createChatJob({ model, messages, imageUrl = null }) {
+export function createChatJob({ model, messages, imageUrl = null,
+                                chatId = null, messageId = null, provider = null }) {
   const row = {
     jobId: newChatJobId(),
     status: 'queued',
@@ -46,6 +50,9 @@ export function createChatJob({ model, messages, imageUrl = null }) {
     createdAt: new Date().toISOString(),
     startedAt: null,
     completedAt: null,
+    chatId,
+    messageId,
+    provider,
   };
   insertStmt.run(row);
   return row;

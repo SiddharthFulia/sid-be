@@ -364,6 +364,7 @@ export const postAudioFailed = (req, res) => {
 // ─── Chat (Ollama on 5090) ────────────────────────────────────
 // Worker posts back the assistant reply + token counts here.
 import { getChatJob, updateChatJob } from '../../services/aiVideo/chatStore.js';
+import { appendMessage as appendChatMessage } from '../../services/aiVideo/chatConversations.js';
 
 export const postChatJob = (req, res) => {
   // Lets the worker pull the full chat_jobs row (including messages JSON
@@ -401,6 +402,25 @@ export const postChatComplete = (req, res) => {
     completedAt: new Date().toISOString(),
   });
   if (!row) return error(res, 'Chat job not found', 404);
+  // If the job belongs to a conversation, append the assistant message
+  // to chat_messages so the conversation thread updates in place.
+  if (row.chatId) {
+    try {
+      appendChatMessage({
+        chatId: row.chatId,
+        role: 'assistant',
+        content: reply,
+        model: row.model,
+        provider: row.provider || null,
+        tokensIn: typeof tokensIn === 'number' ? tokensIn : null,
+        tokensOut: typeof tokensOut === 'number' ? tokensOut : null,
+        elapsedMs: typeof elapsedMs === 'number' ? elapsedMs : null,
+        jobId,
+      });
+    } catch (e) {
+      logger.warn(`Chat ${jobId}: assistant append failed: ${e.message}`);
+    }
+  }
   logger.info(`Chat ${jobId} done in ${elapsedMs ?? '?'}ms · ${reply.length} chars`);
   return success(res, row);
 };

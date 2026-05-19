@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { getHealth, getStats } from '../../controllers/v1/health.js';
-import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postPromptCoach, postChatLocal, getChatStatus, getLocalModels } from '../../controllers/v1/ai.js';
+import {
+  postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postPromptCoach,
+  postChatLocal, getChatStatus, getLocalModels,
+  postCreateConversation, getListConversations, getOneConversation,
+  patchConversation, deleteOneConversation, postConversationsBulk, postSendMessage,
+} from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
@@ -26,9 +31,17 @@ router.post('/chat', postChat);
 router.post('/ai', postAI);
 
 // AI Chat 5090 lane — Ollama running on the home RTX 5090
-router.post('/chat/local',           postChatLocal);
-router.get('/chat/status/:jobId',    getChatStatus);
-router.get('/chat/local-models',     getLocalModels);
+router.post('/chat/local',                   postChatLocal);          // legacy single-shot
+router.get('/chat/status/:jobId',            getChatStatus);
+router.get('/chat/local-models',             getLocalModels);
+// Conversation-aware multi-turn chat with persistence
+router.post('/chat/conversations',           postCreateConversation);
+router.get('/chat/conversations',            getListConversations);
+router.post('/chat/conversations/bulk',      postConversationsBulk);
+router.get('/chat/conversations/:chatId',    getOneConversation);
+router.patch('/chat/conversations/:chatId',  patchConversation);
+router.delete('/chat/conversations/:chatId', deleteOneConversation);
+router.post('/chat/conversations/:chatId/messages', postSendMessage);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);

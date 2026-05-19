@@ -7,6 +7,11 @@ import { createChatJob, getChatJob } from '../../services/aiVideo/chatStore.js';
 import { publishChatJob } from '../../services/aiVideo/messageQueue.js';
 import { getAllWorkerStatuses, isWorkerOnline } from '../../services/aiVideo/jobStore.js';
 import { uploadAudioDataUrl as cdnUploadDataUrl } from '../../services/aiVideo/cloudinaryStore.js';
+import {
+  createConversation, getConversation, updateConversation,
+  deleteConversation, deleteConversations, listConversations,
+  appendMessage, listMessages,
+} from '../../services/aiVideo/chatConversations.js';
 
 export const postChat = async (req, res) => {
   try {
@@ -234,32 +239,113 @@ export const postGeminiVision = async (req, res) => {
 };
 
 // ─── AI Chat 5090 lane (Ollama on the local GPU) ──────────────────
-//
-// Three endpoints:
-//   POST /api/chat/local       — queue a chat completion on the 5090
-//   GET  /api/chat/status/:id  — poll for the reply
-//   GET  /api/chat/local-models — list models installed on the 5090
-//
-// Job lifecycle:
-//   1. BE creates chat_jobs row + publishes to chat_queue
-//   2. Worker pulls, calls Ollama at 127.0.0.1:11434, posts reply back
-//      via /api/gpu-worker/chat-complete
-//   3. FE polls /status/:id until status === 'completed' | 'failed'
-//
-// FE owns conversation history — every request carries the full
-// `messages` array. Keeps the BE stateless and the schema lean.
-export const postChatLocal = async (req, res) => {
-  try {
-    const { messages, model, imageDataUrl } = req.body || {};
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return error(res, 'messages[] is required', 400);
-    }
-    if (!model || typeof model !== 'string') {
-      return error(res, 'model is required (e.g. qwen2.5:32b-instruct-q4_K_M)', 400);
-    }
+// Conversation-aware. FE creates a chat, the chat lives at /ai/<chatId>,
+// and posting a message:
+//   1. appends a user-role row to chat_messages
+//   2. queues a chat_job for inference
+//   3. on chat-complete callback, BE appends an assistant-role row
+// FE can poll /api/chat/conversations/:id for the live state, or
+// /api/chat/status/:jobId for just the inflight inference status.
 
-    // For vision models, the user may attach an image. Upload to Cloudinary
-    // so the worker can fetch it without us sending 5 MB+ over RabbitMQ.
+// POST /api/chat/conversations  { title?, model?, provider? }
+export const postCreateConversation = (req, res) => {
+  try {
+    const { title, model, provider } = req.body || {};
+    const conv = createConversation({ title, model, provider });
+    return success(res, conv);
+  } catch (err) { return error(res, err.message); }
+};
+
+// GET /api/chat/conversations?archived=0&page=1
+export const getListConversations = (req, res) => {
+  try {
+    const archived = req.query.archived === '1' ? 1 : 0;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    return success(res, listConversations({ archived, page, limit }));
+  } catch (err) { return error(res, err.message); }
+};
+
+// GET /api/chat/conversations/:chatId  → conversation + all messages
+export const getOneConversation = (req, res) => {
+  try {
+    const conv = getConversation(req.params.chatId);
+    if (!conv) return error(res, 'Not found', 404);
+    const messages = listMessages(conv.chatId);
+    return success(res, { ...conv, messages });
+  } catch (err) { return error(res, err.message); }
+};
+
+// PATCH /api/chat/conversations/:chatId  { title?, model?, provider?, pinned?, archived? }
+export const patchConversation = (req, res) => {
+  try {
+    const { title, model, provider, pinned, archived } = req.body || {};
+    const patch = {};
+    if (typeof title === 'string') patch.title = title.slice(0, 200);
+    if (typeof model === 'string') patch.model = model;
+    if (typeof provider === 'string') patch.provider = provider;
+    if (pinned === 0 || pinned === 1) patch.pinned = pinned;
+    if (archived === 0 || archived === 1) patch.archived = archived;
+    const conv = updateConversation(req.params.chatId, patch);
+    if (!conv) return error(res, 'Not found', 404);
+    return success(res, conv);
+  } catch (err) { return error(res, err.message); }
+};
+
+// DELETE /api/chat/conversations/:chatId — CASCADE removes messages too
+export const deleteOneConversation = (req, res) => {
+  try {
+    const ok = deleteConversation(req.params.chatId);
+    if (!ok) return error(res, 'Not found', 404);
+    return success(res, { deleted: 1 });
+  } catch (err) { return error(res, err.message); }
+};
+
+// POST /api/chat/conversations/bulk  { action: 'delete' | 'archive', ids: [] }
+export const postConversationsBulk = (req, res) => {
+  try {
+    const { action, ids } = req.body || {};
+    if (!Array.isArray(ids) || !ids.length) return error(res, 'ids array required', 400);
+    if (ids.length > 100) return error(res, 'max 100 ids per call', 400);
+    if (action === 'delete') {
+      const affected = deleteConversations(ids);
+      return success(res, { affected });
+    }
+    if (action === 'archive' || action === 'unarchive') {
+      const flag = action === 'archive' ? 1 : 0;
+      let affected = 0;
+      for (const id of ids) {
+        if (updateConversation(id, { archived: flag })) affected += 1;
+      }
+      return success(res, { affected });
+    }
+    return error(res, "action must be 'delete' | 'archive' | 'unarchive'", 400);
+  } catch (err) { return error(res, err.message); }
+};
+
+// POST /api/chat/conversations/:chatId/messages
+//   { content, model, provider, imageDataUrl?, docName?, docText? }
+// Returns { messageId (user), jobId (inference), assistantMessageId (pending) }
+export const postSendMessage = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const conv = getConversation(chatId);
+    if (!conv) return error(res, 'Conversation not found', 404);
+
+    let {
+      content = '', model, provider,
+      imageDataUrl = null, docName = null, docText = null,
+    } = req.body || {};
+    content = String(content || '').trim();
+    if (!content && !imageDataUrl && !docText) {
+      return error(res, 'content, imageDataUrl, or docText is required', 400);
+    }
+    // Fallback to conversation defaults
+    model = model || conv.model;
+    provider = provider || conv.provider || '5090';
+    if (!model) return error(res, 'model is required (no default on conversation)', 400);
+
+    // Upload image to Cloudinary if attached (vision input)
     let imageUrl = null;
     if (imageDataUrl && typeof imageDataUrl === 'string' && imageDataUrl.startsWith('data:')) {
       try {
@@ -270,40 +356,70 @@ export const postChatLocal = async (req, res) => {
       }
     }
 
-    const job = createChatJob({ model, messages, imageUrl });
+    // Append the user message — include docText embedded in content so
+    // the LLM sees the document body as part of the user turn.
+    let fullContent = content;
+    if (docText && typeof docText === 'string') {
+      const trimmed = docText.slice(0, 50000);
+      fullContent = `${content}\n\n<document name="${docName || 'attached'}">\n${trimmed}\n</document>`.trim();
+    }
+    const userMsg = appendMessage({
+      chatId, role: 'user', content: fullContent,
+      imageUrl, docName, docText: docText ? docText.slice(0, 50000) : null,
+    });
+
+    // Auto-title from the first message if still default
+    if (conv.title === 'New chat' && content) {
+      updateConversation(chatId, { title: content.slice(0, 60), model, provider });
+    } else {
+      // Always update the conversation's current default model/provider
+      updateConversation(chatId, { model, provider });
+    }
+
+    // Build the messages array Ollama will see (full history)
+    const history = listMessages(chatId).map(m => ({
+      role: m.role,
+      content: m.content,
+      // Note: imageUrl is attached on the worker side using the LAST
+      // user message's imageUrl (set on the chat_job row), to match
+      // Ollama's expected shape.
+    }));
+
+    const job = createChatJob({
+      model, messages: history, imageUrl,
+      chatId, messageId: userMsg.messageId, provider,
+    });
     publishChatJob({ jobId: job.jobId, model }).catch(e =>
       logger.warn(`Chat publish skipped: ${e.message}`));
 
-    logger.info(`CHAT QUEUE | ${job.jobId} | model=${model} | msgs=${messages.length}`);
-    return success(res, { jobId: job.jobId, status: job.status, model });
+    logger.info(`CHAT MSG | conv=${chatId} | ${userMsg.messageId} → job=${job.jobId} | model=${model}`);
+    return success(res, {
+      userMessage: userMsg,
+      jobId: job.jobId,
+      status: job.status,
+      model,
+      provider,
+    });
   } catch (err) {
-    logger.error('Chat submit failed', err.message);
+    logger.error('Send message failed', err.message);
     return error(res, err.message);
   }
 };
 
+// GET /api/chat/status/:jobId — still useful for polling a single inference
 export const getChatStatus = (req, res) => {
   const row = getChatJob(req.params.jobId);
   if (!row) return error(res, 'Not found', 404);
-  // Don't echo back the full messages JSON — the FE already has it.
-  // Just return what's new (status, reply, elapsed, error).
   return success(res, {
-    jobId: row.jobId,
-    status: row.status,
-    model: row.model,
-    reply: row.reply,
-    elapsedMs: row.elapsedMs,
-    tokensIn: row.tokensIn,
-    tokensOut: row.tokensOut,
-    error: row.error,
-    createdAt: row.createdAt,
-    completedAt: row.completedAt,
+    jobId: row.jobId, status: row.status, model: row.model,
+    reply: row.reply, elapsedMs: row.elapsedMs,
+    tokensIn: row.tokensIn, tokensOut: row.tokensOut,
+    error: row.error, createdAt: row.createdAt, completedAt: row.completedAt,
+    chatId: row.chatId, messageId: row.messageId, provider: row.provider,
   });
 };
 
-// List models installed on the 5090. Source of truth = the
-// `ollamaModels` array the worker reports in its register heartbeat.
-// Falls back to an empty list if no 5090 worker has registered.
+// GET /api/chat/local-models — Ollama models installed on the 5090
 export const getLocalModels = async (_req, res) => {
   try {
     const all = await getAllWorkerStatuses();
@@ -316,7 +432,23 @@ export const getLocalModels = async (_req, res) => {
       lastSeenAt: local.lastSeenAt || null,
       models,
     });
-  } catch (err) {
-    return error(res, err.message);
-  }
+  } catch (err) { return error(res, err.message); }
+};
+
+// Legacy single-shot endpoint — keep for backward compat / quick tests.
+// Doesn't persist anything; FE sends full history each time.
+export const postChatLocal = async (req, res) => {
+  try {
+    const { messages, model, imageDataUrl } = req.body || {};
+    if (!Array.isArray(messages) || !messages.length) return error(res, 'messages[] required', 400);
+    if (!model) return error(res, 'model required', 400);
+    let imageUrl = null;
+    if (imageDataUrl && imageDataUrl.startsWith('data:')) {
+      const up = await cdnUploadDataUrl(imageDataUrl);
+      imageUrl = up.url;
+    }
+    const job = createChatJob({ model, messages, imageUrl });
+    publishChatJob({ jobId: job.jobId, model }).catch(() => {});
+    return success(res, { jobId: job.jobId, status: job.status, model });
+  } catch (err) { return error(res, err.message); }
 };

@@ -319,11 +319,57 @@ addColumnIfMissing('audio_jobs', 'sourceUrl',  'TEXT');
 // Worker writes this after running Demucs (4-stem) + Whisper on the vocals.
 addColumnIfMissing('audio_jobs', 'stems', 'TEXT');
 
-// ─── Chat jobs (Ollama on 5090) ──────────────────────────────
+// ─── Chat conversations + messages (multi-turn 5090 chat) ────
+// Each conversation is a thread the user can resume at /ai/<id>. Lives
+// across sessions — sidebar lists them all. Schema kept lean:
+//   chat_conversations: metadata (title, default model, timestamps)
+//   chat_messages:      every user + assistant turn, with optional
+//                       image/doc URL + per-message model override
+//                       (a chat can switch models mid-thread)
+//
+// chat_jobs (below) stays as the async inference queue — each user
+// message creates a chat_job, worker calls Ollama, BE appends the
+// assistant message to chat_messages on completion.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_conversations (
+    chatId      TEXT PRIMARY KEY,
+    title       TEXT NOT NULL DEFAULT 'New chat',
+    model       TEXT,                 -- default model for new messages
+    provider    TEXT,                 -- 'cloud-groq' | 'cloud-gemini' | 'oracle-ollama' | '5090'
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    archived    INTEGER NOT NULL DEFAULT 0,
+    vault       INTEGER NOT NULL DEFAULT 0,
+    createdAt   TEXT NOT NULL,
+    updatedAt   TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_conv_updated  ON chat_conversations(archived, updatedAt DESC);
+
+  CREATE TABLE IF NOT EXISTS chat_messages (
+    messageId   TEXT PRIMARY KEY,
+    chatId      TEXT NOT NULL REFERENCES chat_conversations(chatId) ON DELETE CASCADE,
+    role        TEXT NOT NULL,        -- 'user' | 'assistant' | 'system'
+    content     TEXT NOT NULL,
+    imageUrl    TEXT,                 -- Cloudinary URL (vision input or retained from past)
+    docName     TEXT,                 -- attached document filename (for display)
+    docText     TEXT,                 -- extracted text content embedded as context
+    model       TEXT,                 -- model used for THIS message (assistant only)
+    provider    TEXT,
+    tokensIn    INTEGER,
+    tokensOut   INTEGER,
+    elapsedMs   INTEGER,
+    jobId       TEXT,                 -- chat_jobs row that produced this assistant message
+    createdAt   TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_msgs_chat ON chat_messages(chatId, createdAt ASC);
+`);
+
+// ─── Chat jobs (Ollama inference queue) ──────────────────────
 // Each chat completion is a self-contained job: messages-in, reply-out.
-// FE manages conversation history; BE doesn't store it. `messages` is
-// the JSON-serialised history that gets sent to Ollama; `reply` is the
-// assistant text. `imageUrl` lets vision models receive an image.
+// `chatId` links the job back to its conversation so the BE knows where
+// to append the assistant reply on completion.
+addColumnIfMissing('chat_jobs', 'chatId',    'TEXT');
+addColumnIfMissing('chat_jobs', 'messageId', 'TEXT');
+addColumnIfMissing('chat_jobs', 'provider',  'TEXT');
 db.exec(`
   CREATE TABLE IF NOT EXISTS chat_jobs (
     jobId       TEXT PRIMARY KEY,
