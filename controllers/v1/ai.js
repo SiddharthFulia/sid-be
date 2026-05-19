@@ -3,6 +3,10 @@ import { chat, rawQuery } from '../../services/ollama.js';
 import { chatGroq } from '../../services/groq.js';
 import { chatGemini, analyzeImageGemini } from '../../services/gemini.js';
 import logger from '../../helpers/logger.js';
+import { createChatJob, getChatJob } from '../../services/aiVideo/chatStore.js';
+import { publishChatJob } from '../../services/aiVideo/messageQueue.js';
+import { getAllWorkerStatuses, isWorkerOnline } from '../../services/aiVideo/jobStore.js';
+import { uploadAudioDataUrl as cdnUploadDataUrl } from '../../services/aiVideo/cloudinaryStore.js';
 
 export const postChat = async (req, res) => {
   try {
@@ -226,5 +230,93 @@ export const postGeminiVision = async (req, res) => {
   } catch (err) {
     logger.error('Gemini vision failed', err.message);
     error(res, err.message);
+  }
+};
+
+// ─── AI Chat 5090 lane (Ollama on the local GPU) ──────────────────
+//
+// Three endpoints:
+//   POST /api/chat/local       — queue a chat completion on the 5090
+//   GET  /api/chat/status/:id  — poll for the reply
+//   GET  /api/chat/local-models — list models installed on the 5090
+//
+// Job lifecycle:
+//   1. BE creates chat_jobs row + publishes to chat_queue
+//   2. Worker pulls, calls Ollama at 127.0.0.1:11434, posts reply back
+//      via /api/gpu-worker/chat-complete
+//   3. FE polls /status/:id until status === 'completed' | 'failed'
+//
+// FE owns conversation history — every request carries the full
+// `messages` array. Keeps the BE stateless and the schema lean.
+export const postChatLocal = async (req, res) => {
+  try {
+    const { messages, model, imageDataUrl } = req.body || {};
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return error(res, 'messages[] is required', 400);
+    }
+    if (!model || typeof model !== 'string') {
+      return error(res, 'model is required (e.g. qwen2.5:32b-instruct-q4_K_M)', 400);
+    }
+
+    // For vision models, the user may attach an image. Upload to Cloudinary
+    // so the worker can fetch it without us sending 5 MB+ over RabbitMQ.
+    let imageUrl = null;
+    if (imageDataUrl && typeof imageDataUrl === 'string' && imageDataUrl.startsWith('data:')) {
+      try {
+        const up = await cdnUploadDataUrl(imageDataUrl);
+        imageUrl = up.url;
+      } catch (e) {
+        return error(res, `Image upload failed: ${e.message}`, 502);
+      }
+    }
+
+    const job = createChatJob({ model, messages, imageUrl });
+    publishChatJob({ jobId: job.jobId, model }).catch(e =>
+      logger.warn(`Chat publish skipped: ${e.message}`));
+
+    logger.info(`CHAT QUEUE | ${job.jobId} | model=${model} | msgs=${messages.length}`);
+    return success(res, { jobId: job.jobId, status: job.status, model });
+  } catch (err) {
+    logger.error('Chat submit failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+export const getChatStatus = (req, res) => {
+  const row = getChatJob(req.params.jobId);
+  if (!row) return error(res, 'Not found', 404);
+  // Don't echo back the full messages JSON — the FE already has it.
+  // Just return what's new (status, reply, elapsed, error).
+  return success(res, {
+    jobId: row.jobId,
+    status: row.status,
+    model: row.model,
+    reply: row.reply,
+    elapsedMs: row.elapsedMs,
+    tokensIn: row.tokensIn,
+    tokensOut: row.tokensOut,
+    error: row.error,
+    createdAt: row.createdAt,
+    completedAt: row.completedAt,
+  });
+};
+
+// List models installed on the 5090. Source of truth = the
+// `ollamaModels` array the worker reports in its register heartbeat.
+// Falls back to an empty list if no 5090 worker has registered.
+export const getLocalModels = async (_req, res) => {
+  try {
+    const all = await getAllWorkerStatuses();
+    const local = all?.local || {};
+    const online = isWorkerOnline(local);
+    const models = Array.isArray(local.ollamaModels) ? local.ollamaModels : [];
+    return success(res, {
+      online,
+      workerId: local.workerId || null,
+      lastSeenAt: local.lastSeenAt || null,
+      models,
+    });
+  } catch (err) {
+    return error(res, err.message);
   }
 };

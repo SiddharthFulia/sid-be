@@ -31,11 +31,20 @@ function checkAuth(req) {
 
 export const postRegister = async (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
-  const { workerId, role } = req.body || {};
+  const { workerId, role, ollamaModels } = req.body || {};
   if (!workerId) return error(res, 'workerId is required', 400);
   const r = normalizeRole(role);
-  const status = await recordWorkerHeartbeat(workerId, r);
-  logger.info(`GPU worker registered: ${workerId} (role=${r})`);
+  const extras = {};
+  if (Array.isArray(ollamaModels)) {
+    // Defensive — cap at 200 entries and only keep name/size to stop
+    // workers from accidentally spamming the heartbeat with bloat.
+    extras.ollamaModels = ollamaModels.slice(0, 200).map(m => ({
+      name: String(m?.name || '').slice(0, 120),
+      size: typeof m?.size === 'number' ? m.size : null,
+    })).filter(m => m.name);
+  }
+  const status = await recordWorkerHeartbeat(workerId, r, extras);
+  logger.info(`GPU worker registered: ${workerId} (role=${r}, models=${extras.ollamaModels?.length ?? '-'})`);
   return success(res, status);
 };
 
@@ -349,6 +358,63 @@ export const postAudioFailed = (req, res) => {
   });
   if (!row) return error(res, 'Audio job not found', 404);
   logger.warn(`Audio ${jobId} failed: ${errMsg}`);
+  return success(res, row);
+};
+
+// ─── Chat (Ollama on 5090) ────────────────────────────────────
+// Worker posts back the assistant reply + token counts here.
+import { getChatJob, updateChatJob } from '../../services/aiVideo/chatStore.js';
+
+export const postChatJob = (req, res) => {
+  // Lets the worker pull the full chat_jobs row (including messages JSON
+  // and imageUrl) — the queue trigger only carries the jobId.
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const row = getChatJob(req.params.jobId);
+  if (!row) return error(res, 'Chat job not found', 404);
+  // Inflate messages JSON for the worker's convenience.
+  let messages = [];
+  try { messages = JSON.parse(row.messages); } catch {}
+  return success(res, { ...row, messages });
+};
+
+export const postChatProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  // Promote queued → processing on first progress ping so the FE poller
+  // sees the status transition.
+  const row = updateChatJob(jobId, { status: 'processing', startedAt: new Date().toISOString() });
+  if (!row) return error(res, 'Chat job not found', 404);
+  return success(res, { ok: true });
+};
+
+export const postChatComplete = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, reply, elapsedMs, tokensIn, tokensOut } = req.body || {};
+  if (!jobId || typeof reply !== 'string') return error(res, 'jobId + reply required', 400);
+  const row = updateChatJob(jobId, {
+    status: 'completed',
+    reply,
+    elapsedMs: typeof elapsedMs === 'number' ? elapsedMs : null,
+    tokensIn: typeof tokensIn === 'number' ? tokensIn : null,
+    tokensOut: typeof tokensOut === 'number' ? tokensOut : null,
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Chat job not found', 404);
+  logger.info(`Chat ${jobId} done in ${elapsedMs ?? '?'}ms · ${reply.length} chars`);
+  return success(res, row);
+};
+
+export const postChatFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, error: errMsg } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const row = updateChatJob(jobId, {
+    status: 'failed', error: String(errMsg || 'unknown').slice(0, 800),
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Chat job not found', 404);
+  logger.warn(`Chat ${jobId} failed: ${errMsg}`);
   return success(res, row);
 };
 

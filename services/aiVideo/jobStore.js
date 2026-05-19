@@ -26,15 +26,25 @@ async function writeAll(obj) {
   await fs.writeFile(WORKER_FILE, JSON.stringify(obj, null, 2), 'utf8');
 }
 
-export async function recordWorkerHeartbeat(workerId, role = 'worker') {
+export async function recordWorkerHeartbeat(workerId, role = 'worker', extras = {}) {
   const all = await readAll();
-  const entry = { workerId, role, lastSeenAt: new Date().toISOString() };
+  const entry = {
+    workerId, role,
+    lastSeenAt: new Date().toISOString(),
+    // Optional: { ollamaModels: [{ name, size }, …] } reported by the
+    // 5090 worker on each register so the FE can list installed models
+    // without a direct round-trip to the home network.
+    ...(extras.ollamaModels ? { ollamaModels: extras.ollamaModels } : {}),
+  };
   // Migration: if file is in legacy flat shape, move existing entry to its role bucket.
   if (all.workerId && !all.workers) {
     all.workers = { [all.role || 'worker']: { workerId: all.workerId, role: all.role || 'worker', lastSeenAt: all.lastSeenAt } };
     delete all.workerId; delete all.role; delete all.lastSeenAt;
   }
   all.workers = all.workers || {};
+  // Preserve previously-reported ollamaModels if the new heartbeat doesn't carry one
+  const prev = all.workers[role] || {};
+  if (!extras.ollamaModels && prev.ollamaModels) entry.ollamaModels = prev.ollamaModels;
   all.workers[role] = entry;
   await writeAll(all);
   return entry;

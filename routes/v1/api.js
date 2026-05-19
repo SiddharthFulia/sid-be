@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import { getHealth, getStats } from '../../controllers/v1/health.js';
-import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postPromptCoach } from '../../controllers/v1/ai.js';
+import { postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postPromptCoach, postChatLocal, getChatStatus, getLocalModels } from '../../controllers/v1/ai.js';
 import { postFaceAnalyze, postObjectDetect, getFaceHealth } from '../../controllers/v1/face.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, postSpeechToText, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
-import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed } from '../../controllers/v1/gpuWorker.js';
+import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed, postChatJob, postChatProgress, postChatComplete, postChatFailed } from '../../controllers/v1/gpuWorker.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -21,9 +21,14 @@ const router = Router();
 router.get('/health', getHealth);
 router.get('/stats', getStats);
 
-// AI (Ollama local)
+// AI (Ollama local — on Oracle BE)
 router.post('/chat', postChat);
 router.post('/ai', postAI);
+
+// AI Chat 5090 lane — Ollama running on the home RTX 5090
+router.post('/chat/local',           postChatLocal);
+router.get('/chat/status/:jobId',    getChatStatus);
+router.get('/chat/local-models',     getLocalModels);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);

@@ -319,6 +319,32 @@ addColumnIfMissing('audio_jobs', 'sourceUrl',  'TEXT');
 // Worker writes this after running Demucs (4-stem) + Whisper on the vocals.
 addColumnIfMissing('audio_jobs', 'stems', 'TEXT');
 
+// ─── Chat jobs (Ollama on 5090) ──────────────────────────────
+// Each chat completion is a self-contained job: messages-in, reply-out.
+// FE manages conversation history; BE doesn't store it. `messages` is
+// the JSON-serialised history that gets sent to Ollama; `reply` is the
+// assistant text. `imageUrl` lets vision models receive an image.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_jobs (
+    jobId       TEXT PRIMARY KEY,
+    status      TEXT NOT NULL,           -- queued | processing | completed | failed
+    model       TEXT NOT NULL,           -- ollama model id (e.g. qwen2.5:32b-instruct-q4_K_M)
+    messages    TEXT NOT NULL,           -- JSON array of {role, content}
+    imageUrl    TEXT,                    -- Cloudinary URL for vision models
+    reply       TEXT,                    -- assistant text (set on completion)
+    elapsedMs   INTEGER,                 -- inference time on the 5090
+    tokensIn    INTEGER,
+    tokensOut   INTEGER,
+    error       TEXT,
+    workerId    TEXT,
+    logs        TEXT,
+    createdAt   TEXT NOT NULL,
+    startedAt   TEXT,
+    completedAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_status_created ON chat_jobs(status, createdAt DESC);
+`);
+
 // ─── Lip Sync lane (Tier 3, added 2026-05) ────────────────
 // LatentSync workflow: audio + portrait → talking head video.
 db.exec(`
