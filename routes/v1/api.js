@@ -160,6 +160,12 @@ router.post('/gpu-worker/lipsync-failed',   postLipsyncFailed);
 router.post('/gpu-worker/audio-progress',   postAudioProgress);
 router.post('/gpu-worker/audio-complete',   postAudioComplete);
 router.post('/gpu-worker/audio-failed',     postAudioFailed);
+// AI Chat worker callbacks (Ollama on 5090). Worker GETs the full job row
+// when it pulls from the chat queue, then streams progress + final reply.
+router.get( '/gpu-worker/chat-job/:jobId',  postChatJob);
+router.post('/gpu-worker/chat-progress',    postChatProgress);
+router.post('/gpu-worker/chat-complete',    postChatComplete);
+router.post('/gpu-worker/chat-failed',      postChatFailed);
 
 // ─── Studio lanes (Tier 3) — no vault gating; library + bulk delete ─
 // These lanes don't need NSFW gating — they live in their own libraries.
