@@ -364,12 +364,8 @@ db.exec(`
 `);
 
 // ─── Chat jobs (Ollama inference queue) ──────────────────────
-// Each chat completion is a self-contained job: messages-in, reply-out.
-// `chatId` links the job back to its conversation so the BE knows where
-// to append the assistant reply on completion.
-addColumnIfMissing('chat_jobs', 'chatId',    'TEXT');
-addColumnIfMissing('chat_jobs', 'messageId', 'TEXT');
-addColumnIfMissing('chat_jobs', 'provider',  'TEXT');
+// CREATE must come BEFORE addColumnIfMissing — on a fresh BE the
+// ALTER calls used to run first and fail with "no such table".
 db.exec(`
   CREATE TABLE IF NOT EXISTS chat_jobs (
     jobId       TEXT PRIMARY KEY,
@@ -390,6 +386,13 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_chat_status_created ON chat_jobs(status, createdAt DESC);
 `);
+
+// `chatId` links the job back to its conversation so the BE knows where
+// to append the assistant reply on completion. Lazy-added so existing
+// rows from before the conversations feature shipped don't get nuked.
+addColumnIfMissing('chat_jobs', 'chatId',    'TEXT');
+addColumnIfMissing('chat_jobs', 'messageId', 'TEXT');
+addColumnIfMissing('chat_jobs', 'provider',  'TEXT');
 
 // ─── Lip Sync lane (Tier 3, added 2026-05) ────────────────
 // LatentSync workflow: audio + portrait → talking head video.
