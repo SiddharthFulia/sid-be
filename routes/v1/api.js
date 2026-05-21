@@ -12,7 +12,8 @@ import { postExport } from '../../controllers/v1/export.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, postSpeechToText, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
-import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed, postChatJob, postChatProgress, postChatComplete, postChatFailed } from '../../controllers/v1/gpuWorker.js';
+import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed, postChatJob, postChatProgress, postChatComplete, postChatFailed, postMeshJob, postMeshProgress, postMeshComplete, postMeshFailed } from '../../controllers/v1/gpuWorker.js';
+import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../controllers/v1/mesh.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -46,6 +47,13 @@ router.delete('/chat/conversations/:chatId', deleteOneConversation);
 router.post('/chat/conversations/:chatId/messages', postSendMessage);
 router.post('/chat/conversations/:chatId/compact',          postCompactConversation);
 router.post('/chat/conversations/:chatId/compact/finalize', postCompactFinalize);
+
+// Mesh generation (text → 3D on the 5090, e.g. Shap-E). Mirrors the
+// chat-job lane: FE POSTs prompt + model + steps, worker pulls + runs +
+// uploads the GLB, FE polls /status/:jobId until completed.
+router.post('/mesh/generate',         postCreateMeshJob);
+router.get( '/mesh/status/:jobId',    getMeshStatus);
+router.get( '/mesh/list',             listMeshJobsCtrl);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);
@@ -84,13 +92,13 @@ router.get('/auth/vault-status', requireVault, (_req, res) => success(res, { ok:
 //
 //   GET /api/job-logs/:lane/:jobId?since=<ms>&limit=80
 //
-// Lanes: 'video' | 'image' | 'lipsync' | 'audio'.
+// Lanes: 'video' | 'image' | 'lipsync' | 'audio' | 'mesh'.
 // Returns: { logs: [{ts, msg}, ...], nextSince } in chronological order.
 router.get('/job-logs/:lane/:jobId', maybeVault, (req, res) => {
   const lane = String(req.params.lane || '').toLowerCase();
   const jobId = req.params.jobId;
-  if (!['video', 'image', 'lipsync', 'audio'].includes(lane)) {
-    return error(res, "lane must be 'video' | 'image' | 'lipsync' | 'audio'", 400);
+  if (!['video', 'image', 'lipsync', 'audio', 'mesh'].includes(lane)) {
+    return error(res, "lane must be 'video' | 'image' | 'lipsync' | 'audio' | 'mesh'", 400);
   }
   if (!jobId) return error(res, 'jobId required', 400);
   const sinceTs = parseInt(req.query.since, 10) || 0;
@@ -175,6 +183,11 @@ router.get( '/gpu-worker/chat-job/:jobId',  postChatJob);
 router.post('/gpu-worker/chat-progress',    postChatProgress);
 router.post('/gpu-worker/chat-complete',    postChatComplete);
 router.post('/gpu-worker/chat-failed',      postChatFailed);
+// Mesh worker callbacks (text→3D on 5090). Same pattern as the chat lane.
+router.get( '/gpu-worker/mesh-job/:jobId',  postMeshJob);
+router.post('/gpu-worker/mesh-progress',    postMeshProgress);
+router.post('/gpu-worker/mesh-complete',    postMeshComplete);
+router.post('/gpu-worker/mesh-failed',      postMeshFailed);
 
 // ─── Studio lanes (Tier 3) — no vault gating; library + bulk delete ─
 // These lanes don't need NSFW gating — they live in their own libraries.

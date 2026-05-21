@@ -15,7 +15,7 @@
 
 import { db } from './db.js';
 
-const VALID_LANES = new Set(['video', 'image', 'lipsync', 'audio']);
+const VALID_LANES = new Set(['video', 'image', 'lipsync', 'audio', 'mesh']);
 
 const insertStmt = db.prepare(
   'INSERT INTO job_logs (jobId, lane, ts, msg) VALUES (@jobId, @lane, @ts, @msg)'

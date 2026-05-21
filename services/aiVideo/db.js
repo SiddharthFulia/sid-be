@@ -387,6 +387,32 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_chat_status_created ON chat_jobs(status, createdAt DESC);
 `);
 
+// ─── Mesh jobs (text → 3D mesh on 5090, e.g. Shap-E) ─────────
+// One row per generation request. Worker pulls the row, runs the
+// text-to-3D pipeline, uploads the resulting GLB to Cloudinary, then
+// posts back glbUrl + publicId + bytes. FE polls /api/mesh/status/:jobId.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS mesh_jobs (
+    jobId            TEXT PRIMARY KEY,
+    status           TEXT NOT NULL,           -- queued | processing | completed | failed
+    prompt           TEXT NOT NULL,
+    model            TEXT NOT NULL,           -- 'shap-e' | future options
+    steps            INTEGER,                 -- diffusion steps (16-64, default 32)
+    glbUrl           TEXT,                    -- Cloudinary URL of the .glb on completion
+    publicId         TEXT,                    -- Cloudinary public_id
+    bytes            INTEGER,                 -- file size of the .glb
+    elapsedMs        INTEGER,
+    error            TEXT,
+    workerId         TEXT,
+    logs             TEXT,                    -- JSON array (legacy; new lines go via job_logs)
+    progressMessage  TEXT,
+    createdAt        TEXT NOT NULL,
+    startedAt        TEXT,
+    completedAt      TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_mesh_status_created ON mesh_jobs(status, createdAt DESC);
+`);
+
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing
 // rows from before the conversations feature shipped don't get nuked.

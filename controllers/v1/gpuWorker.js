@@ -486,3 +486,80 @@ export const postChatFailed = (req, res) => {
   return success(res, row);
 };
 
+// ─── Mesh generation (text→3D on 5090) ─────────────────────────
+// Same shape as the chat callbacks. Worker GETs the full mesh_jobs row
+// when it pulls from QUEUE_MESH (which only carries the jobId), then
+// streams progress + final GLB URL back.
+import { getMeshJob, updateMeshJob } from '../../services/aiVideo/meshStore.js';
+
+export const postMeshJob = (req, res) => {
+  // Lets the worker pull the full mesh_jobs row (prompt + model + steps) —
+  // the queue trigger only carries the jobId.
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const row = getMeshJob(req.params.jobId);
+  if (!row) return error(res, 'Mesh job not found', 404);
+  return success(res, row);
+};
+
+export const postMeshProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, message, step, total } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+
+  // Promote queued → processing on the first progress ping so the FE
+  // poller sees the status transition.
+  const existing = getMeshJob(jobId);
+  if (!existing) return error(res, 'Mesh job not found', 404);
+  if (existing.status === 'queued') {
+    updateMeshJob(jobId, {
+      status: 'processing',
+      startedAt: new Date().toISOString(),
+    });
+  }
+
+  // Build a human-readable log line: prefer message, fall back to step/total.
+  let logLine = '';
+  if (typeof message === 'string' && message.trim()) {
+    logLine = message.trim();
+  } else if (typeof step === 'number' && typeof total === 'number') {
+    logLine = `step ${step}/${total}`;
+  }
+  if (logLine) {
+    appendJobLog(jobId, 'mesh', logLine);
+    // Also expose the latest line on the row for cheap status reads.
+    updateMeshJob(jobId, { progressMessage: logLine.slice(0, 200) });
+  }
+  return success(res, { ok: true });
+};
+
+export const postMeshComplete = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, glbUrl, publicId, bytes, elapsedMs } = req.body || {};
+  if (!jobId || !glbUrl) return error(res, 'jobId + glbUrl required', 400);
+  const row = updateMeshJob(jobId, {
+    status: 'completed',
+    glbUrl,
+    publicId: publicId || null,
+    bytes: typeof bytes === 'number' ? bytes : null,
+    elapsedMs: typeof elapsedMs === 'number' ? elapsedMs : null,
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Mesh job not found', 404);
+  logger.info(`Mesh ${jobId} completed in ${elapsedMs ?? '?'}ms → ${glbUrl}`);
+  return success(res, row);
+};
+
+export const postMeshFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, error: errMsg } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const row = updateMeshJob(jobId, {
+    status: 'failed',
+    error: String(errMsg || 'unknown').slice(0, 800),
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Mesh job not found', 404);
+  logger.warn(`Mesh ${jobId} failed: ${errMsg}`);
+  return success(res, row);
+};
+

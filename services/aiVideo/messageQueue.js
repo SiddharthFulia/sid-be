@@ -25,11 +25,13 @@ const QUEUE_IMAGE_FAILED = 'image_failed_queue';
 const QUEUE_LIPSYNC = 'lipsync_queue';
 const QUEUE_AUDIO   = 'audio_queue';
 const QUEUE_CHAT    = 'chat_queue';
+export const QUEUE_MESH    = 'mesh_queue';
 const EXCHANGE_DLX = 'video.dlx';
 const EXCHANGE_IMAGE_DLX = 'image.dlx';
 const EXCHANGE_LIPSYNC_DLX = 'lipsync.dlx';
 const EXCHANGE_AUDIO_DLX   = 'audio.dlx';
 const EXCHANGE_CHAT_DLX    = 'chat.dlx';
+export const EXCHANGE_MESH_DLX = 'mesh.dlx';
 
 let connection = null;
 let channel = null;
@@ -135,7 +137,13 @@ async function ensureChannel() {
       await channel.bindQueue('chat_failed_queue', EXCHANGE_CHAT_DLX, '');
       await channel.assertQueue(QUEUE_CHAT, { durable: true, deadLetterExchange: EXCHANGE_CHAT_DLX });
 
-      logger.info('RabbitMQ ready — video/image/lipsync/audio/chat queues connected');
+      // Mesh DLX + queue (text→3D on 5090, added 2026-05-21)
+      await channel.assertExchange(EXCHANGE_MESH_DLX, 'fanout', { durable: true });
+      await channel.assertQueue('mesh_failed_queue', { durable: true });
+      await channel.bindQueue('mesh_failed_queue', EXCHANGE_MESH_DLX, '');
+      await channel.assertQueue(QUEUE_MESH, { durable: true, deadLetterExchange: EXCHANGE_MESH_DLX });
+
+      logger.info('RabbitMQ ready — video/image/lipsync/audio/chat/mesh queues connected');
       return channel;
     } catch (err) {
       logger.error('RabbitMQ connect failed (workers will fall back to HTTP polling)', err.message);
@@ -301,6 +309,26 @@ export async function publishChatJob({ jobId, model }) {
     }
   }
   logger.error('RabbitMQ chat publish failed');
+  return false;
+}
+
+// Publish a text-to-3D mesh trigger. Worker pulls the full mesh_jobs row
+// from BE via HTTP after receiving this nudge.
+export async function publishMeshJob({ jobId, model }) {
+  if (!isConfigured()) return false;
+  const body = Buffer.from(JSON.stringify({ jobId, model, enqueuedAt: Date.now() }));
+  for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
+    const ch = await ensureChannel();
+    if (!ch) return false;
+    try {
+      const ok = ch.sendToQueue(QUEUE_MESH, body, { persistent: true, contentType: 'application/json' });
+      if (ok) return true;
+    } catch (err) { channel = null; }
+    if (attempt < PUBLISH_MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, PUBLISH_RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+    }
+  }
+  logger.error('RabbitMQ mesh publish failed');
   return false;
 }
 
