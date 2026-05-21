@@ -141,9 +141,21 @@ export const deleteLipsync = async (req, res) => {
 // /api/gpu-worker/audio-complete with a `transcript` field.
 export const postAudio = async (req, res) => {
   try {
-    const { kind = 'music', model, prompt, duration = 10, voice, audioDataUrl, language, withLyrics } = req.body || {};
-    if (!['music', 'sfx', 'tts', 'stt', 'separate'].includes(kind)) {
-      return error(res, "kind must be 'music' | 'sfx' | 'tts' | 'stt' | 'separate'", 400);
+    const {
+      kind = 'music',
+      model, prompt, duration = 10, voice,
+      audioDataUrl, language, withLyrics,
+      // Voice-clone fields (kind = 'voice-clone' | 'voice-sing').
+      // referenceAudioDataUrl: 6-30s clean speech clip of the target voice
+      // (data: URL). prompt holds the text/lyrics to speak/sing in that voice.
+      // melodyAudioDataUrl: optional sung/hummed reference for voice-sing — if
+      // provided, RVC rides this melody; otherwise XTTS produces flat speech.
+      // vcLanguage: XTTS phoneme-set hint (ISO short code: en/hi/es/…). Reuses
+      // the `voice` column for storage — JSON {language, melodyUrl?} packed in.
+      referenceAudioDataUrl, melodyAudioDataUrl, vcLanguage,
+    } = req.body || {};
+    if (!['music', 'sfx', 'tts', 'stt', 'separate', 'voice-clone', 'voice-sing'].includes(kind)) {
+      return error(res, "kind must be 'music' | 'sfx' | 'tts' | 'stt' | 'separate' | 'voice-clone' | 'voice-sing'", 400);
     }
 
     // STT branch — audio in, text out. Skips the prompt/duration validation
@@ -204,6 +216,62 @@ export const postAudio = async (req, res) => {
 
       logger.info(`SEPARATE QUEUE | ${job.jobId} | model=${sepModel} | lyrics=${lyricsFlag}`);
       return success(res, { jobId: job.jobId, status: job.status, kind: 'separate', model: sepModel });
+    }
+
+    // ── Voice-clone branches ─────────────────────────────────────
+    //   voice-clone — XTTS-v2: ref clip + text → speech in that voice
+    //   voice-sing  — XTTS-v2 (+ optional RVC melody) → singing
+    // Same shape: upload the reference clip, stash URL in sourceUrl, lyrics
+    // go in `prompt`. For voice-sing, an optional melody clip rides along —
+    // we upload that too and stash its URL in `voice` (repurposed column).
+    if (kind === 'voice-clone' || kind === 'voice-sing') {
+      if (!referenceAudioDataUrl) {
+        return error(res, 'referenceAudioDataUrl is required (6-30s clean clip of target voice)', 400);
+      }
+      const lyrics = String(prompt || '').trim();
+      if (lyrics.length < 2)    return error(res, 'prompt (text/lyrics) is required', 400);
+      if (lyrics.length > 2000) return error(res, 'prompt too long (max 2000 chars)', 400);
+
+      if (!isCloudinaryConfigured()) return error(res, 'Cloudinary not configured', 503);
+
+      let refUrl = null, melodyUrl = null;
+      try {
+        const up = await cdnUploadAudio(referenceAudioDataUrl);
+        refUrl = up.url;
+      } catch (e) {
+        return error(res, `Could not upload reference clip: ${e.message}`, 502);
+      }
+      if (kind === 'voice-sing' && melodyAudioDataUrl) {
+        try {
+          const up = await cdnUploadAudio(melodyAudioDataUrl);
+          melodyUrl = up.url;
+        } catch (e) {
+          // Non-fatal — worker will fall back to flat-speech if melody missing.
+          logger.warn(`Melody upload failed (non-fatal): ${e.message}`);
+        }
+      }
+
+      const vcModel = model || (kind === 'voice-clone' ? 'xtts-v2' : 'xtts-v2+rvc');
+      // Pack language + melodyUrl into a single JSON string in the `voice`
+      // column. The worker JSON.loads this back at dispatch time. Default
+      // language is 'en' to match XTTS-v2's primary training set.
+      const voiceMeta = JSON.stringify({
+        language: typeof vcLanguage === 'string' && vcLanguage ? vcLanguage : 'en',
+        ...(melodyUrl ? { melodyUrl } : {}),
+      });
+      const job = createAudioJob({
+        kind,
+        model: vcModel,
+        prompt: lyrics,
+        duration: 0,
+        voice: voiceMeta,
+      });
+      updateAudioJob(job.jobId, { sourceUrl: refUrl });
+      publishAudioJob({ jobId: job.jobId, kind, model: vcModel }).catch(e =>
+        logger.warn(`Audio publish skipped: ${e.message}`));
+
+      logger.info(`VOICE QUEUE | ${job.jobId} | kind=${kind} | model=${vcModel} | len=${lyrics.length}`);
+      return success(res, { jobId: job.jobId, status: job.status, kind, model: vcModel });
     }
 
     // Original music / sfx / tts path
