@@ -74,6 +74,7 @@ export async function bestMove({ fen, depth = DEFAULT_DEPTH, thinkMs = DEFAULT_T
   const t = Math.min(Math.max(parseInt(thinkMs, 10) || DEFAULT_THINK_MS, 50), MAX_THINK_MS);
   const whiteToMove = fenSideToMoveIsWhite(fen);
 
+  const startedAt = Date.now();
   return withEngine(async (engine) => {
     await engine.setoption('MultiPV', '1');
     await engine.position(fen);
@@ -89,6 +90,10 @@ export async function bestMove({ fen, depth = DEFAULT_DEPTH, thinkMs = DEFAULT_T
       pv: lastInfo?.pv ? lastInfo.pv.split(' ') : [],
       nodes: lastInfo?.nodes ?? null,
       nps: lastInfo?.nps ?? null,
+      // Engine telemetry — used by the FE Engine panel.
+      hashfull: lastInfo?.hashfull ?? null,   // 0-1000 (per-mille of hash table used)
+      tbhits: lastInfo?.tbhits ?? null,
+      elapsedMs: Date.now() - startedAt,
     };
   });
 }

@@ -16,7 +16,7 @@ import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgre
 import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../controllers/v1/mesh.js';
 import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '../../controllers/v1/deepfake.js';
 import { getPlayers, postPlayer, getPlayer, postScore, getScores } from '../../controllers/v1/games.js';
-import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus } from '../../controllers/v1/chess.js';
+import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus, postSaveGame, getGames as getChessGames, getOneGame as getChessGame, patchGame as patchChessGame, removeGame as removeChessGame } from '../../controllers/v1/chess.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -75,6 +75,12 @@ router.post('/chess/best-move', postChessBestMove);
 router.post('/chess/analyze',   postChessAnalyze);
 router.post('/chess/play',      postChessPlay);
 router.get( '/chess/status',    getChessStatus);
+// Saved games library
+router.post(  '/chess/games',       postSaveGame);
+router.get(   '/chess/games',       getChessGames);
+router.get(   '/chess/games/:id',   getChessGame);
+router.patch( '/chess/games/:id',   patchChessGame);
+router.delete('/chess/games/:id',   removeChessGame);
 
 router.get( '/games/players',           getPlayers);
 router.post('/games/players',           postPlayer);

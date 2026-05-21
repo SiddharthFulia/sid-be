@@ -481,6 +481,36 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_games_scores_player_created ON games_scores(playerId, createdAt DESC);
 `);
 
+// ─── Chess saved games (Lichess-style library) ──────────────────
+// One row per saved game. Stores the full PGN + final FEN + the metadata
+// the FE needs to render the library card (engine name/type/strength,
+// time control, result). No user auth — single-player portfolio toy.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chess_games (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    pgn             TEXT NOT NULL,             -- full PGN from chess.js
+    fen             TEXT NOT NULL,             -- final position (so we can show a preview FEN)
+    -- Who played: side is which colour the human took; null for pass-and-play.
+    side            TEXT,                       -- 'white' | 'black' | NULL
+    mode            TEXT NOT NULL,             -- 'play' | 'analyze' | 'human-vs-human'
+    -- Engine metadata when the user played vs an engine. Schema is generic
+    -- enough that future engines (Leela, custom, etc) slot in cleanly.
+    engineName      TEXT,                       -- e.g. 'Stockfish'
+    engineType      TEXT,                       -- e.g. 'stockfish' | 'leela' | 'fairy'
+    engineStrength  INTEGER,                    -- ELO value used (1320-3190 for Stockfish)
+    -- Time control id (none / bullet1 / blitz32 / ...) or 'custom'.
+    timeControl     TEXT,
+    -- Standard PGN result tags. '*' = in-progress / unfinished.
+    result          TEXT NOT NULL DEFAULT '*',  -- '1-0' | '0-1' | '1/2-1/2' | '*'
+    moveCount       INTEGER NOT NULL DEFAULT 0, -- number of half-moves (plies)
+    createdAt       TEXT NOT NULL,
+    updatedAt       TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_chess_games_updated ON chess_games(updatedAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_chess_games_result  ON chess_games(result, updatedAt DESC);
+`);
+
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing
 // rows from before the conversations feature shipped don't get nuked.

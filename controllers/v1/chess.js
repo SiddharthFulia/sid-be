@@ -12,6 +12,7 @@
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import { bestMove, analyze, play, engineStatus } from '../../services/chess/engine.js';
+import { createGame, getGame, updateGame, deleteGame, listGames } from '../../services/chess/gameStore.js';
 
 const FEN_MIN_TOKENS = 4;   // some PGN exports omit halfmove/fullmove
 
@@ -64,3 +65,70 @@ export const postPlay = async (req, res) => {
 };
 
 export const getStatus = (_req, res) => success(res, engineStatus());
+
+// ─── Saved games library (Lichess-style) ─────────────────────────────
+// POST /api/chess/games — create
+// GET  /api/chess/games — list
+// GET  /api/chess/games/:id — load
+// PATCH /api/chess/games/:id — rename / autosave updates
+// DELETE /api/chess/games/:id — drop
+
+const NAME_MAX = 80;
+
+export const postSaveGame = (req, res) => {
+  try {
+    const { name, pgn, fen, side, mode, engineName, engineType, engineStrength, timeControl, result, moveCount } = req.body || {};
+    if (typeof pgn !== 'string') return error(res, 'pgn is required', 400);
+    if (typeof fen !== 'string' || !fen.trim()) return error(res, 'fen is required', 400);
+    if (name && String(name).length > NAME_MAX) return error(res, `name too long (max ${NAME_MAX} chars)`, 400);
+    const row = createGame({
+      name: name ? String(name).trim() : undefined,
+      pgn, fen, side, mode, engineName, engineType, engineStrength, timeControl, result, moveCount,
+    });
+    return success(res, row);
+  } catch (err) {
+    logger.error('chess saveGame failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+export const getGames = (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const result = typeof req.query.result === 'string' ? req.query.result : undefined;
+    const items = listGames({ limit, result });
+    return success(res, { items, total: items.length });
+  } catch (err) {
+    logger.error('chess getGames failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+export const getOneGame = (req, res) => {
+  const row = getGame(parseInt(req.params.id, 10));
+  if (!row) return error(res, 'game not found', 404);
+  return success(res, row);
+};
+
+export const patchGame = (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const patch = req.body || {};
+    if (patch.name && String(patch.name).length > NAME_MAX) {
+      return error(res, `name too long (max ${NAME_MAX} chars)`, 400);
+    }
+    const row = updateGame(id, patch);
+    if (!row) return error(res, 'game not found', 404);
+    return success(res, row);
+  } catch (err) {
+    logger.error('chess patchGame failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+export const removeGame = (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const ok = deleteGame(id);
+  if (!ok) return error(res, 'game not found', 404);
+  return success(res, { ok: true });
+};
