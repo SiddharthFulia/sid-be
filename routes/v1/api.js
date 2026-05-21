@@ -17,7 +17,7 @@ import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../contro
 import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '../../controllers/v1/deepfake.js';
 import { getPlayers, postPlayer, getPlayer, postScore, getScores } from '../../controllers/v1/games.js';
 import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus, postSaveGame, getGames as getChessGames, getOneGame as getChessGame, patchGame as patchChessGame, removeGame as removeChessGame, postBulkSaveGames as postChessBulkSave, getCollections as getChessCollections, postCreateMatch, postJoinMatch, getMatchState, postMatchMove, postResignMatch, listLiveMatches } from '../../controllers/v1/chess.js';
-import { getServerStats, getDbStats, getQueueStats, getWorkers, postPurgeQueue } from '../../controllers/v1/admin.js';
+import { getServerStats, getDbStats, getQueueStats, getWorkers, postPurgeQueue, getActivityTimeseries } from '../../controllers/v1/admin.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -72,6 +72,7 @@ router.get( '/admin/server-stats', requireVault, getServerStats);
 router.get( '/admin/db-stats',     requireVault, getDbStats);
 router.get( '/admin/queues',       requireVault, getQueueStats);
 router.get( '/admin/workers',      requireVault, getWorkers);
+router.get( '/admin/activity',     requireVault, getActivityTimeseries);
 router.post('/admin/queues/purge', requireVault, postPurgeQueue);
 
 // Runner game — hand-gesture endless runner. Public; no auth (single-game

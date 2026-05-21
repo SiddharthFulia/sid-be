@@ -173,6 +173,64 @@ export const getWorkers = async (_req, res) => {
   }
 };
 
+// ─── Activity timeseries (per-table daily counts) ───────────────
+// Powers the "Visualize" tab on the /settings dashboard. For each
+// known table that has a `createdAt` column, runs a GROUP BY date()
+// query for the last N days (default 14). Each per-table query is
+// wrapped in its own try/catch so a missing table or missing column
+// doesn't kill the whole response — we just skip it.
+//
+//   GET /api/admin/activity?days=14
+//
+// Returns: { days, series: [{ table, points: [{ day, n }, ...] }, ...] }
+export const getActivityTimeseries = async (req, res) => {
+  try {
+    const rawDays = parseInt(req.query?.days, 10);
+    const days = Number.isFinite(rawDays) && rawDays > 0 && rawDays <= 365 ? rawDays : 14;
+
+    // Tables that have a createdAt column (per the brief). cinema_projects,
+    // games_players, chat_conversations, chat_jobs are excluded — only the
+    // user-activity-bearing tables ship.
+    const ACTIVITY_TABLES = [
+      'jobs',
+      'videos',
+      'enhanced_images',
+      'lipsync_jobs',
+      'audio_jobs',
+      'mesh_jobs',
+      'deepfake_jobs',
+      'chess_games',
+      'chess_matches',
+      'games_scores',
+      'chat_messages',
+    ];
+
+    const series = [];
+    for (const table of ACTIVITY_TABLES) {
+      try {
+        const rows = db.prepare(
+          `SELECT date(createdAt) AS day, COUNT(*) AS n
+           FROM ${table}
+           WHERE createdAt >= date('now', '-' || ? || ' days')
+           GROUP BY day
+           ORDER BY day ASC`,
+        ).all(days);
+        const points = (rows || []).map(r => ({
+          day: String(r.day || ''),
+          n:   Number(r.n || 0),
+        })).filter(p => p.day);
+        series.push({ table, points });
+      } catch {
+        // Table missing, or createdAt not present — skip silently.
+      }
+    }
+    return success(res, { days, series });
+  } catch (err) {
+    logger.error('admin getActivityTimeseries failed', err.message);
+    return error(res, err.message, 500);
+  }
+};
+
 // ─── Purge a single queue ───────────────────────────────────────
 // Whitelisted queue names only — body { queue }. Returns the count of
 // messages discarded so the FE can confirm.
