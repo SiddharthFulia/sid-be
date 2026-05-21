@@ -35,6 +35,10 @@ const COLUMNS = new Set([
   // Source-separation result (added 2026-05-19). JSON string with the
   // four stem URLs + optional lyrics. Only used when kind='separate'.
   'stems',
+  // Voice-clone analysis JSON (added 2026-05-22). Stats on input ref clip,
+  // cleaned ref, output WAV, words/sec, chunk count. Rendered as the
+  // comparison card on the audio detail / library cards.
+  'analysis',
 ]);
 
 // Routed through the shared job_logs table — see logStore.js.

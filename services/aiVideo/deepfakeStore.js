@@ -35,6 +35,8 @@ const COLUMNS = new Set([
   'outputUrl', 'publicId', 'bytes', 'elapsedMs',
   'error', 'workerId', 'progressMessage',
   'startedAt', 'completedAt',
+  // Voice-any analysis JSON (added 2026-05-22). Same shape as audio_jobs.
+  'analysis',
 ]);
 
 export function createDeepfakeJob({

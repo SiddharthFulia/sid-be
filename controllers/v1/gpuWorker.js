@@ -322,12 +322,13 @@ export const postAudioProgress = (req, res) => {
 
 export const postAudioComplete = (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
-  const { jobId, outputUrl, bytes, transcript, stems } = req.body || {};
+  const { jobId, outputUrl, bytes, transcript, stems, analysis } = req.body || {};
   if (!jobId) return error(res, 'jobId required', 400);
   // Job-type completion shapes:
   //   • generation (music/sfx/tts)  → outputUrl
   //   • STT                          → transcript (text)
   //   • separate                     → stems (object of urls + lyrics)
+  //   • voice-clone / voice-sing     → outputUrl + analysis (JSON stats)
   if (!outputUrl && typeof transcript !== 'string' && !stems) {
     return error(res, 'outputUrl, transcript, or stems required', 400);
   }
@@ -338,6 +339,10 @@ export const postAudioComplete = (req, res) => {
   if (outputUrl) { patch.outputUrl = outputUrl; patch.bytes = bytes || null; }
   if (typeof transcript === 'string') patch.transcript = transcript;
   if (stems && typeof stems === 'object') patch.stems = JSON.stringify(stems);
+  // Worker sends `analysis` as a JSON string already (json.dumps in Python).
+  // Pass through unchanged so the FE can JSON.parse on read.
+  if (typeof analysis === 'string') patch.analysis = analysis;
+  else if (analysis && typeof analysis === 'object') patch.analysis = JSON.stringify(analysis);
   const row = updateAudioJob(jobId, patch);
   if (!row) return error(res, 'Audio job not found', 404);
   logger.info(`Audio ${jobId} completed → ${
@@ -598,16 +603,19 @@ export const postDeepfakeProgress = (req, res) => {
 
 export const postDeepfakeComplete = (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
-  const { jobId, outputUrl, publicId, bytes, elapsedMs } = req.body || {};
+  const { jobId, outputUrl, publicId, bytes, elapsedMs, analysis } = req.body || {};
   if (!jobId || !outputUrl) return error(res, 'jobId + outputUrl required', 400);
-  const row = updateDeepfakeJob(jobId, {
+  const patch = {
     status: 'completed',
     outputUrl,
     publicId: publicId || null,
     bytes: typeof bytes === 'number' ? bytes : null,
     elapsedMs: typeof elapsedMs === 'number' ? elapsedMs : null,
     completedAt: new Date().toISOString(),
-  });
+  };
+  if (typeof analysis === 'string') patch.analysis = analysis;
+  else if (analysis && typeof analysis === 'object') patch.analysis = JSON.stringify(analysis);
+  const row = updateDeepfakeJob(jobId, patch);
   if (!row) return error(res, 'Deepfake job not found', 404);
   logger.info(`Deepfake ${jobId} completed in ${elapsedMs ?? '?'}ms → ${outputUrl}`);
   return success(res, row);

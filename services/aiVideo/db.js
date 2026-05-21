@@ -559,6 +559,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_audio_kind_created    ON audio_jobs(kind, createdAt DESC);
 `);
 
+// Lazy-add the analysis column for voice-clone / voice-sing rows. JSON string
+// containing reference + cleaned + output audio stats, words_per_sec, etc.
+// Old rows stay NULL; new voice jobs populate it.
+addColumnIfMissing('audio_jobs',    'analysis', 'TEXT');
+addColumnIfMissing('deepfake_jobs', 'analysis', 'TEXT');
+
 // ─── Unified log feed (added 2026-05) ─────────────────────────
 // Lives in its own table so the main job tables stay lean — without this,
 // each row in jobs/enhanced_images/lipsync_jobs/audio_jobs would carry up
