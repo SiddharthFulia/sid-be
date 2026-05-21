@@ -16,7 +16,7 @@ import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgre
 import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../controllers/v1/mesh.js';
 import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '../../controllers/v1/deepfake.js';
 import { getPlayers, postPlayer, getPlayer, postScore, getScores } from '../../controllers/v1/games.js';
-import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus, postSaveGame, getGames as getChessGames, getOneGame as getChessGame, patchGame as patchChessGame, removeGame as removeChessGame, postBulkSaveGames as postChessBulkSave, getCollections as getChessCollections, postCreateMatch, postJoinMatch, getMatchState, postMatchMove, postResignMatch } from '../../controllers/v1/chess.js';
+import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus, postSaveGame, getGames as getChessGames, getOneGame as getChessGame, patchGame as patchChessGame, removeGame as removeChessGame, postBulkSaveGames as postChessBulkSave, getCollections as getChessCollections, postCreateMatch, postJoinMatch, getMatchState, postMatchMove, postResignMatch, listLiveMatches } from '../../controllers/v1/chess.js';
 import { getServerStats, getDbStats, getQueueStats, getWorkers, postPurgeQueue } from '../../controllers/v1/admin.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
@@ -97,6 +97,9 @@ router.post(  '/chess/matches/:id/join',    postJoinMatch);
 router.get(   '/chess/matches/:id',         getMatchState);
 router.post(  '/chess/matches/:id/move',    postMatchMove);
 router.post(  '/chess/matches/:id/resign',  postResignMatch);
+// Live lobby — one-shot listing of waiting matches. Deeper path than
+// /chess/matches/:id so Express won't route-match it under :id.
+router.get(   '/chess/matches/lobby/live',  listLiveMatches);
 
 router.get( '/games/players',           getPlayers);
 router.post('/games/players',           postPlayer);

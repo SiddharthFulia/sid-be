@@ -17,6 +17,7 @@ import { createGame, getGame, updateGame, deleteGame, listGames, bulkCreateGames
 import {
   createMatch, getMatch, publicView, joinMatch, updateMatch, sessionSide,
 } from '../../services/chess/matchStore.js';
+import { db } from '../../services/aiVideo/db.js';
 
 const FEN_MIN_TOKENS = 4;   // some PGN exports omit halfmove/fullmove
 
@@ -231,6 +232,27 @@ export const postMatchMove = (req, res) => {
     const expectedSide = row.sideToMove === 'w' ? 'white' : 'black';
     if (side !== expectedSide) return error(res, 'not your turn', 400);
 
+    // Clock deduction — if a base time control is configured, deduct the
+    // elapsed time since the previous move from the moving side's clock,
+    // then add the Fischer increment. Anchored to lastMoveAt; FE interpolates
+    // between polls but the BE value is authoritative on each move.
+    let whiteMsNew = row.whiteMs;
+    let blackMsNew = row.blackMs;
+    let flagged = false;
+    const nowMs = Date.now();
+    if (row.baseMs) {
+      const elapsedMs = row.lastMoveAt ? (nowMs - new Date(row.lastMoveAt).getTime()) : 0;
+      if (side === 'white') {
+        whiteMsNew = Math.max(0, (row.whiteMs ?? row.baseMs) - elapsedMs);
+        if (whiteMsNew <= 0) flagged = true;
+        else whiteMsNew += (row.incMs || 0);
+      } else {
+        blackMsNew = Math.max(0, (row.blackMs ?? row.baseMs) - elapsedMs);
+        if (blackMsNew <= 0) flagged = true;
+        else blackMsNew += (row.incMs || 0);
+      }
+    }
+
     const chess = new Chess(row.fen);
     let move;
     try {
@@ -259,6 +281,8 @@ export const postMatchMove = (req, res) => {
       sideToMove: nextSide,
       moveCount,
       lastMoveAt: now,
+      whiteMs: whiteMsNew,
+      blackMs: blackMsNew,
     };
 
     if (chess.isGameOver()) {
@@ -270,6 +294,11 @@ export const postMatchMove = (req, res) => {
       } else {
         patch.result = '1/2-1/2';
       }
+    } else if (flagged) {
+      // The moving side just flagged — opponent wins.
+      patch.status = 'completed';
+      patch.completedAt = now;
+      patch.result = side === 'white' ? '0-1' : '1-0';
     }
 
     const updated = updateMatch(id, patch);
@@ -301,6 +330,22 @@ export const postResignMatch = (req, res) => {
     return success(res, publicView(updated));
   } catch (err) {
     logger.error('chess match resign failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// ─── Live lobby ──────────────────────────────────────────────────────
+// One-shot listing of matches currently waiting for an opponent. The FE
+// calls this once on page load + on user-triggered refresh — no polling —
+// so the BE doesn't need to be ultra-fast. Public view only.
+export const listLiveMatches = (req, res) => {
+  try {
+    const rows = db
+      .prepare(`SELECT * FROM chess_matches WHERE status = 'waiting' ORDER BY createdAt DESC LIMIT 20`)
+      .all();
+    return success(res, { items: rows.map(publicView) });
+  } catch (err) {
+    logger.error('chess listLiveMatches failed', err.message);
     return error(res, err.message);
   }
 };
