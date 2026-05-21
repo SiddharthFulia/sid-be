@@ -16,7 +16,8 @@ import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgre
 import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../controllers/v1/mesh.js';
 import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '../../controllers/v1/deepfake.js';
 import { getPlayers, postPlayer, getPlayer, postScore, getScores } from '../../controllers/v1/games.js';
-import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus, postSaveGame, getGames as getChessGames, getOneGame as getChessGame, patchGame as patchChessGame, removeGame as removeChessGame } from '../../controllers/v1/chess.js';
+import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus, postSaveGame, getGames as getChessGames, getOneGame as getChessGame, patchGame as patchChessGame, removeGame as removeChessGame, postBulkSaveGames as postChessBulkSave, getCollections as getChessCollections, postCreateMatch, postJoinMatch, getMatchState, postMatchMove, postResignMatch } from '../../controllers/v1/chess.js';
+import { getServerStats, getDbStats, getQueueStats, getWorkers, postPurgeQueue } from '../../controllers/v1/admin.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -66,6 +67,13 @@ router.post('/deepfake/generate',      requireVault, postCreateDeepfakeJob);
 router.get( '/deepfake/status/:jobId', requireVault, getDeepfakeStatus);
 router.get( '/deepfake/list',          requireVault, listDeepfakeJobsCtrl);
 
+// Vault-gated admin dashboard
+router.get( '/admin/server-stats', requireVault, getServerStats);
+router.get( '/admin/db-stats',     requireVault, getDbStats);
+router.get( '/admin/queues',       requireVault, getQueueStats);
+router.get( '/admin/workers',      requireVault, getWorkers);
+router.post('/admin/queues/purge', requireVault, postPurgeQueue);
+
 // Runner game — hand-gesture endless runner. Public; no auth (single-game
 // portfolio toy). Player registry is case-insensitive upsert, score
 // submissions validate ranges + difficulty whitelist.
@@ -80,7 +88,15 @@ router.post(  '/chess/games',       postSaveGame);
 router.get(   '/chess/games',       getChessGames);
 router.get(   '/chess/games/:id',   getChessGame);
 router.patch( '/chess/games/:id',   patchChessGame);
+router.post('/chess/games/bulk',  postChessBulkSave);
+router.get( '/chess/collections', getChessCollections);
 router.delete('/chess/games/:id',   removeChessGame);
+// Live online challenge matches — short-lived two-player lane
+router.post(  '/chess/matches',             postCreateMatch);
+router.post(  '/chess/matches/:id/join',    postJoinMatch);
+router.get(   '/chess/matches/:id',         getMatchState);
+router.post(  '/chess/matches/:id/move',    postMatchMove);
+router.post(  '/chess/matches/:id/resign',  postResignMatch);
 
 router.get( '/games/players',           getPlayers);
 router.post('/games/players',           postPlayer);
