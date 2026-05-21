@@ -16,7 +16,11 @@ import { publishMeshJob } from '../../services/aiVideo/messageQueue.js';
 
 // Whitelist of accepted text-to-3D models. Locked down here so the FE
 // can't sneak unknown engine slugs through to the worker.
-const VALID_MODELS = new Set(['shap-e']);
+// shap-e   — pure text→3D (OpenAI Shap-E). Solid, ~30-60s, lower fidelity.
+// tripo    — text → Cloudflare Flux image → TripoSR. Higher fidelity,
+//            faster total (~10-15s) but quality depends on the
+//            intermediate image. Best for recognisable objects.
+const VALID_MODELS = new Set(['shap-e', 'tripo']);
 
 const PROMPT_MAX_CHARS = 600;
 const STEPS_MIN = 16;
