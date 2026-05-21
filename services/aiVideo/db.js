@@ -413,6 +413,44 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_mesh_status_created ON mesh_jobs(status, createdAt DESC);
 `);
 
+// ─── Deepfake jobs (face swap + voice-clone-of-anyone, Vault-gated) ─
+// Locked behind requireVault at the route level — only the password-holder
+// can submit. Two kinds:
+//   • 'face-swap' — source face image + target image → swapped image
+//                   (insightface inswapper_128.onnx on the 5090)
+//   • 'voice-any' — same shape as the public voice-clone, but skips the
+//                   consent attestation (the Vault gate replaces it)
+// One row per request; columns are deliberately superset of mesh + voice
+// so the worker can dispatch by kind.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS deepfake_jobs (
+    jobId            TEXT PRIMARY KEY,
+    status           TEXT NOT NULL,           -- queued | processing | completed | failed
+    kind             TEXT NOT NULL,           -- 'face-swap' | 'voice-any'
+    model            TEXT,                    -- 'inswapper_128' | 'xtts-v2' | 'xtts-v2+rvc'
+    -- Inputs (URLs after Cloudinary upload)
+    sourceUrl        TEXT,                    -- source face (face-swap) or ref clip (voice-any)
+    targetUrl        TEXT,                    -- target image / video (face-swap)
+    melodyUrl        TEXT,                    -- melody track (voice-any singing variant)
+    prompt           TEXT,                    -- text/lyrics for voice-any
+    language         TEXT,                    -- XTTS language code for voice-any
+    -- Output
+    outputUrl        TEXT,
+    publicId         TEXT,
+    bytes            INTEGER,
+    elapsedMs        INTEGER,
+    -- Bookkeeping
+    error            TEXT,
+    workerId         TEXT,
+    progressMessage  TEXT,
+    createdAt        TEXT NOT NULL,
+    startedAt        TEXT,
+    completedAt      TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_deepfake_status_created ON deepfake_jobs(status, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_deepfake_kind_created   ON deepfake_jobs(kind, createdAt DESC);
+`);
+
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing
 // rows from before the conversations feature shipped don't get nuked.

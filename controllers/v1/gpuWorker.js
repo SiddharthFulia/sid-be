@@ -563,3 +563,67 @@ export const postMeshFailed = (req, res) => {
   return success(res, row);
 };
 
+// ─── Deepfake worker callbacks (Vault-gated lane) ──────────────────
+// Same shape as mesh. Worker pulls deepfake_jobs row when triggered, then
+// streams progress + final outputUrl back. Vault gating happens at the
+// USER-facing routes (/api/deepfake/*) — these worker-facing routes are
+// authed by the shared worker token, same as the other gpu-worker/*.
+import { getDeepfakeJob, updateDeepfakeJob } from '../../services/aiVideo/deepfakeStore.js';
+
+export const postDeepfakeJob = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const row = getDeepfakeJob(req.params.jobId);
+  if (!row) return error(res, 'Deepfake job not found', 404);
+  return success(res, row);
+};
+
+export const postDeepfakeProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, message, step, total } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const existing = getDeepfakeJob(jobId);
+  if (!existing) return error(res, 'Deepfake job not found', 404);
+  if (existing.status === 'queued') {
+    updateDeepfakeJob(jobId, { status: 'processing', startedAt: new Date().toISOString() });
+  }
+  let logLine = '';
+  if (typeof message === 'string' && message.trim()) logLine = message.trim();
+  else if (typeof step === 'number' && typeof total === 'number') logLine = `step ${step}/${total}`;
+  if (logLine) {
+    appendJobLog(jobId, 'deepfake', logLine);
+    updateDeepfakeJob(jobId, { progressMessage: logLine.slice(0, 200) });
+  }
+  return success(res, { ok: true });
+};
+
+export const postDeepfakeComplete = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, outputUrl, publicId, bytes, elapsedMs } = req.body || {};
+  if (!jobId || !outputUrl) return error(res, 'jobId + outputUrl required', 400);
+  const row = updateDeepfakeJob(jobId, {
+    status: 'completed',
+    outputUrl,
+    publicId: publicId || null,
+    bytes: typeof bytes === 'number' ? bytes : null,
+    elapsedMs: typeof elapsedMs === 'number' ? elapsedMs : null,
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Deepfake job not found', 404);
+  logger.info(`Deepfake ${jobId} completed in ${elapsedMs ?? '?'}ms → ${outputUrl}`);
+  return success(res, row);
+};
+
+export const postDeepfakeFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, error: errMsg } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const row = updateDeepfakeJob(jobId, {
+    status: 'failed',
+    error: String(errMsg || 'unknown').slice(0, 800),
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'Deepfake job not found', 404);
+  logger.warn(`Deepfake ${jobId} failed: ${errMsg}`);
+  return success(res, row);
+};
+

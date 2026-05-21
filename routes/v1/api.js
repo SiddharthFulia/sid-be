@@ -12,8 +12,9 @@ import { postExport } from '../../controllers/v1/export.js';
 import { getNasa } from '../../controllers/v1/nasa.js';
 import { postImageGen, postImageEdit, postTTS, postSummarize } from '../../controllers/v1/hf.js';
 import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoProviders, deleteVideoById, postUploadSourceImage, getJobQueue, getFailuresList, getJobsFeed, postImageEnhance, postMusicGenerate, postSpeechToText, getImageStatus, getImageList, deleteImage as deleteImageById, postImageBulkAction, postVideoBulkAction } from '../../controllers/v1/aiVideo.js';
-import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed, postChatJob, postChatProgress, postChatComplete, postChatFailed, postMeshJob, postMeshProgress, postMeshComplete, postMeshFailed } from '../../controllers/v1/gpuWorker.js';
+import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed, postChatJob, postChatProgress, postChatComplete, postChatFailed, postMeshJob, postMeshProgress, postMeshComplete, postMeshFailed, postDeepfakeJob, postDeepfakeProgress, postDeepfakeComplete, postDeepfakeFailed } from '../../controllers/v1/gpuWorker.js';
 import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../controllers/v1/mesh.js';
+import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '../../controllers/v1/deepfake.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -55,6 +56,14 @@ router.post('/mesh/generate',         postCreateMeshJob);
 router.get( '/mesh/status/:jobId',    getMeshStatus);
 router.get( '/mesh/list',             listMeshJobsCtrl);
 
+// Deepfake lane (face-swap + voice-clone-of-anyone). Every public-facing
+// endpoint sits behind requireVault — only the password-holder can submit,
+// read job status, or list outputs. The worker-facing callback routes
+// below use the shared worker token, same as the other gpu-worker/* routes.
+router.post('/deepfake/generate',      requireVault, postCreateDeepfakeJob);
+router.get( '/deepfake/status/:jobId', requireVault, getDeepfakeStatus);
+router.get( '/deepfake/list',          requireVault, listDeepfakeJobsCtrl);
+
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);
 
@@ -92,13 +101,16 @@ router.get('/auth/vault-status', requireVault, (_req, res) => success(res, { ok:
 //
 //   GET /api/job-logs/:lane/:jobId?since=<ms>&limit=80
 //
-// Lanes: 'video' | 'image' | 'lipsync' | 'audio' | 'mesh'.
+// Lanes: 'video' | 'image' | 'lipsync' | 'audio' | 'mesh' | 'deepfake'.
 // Returns: { logs: [{ts, msg}, ...], nextSince } in chronological order.
+// The deepfake lane is Vault-gated upstream (creates only reach here from
+// requireVault routes); reading logs piggybacks on maybeVault and is OK
+// to leave open — exposed logs only show step labels, never image bytes.
 router.get('/job-logs/:lane/:jobId', maybeVault, (req, res) => {
   const lane = String(req.params.lane || '').toLowerCase();
   const jobId = req.params.jobId;
-  if (!['video', 'image', 'lipsync', 'audio', 'mesh'].includes(lane)) {
-    return error(res, "lane must be 'video' | 'image' | 'lipsync' | 'audio' | 'mesh'", 400);
+  if (!['video', 'image', 'lipsync', 'audio', 'mesh', 'deepfake'].includes(lane)) {
+    return error(res, "lane must be 'video' | 'image' | 'lipsync' | 'audio' | 'mesh' | 'deepfake'", 400);
   }
   if (!jobId) return error(res, 'jobId required', 400);
   const sinceTs = parseInt(req.query.since, 10) || 0;
@@ -188,6 +200,12 @@ router.get( '/gpu-worker/mesh-job/:jobId',  postMeshJob);
 router.post('/gpu-worker/mesh-progress',    postMeshProgress);
 router.post('/gpu-worker/mesh-complete',    postMeshComplete);
 router.post('/gpu-worker/mesh-failed',      postMeshFailed);
+
+// Deepfake worker callbacks (Vault-gated lane). Same shape as mesh.
+router.get( '/gpu-worker/deepfake-job/:jobId', postDeepfakeJob);
+router.post('/gpu-worker/deepfake-progress',   postDeepfakeProgress);
+router.post('/gpu-worker/deepfake-complete',   postDeepfakeComplete);
+router.post('/gpu-worker/deepfake-failed',     postDeepfakeFailed);
 
 // ─── Studio lanes (Tier 3) — no vault gating; library + bulk delete ─
 // These lanes don't need NSFW gating — they live in their own libraries.
