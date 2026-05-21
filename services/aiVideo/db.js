@@ -556,6 +556,11 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_chess_matches_status ON chess_matches(status, updatedAt DESC);
 `);
+// Per-side lastSeenAt — bumped on every GET /matches/:id?session=…. Used
+// by the controller to auto-abort matches both players have walked away
+// from (60s of silence). Lazy-added so older DBs migrate in place.
+addColumnIfMissing('chess_matches', 'whiteLastSeenAt', 'TEXT');
+addColumnIfMissing('chess_matches', 'blackLastSeenAt', 'TEXT');
 
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing

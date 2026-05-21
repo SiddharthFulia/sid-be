@@ -47,6 +47,7 @@ const UPDATABLE = new Set([
   'status', 'blackSession', 'whiteName', 'blackName',
   'fen', 'pgn', 'sideToMove', 'moveCount', 'result',
   'whiteMs', 'blackMs', 'lastMoveAt', 'completedAt',
+  'whiteLastSeenAt', 'blackLastSeenAt',
 ]);
 
 export function createMatch({

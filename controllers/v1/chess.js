@@ -212,9 +212,49 @@ export const postJoinMatch = (req, res) => {
   }
 };
 
+// 60s of total silence (no GET poll from either side) auto-aborts the
+// match so closed-tab matches don't sit "active" forever.
+const ABORT_STALE_MS = 60_000;
+
 export const getMatchState = (req, res) => {
   const row = getMatch(req.params.id);
   if (!row) return error(res, 'match not found', 404);
+
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  const session = typeof req.query.session === 'string' ? req.query.session : null;
+  const side = session ? sessionSide(row, session) : null;
+
+  // Bump the polling side's lastSeenAt — that's how we tell who's still here.
+  if (side === 'white') {
+    updateMatch(row.id, { whiteLastSeenAt: nowIso });
+    row.whiteLastSeenAt = nowIso;
+  } else if (side === 'black') {
+    updateMatch(row.id, { blackLastSeenAt: nowIso });
+    row.blackLastSeenAt = nowIso;
+  }
+
+  // Auto-abort if everyone's gone. 'waiting' aborts on creator silence;
+  // 'active' aborts only when BOTH sides have been silent past the cutoff.
+  // 'completed' / 'aborted' are terminal — nothing to do.
+  if (row.status === 'waiting' || row.status === 'active') {
+    const wAnchor = row.whiteLastSeenAt || row.createdAt;
+    const bAnchor = row.blackLastSeenAt || row.lastMoveAt || row.createdAt;
+    const wStale  = wAnchor ? (now - new Date(wAnchor).getTime() > ABORT_STALE_MS) : true;
+    const bStale  = bAnchor ? (now - new Date(bAnchor).getTime() > ABORT_STALE_MS) : true;
+    const shouldAbort = row.status === 'waiting'
+      ? wStale
+      : (wStale && bStale);
+    if (shouldAbort) {
+      const aborted = updateMatch(row.id, {
+        status: 'aborted',
+        result: '*',
+        completedAt: nowIso,
+      });
+      return success(res, publicView(aborted));
+    }
+  }
+
   return success(res, publicView(row));
 };
 

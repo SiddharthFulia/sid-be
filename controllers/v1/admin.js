@@ -18,6 +18,7 @@ import amqplib from 'amqplib';
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import { db } from '../../services/aiVideo/db.js';
+import { getAllWorkerStatuses, isWorkerOnline } from '../../services/aiVideo/jobStore.js';
 
 const KNOWN_TABLES = [
   'jobs',
@@ -150,17 +151,21 @@ export const getQueueStats = async (_req, res) => {
 };
 
 // ─── Worker heartbeats ──────────────────────────────────────────
-// Reads the worker_heartbeats table if it exists. Returns [] when the
-// table isn't there yet (older DBs / fresh installs) so the FE always
-// renders the card cleanly.
+// Worker heartbeats live in data/gpu-worker-status.json (written by
+// /api/gpu-worker/register + every /next-job poll). We flatten the
+// per-role map into a list for the FE and tack on a derived `status`
+// (online | stale) from the lastSeenAt age.
 export const getWorkers = async (_req, res) => {
   try {
-    let rows = [];
-    try {
-      rows = db.prepare('SELECT * FROM worker_heartbeats ORDER BY lastSeenAt DESC').all();
-    } catch {
-      rows = [];
-    }
+    const map = await getAllWorkerStatuses();
+    const rows = Object.entries(map).map(([role, entry]) => ({
+      id:         entry?.workerId || role,
+      role:       entry?.role || role,
+      lastSeenAt: entry?.lastSeenAt || null,
+      status:     isWorkerOnline(entry) ? 'online' : 'stale',
+      // Helpful extras for the panel — count of loaded Ollama models if reported.
+      ollamaModels: Array.isArray(entry?.ollamaModels) ? entry.ollamaModels.length : null,
+    }));
     return success(res, { workers: rows });
   } catch (err) {
     logger.error('admin getWorkers failed', err.message);
