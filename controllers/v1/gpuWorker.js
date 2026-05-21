@@ -198,6 +198,19 @@ export const postJobProgress = async (req, res) => {
   if (typeof step === 'number') updates.progressStep = step;
   if (typeof totalSteps === 'number') updates.progressTotal = totalSteps;
 
+  // Auto-promote queued → processing on first progress ping. The HTTP-polling
+  // path (getNextJob) sets this when handing the job to the worker, but the
+  // broker-push path doesn't — worker just yanks from RabbitMQ and starts
+  // work. Without this, the FE card stays stuck on 'Queued' until completion.
+  // Same auto-promote behaviour as postImageProgress / postLipsyncProgress.
+  try {
+    const existing = await getInflightJob(jobId);
+    if (existing && existing.status === 'queued') {
+      updates.status = 'processing';
+      if (!existing.startedAt) updates.startedAt = new Date().toISOString();
+    }
+  } catch { /* lookup failure → skip promote, non-fatal */ }
+
   // Log lines route through the shared job_logs table (logStore) so the
   // `jobs` row itself stays lean. Worker streams human-readable lines
   // here ("queued by 5090 worker", "ComfyUI step 12/30 @ 1.7s/step", etc).
