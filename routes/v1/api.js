@@ -16,6 +16,7 @@ import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgre
 import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../controllers/v1/mesh.js';
 import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '../../controllers/v1/deepfake.js';
 import { getPlayers, postPlayer, getPlayer, postScore, getScores } from '../../controllers/v1/games.js';
+import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus } from '../../controllers/v1/chess.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -68,6 +69,13 @@ router.get( '/deepfake/list',          requireVault, listDeepfakeJobsCtrl);
 // Runner game — hand-gesture endless runner. Public; no auth (single-game
 // portfolio toy). Player registry is case-insensitive upsert, score
 // submissions validate ranges + difficulty whitelist.
+// Chess analysis lane (Stockfish via node-uci). Public; depth/thinkMs
+// clamped server-side so a misbehaving client can't pin the worker.
+router.post('/chess/best-move', postChessBestMove);
+router.post('/chess/analyze',   postChessAnalyze);
+router.post('/chess/play',      postChessPlay);
+router.get( '/chess/status',    getChessStatus);
+
 router.get( '/games/players',           getPlayers);
 router.post('/games/players',           postPlayer);
 router.get( '/games/players/:idOrName', getPlayer);
