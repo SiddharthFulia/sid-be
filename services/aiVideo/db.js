@@ -451,6 +451,36 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_deepfake_kind_created   ON deepfake_jobs(kind, createdAt DESC);
 `);
 
+// ─── Runner game (hand-gesture Subway-Surfers-style) ─────────────
+// Lightweight player registry — name only, no auth. Lets a returning
+// visitor pick their existing name from a list instead of re-typing.
+// Scores table is the actual leaderboard storage; UNIQUE(name) on the
+// player row makes "pick or create" a single upsert.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS games_players (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    createdAt     TEXT NOT NULL,
+    lastPlayedAt  TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_games_players_lastplayed ON games_players(lastPlayedAt DESC);
+
+  CREATE TABLE IF NOT EXISTS games_scores (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    playerId      INTEGER NOT NULL,
+    playerName    TEXT NOT NULL,                 -- denormalised for fast leaderboard reads
+    score         INTEGER NOT NULL,
+    distance      INTEGER NOT NULL,              -- meters travelled at game-end
+    difficulty    TEXT NOT NULL,                 -- 'easy' | 'medium' | 'hard' | 'classic'
+    revived       INTEGER NOT NULL DEFAULT 0,    -- 1 if the run used the one-shot revive
+    createdAt     TEXT NOT NULL,
+    FOREIGN KEY (playerId) REFERENCES games_players(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_games_scores_score ON games_scores(score DESC);
+  CREATE INDEX IF NOT EXISTS idx_games_scores_diff_score ON games_scores(difficulty, score DESC);
+  CREATE INDEX IF NOT EXISTS idx_games_scores_player_created ON games_scores(playerId, createdAt DESC);
+`);
+
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing
 // rows from before the conversations feature shipped don't get nuked.

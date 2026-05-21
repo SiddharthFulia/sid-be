@@ -15,6 +15,7 @@ import { postGenerateVideo, getJobStatus, getTodayVideo, getVideoList, getVideoP
 import { postRegister, getNextJob, postJobComplete, postJobFailed, postJobProgress, postImageComplete, postImageFailed, postImageProgress, postLipsyncProgress, postLipsyncComplete, postLipsyncFailed, postAudioProgress, postAudioComplete, postAudioFailed, postChatJob, postChatProgress, postChatComplete, postChatFailed, postMeshJob, postMeshProgress, postMeshComplete, postMeshFailed, postDeepfakeJob, postDeepfakeProgress, postDeepfakeComplete, postDeepfakeFailed } from '../../controllers/v1/gpuWorker.js';
 import { postCreateMeshJob, getMeshStatus, listMeshJobsCtrl } from '../../controllers/v1/mesh.js';
 import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '../../controllers/v1/deepfake.js';
+import { getPlayers, postPlayer, getPlayer, postScore, getScores } from '../../controllers/v1/games.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -63,6 +64,15 @@ router.get( '/mesh/list',             listMeshJobsCtrl);
 router.post('/deepfake/generate',      requireVault, postCreateDeepfakeJob);
 router.get( '/deepfake/status/:jobId', requireVault, getDeepfakeStatus);
 router.get( '/deepfake/list',          requireVault, listDeepfakeJobsCtrl);
+
+// Runner game — hand-gesture endless runner. Public; no auth (single-game
+// portfolio toy). Player registry is case-insensitive upsert, score
+// submissions validate ranges + difficulty whitelist.
+router.get( '/games/players',           getPlayers);
+router.post('/games/players',           postPlayer);
+router.get( '/games/players/:idOrName', getPlayer);
+router.post('/games/scores',            postScore);
+router.get( '/games/scores',            getScores);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);
