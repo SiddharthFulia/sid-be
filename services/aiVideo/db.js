@@ -510,6 +510,52 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_chess_games_updated ON chess_games(updatedAt DESC);
   CREATE INDEX IF NOT EXISTS idx_chess_games_result  ON chess_games(result, updatedAt DESC);
 `);
+addColumnIfMissing('chess_games', 'collection', 'TEXT');
+
+// ─── Chess online matches (live 1v1 via link share) ──────────────
+// Lightweight live matchmaking — no auth, no accounts. Creator POSTs
+// /chess/matches → gets a short matchId + a whiteSession token. Sends
+// the matchId as a URL to a friend. Friend POSTs /chess/matches/:id/join
+// → gets a blackSession token. Both sides submit moves with their
+// session in the body; server validates the session against the side
+// whose turn it is.
+//
+// Polling-based — clients hit /chess/matches/:id every ~1.5s for new
+// state. Latency 1-2s is fine for a portfolio toy. Once the match
+// completes (mate / draw / resign), the row stays for 24h then can be
+// pruned; matches in 'waiting' or 'active' state without activity for
+// 1h are eligible for cleanup too.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chess_matches (
+    id              TEXT PRIMARY KEY,             -- short random id like 'abc12'
+    status          TEXT NOT NULL DEFAULT 'waiting',  -- waiting | active | completed | aborted
+    -- Side session tokens — only the holder of each can submit moves
+    -- as that colour. Stored as random 24-char hex strings.
+    whiteSession    TEXT NOT NULL,
+    blackSession    TEXT,                          -- NULL until 2nd player joins
+    whiteName       TEXT,                          -- optional display names
+    blackName       TEXT,
+    -- Game state
+    fen             TEXT NOT NULL,
+    pgn             TEXT NOT NULL DEFAULT '',
+    sideToMove      TEXT NOT NULL DEFAULT 'w',     -- 'w' | 'b'
+    moveCount       INTEGER NOT NULL DEFAULT 0,
+    result          TEXT NOT NULL DEFAULT '*',     -- '1-0' | '0-1' | '1/2-1/2' | '*'
+    -- Time control (optional, ms). Both clocks tick down on the BE
+    -- via lastMoveAt diff so reconnects can't cheat the clock.
+    timeControlId   TEXT,
+    baseMs          INTEGER,
+    incMs           INTEGER,
+    whiteMs         INTEGER,
+    blackMs         INTEGER,
+    -- Timestamps
+    createdAt       TEXT NOT NULL,
+    updatedAt       TEXT NOT NULL,
+    lastMoveAt      TEXT,                          -- when sideToMove's clock started
+    completedAt     TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_chess_matches_status ON chess_matches(status, updatedAt DESC);
+`);
 
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing
