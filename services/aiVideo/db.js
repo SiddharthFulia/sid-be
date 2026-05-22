@@ -646,6 +646,34 @@ db.exec(`
 addColumnIfMissing('audio_jobs',    'analysis', 'TEXT');
 addColumnIfMissing('deepfake_jobs', 'analysis', 'TEXT');
 
+// ─── YouTube downloader (yt-dlp wrapper) ────────────────────────
+// Each row is one download job. The BE spawns yt-dlp as a subprocess,
+// streams stdout progress into the row, and on exit moves the final
+// file path + size into place so the FE can offer a download. No
+// queue — yt-dlp is CPU-only and downloads are bounded by network +
+// the user's own click rate, so an in-process spawn is fine.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS yt_jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    url           TEXT NOT NULL,
+    format        TEXT NOT NULL,                -- 'mp3' | 'mp4'
+    quality       TEXT NOT NULL,                -- '128'|'192'|'320' | '360'|'720'|'1080'|'best'
+    status        TEXT NOT NULL DEFAULT 'queued',  -- queued|processing|completed|failed
+    progress      INTEGER NOT NULL DEFAULT 0,
+    title         TEXT,
+    duration      INTEGER,                       -- seconds
+    fileSize      INTEGER,                       -- bytes
+    fileName      TEXT,                          -- public-facing name
+    filePath      TEXT,                          -- absolute disk path
+    thumbnail     TEXT,
+    error         TEXT,
+    pid           INTEGER,
+    createdAt     TEXT NOT NULL,
+    completedAt   TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_yt_jobs_status_created ON yt_jobs(status, createdAt DESC);
+`);
+
 // ─── Unified log feed (added 2026-05) ─────────────────────────
 // Lives in its own table so the main job tables stay lean — without this,
 // each row in jobs/enhanced_images/lipsync_jobs/audio_jobs would carry up

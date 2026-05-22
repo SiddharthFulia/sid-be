@@ -18,6 +18,7 @@ import { postCreateDeepfakeJob, getDeepfakeStatus, listDeepfakeJobsCtrl } from '
 import { getPlayers, postPlayer, getPlayer, postScore, getScores } from '../../controllers/v1/games.js';
 import { postBestMove as postChessBestMove, postAnalyze as postChessAnalyze, postPlay as postChessPlay, getStatus as getChessStatus, postSaveGame, getGames as getChessGames, getOneGame as getChessGame, patchGame as patchChessGame, removeGame as removeChessGame, postBulkSaveGames as postChessBulkSave, getCollections as getChessCollections, postCreateMatch, postJoinMatch, getMatchState, postMatchMove, postResignMatch, listLiveMatches } from '../../controllers/v1/chess.js';
 import { getServerStats, getDbStats, getQueueStats, getWorkers, postPurgeQueue, getActivityTimeseries } from '../../controllers/v1/admin.js';
+import { postCreate as postYtCreate, getStatus as getYtStatus, getList as getYtList, streamFile as streamYtFile, removeJob as removeYtJob } from '../../controllers/v1/ytdl.js';
 import {
   postLipsync, getLipsyncStatus, getLipsyncList, deleteLipsync, postLipsyncBulkAction,
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
@@ -107,6 +108,14 @@ router.post('/games/players',           postPlayer);
 router.get( '/games/players/:idOrName', getPlayer);
 router.post('/games/scores',            postScore);
 router.get( '/games/scores',            getScores);
+
+// YouTube downloader (yt-dlp wrapper). file/:id is streamed with range
+// support so a 1 GB MP4 can resume cleanly.
+router.post(  '/yt-dl',             postYtCreate);
+router.get(   '/yt-dl/list',        getYtList);
+router.get(   '/yt-dl/status/:id',  getYtStatus);
+router.get(   '/yt-dl/file/:id',    streamYtFile);
+router.delete('/yt-dl/:id',         removeYtJob);
 
 // AI (Groq cloud — fast inference)
 router.post('/groq', postGroqChat);
