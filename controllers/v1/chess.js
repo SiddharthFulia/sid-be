@@ -216,6 +216,38 @@ export const postJoinMatch = (req, res) => {
 // match so closed-tab matches don't sit "active" forever.
 const ABORT_STALE_MS = 60_000;
 
+// On every terminal transition (completed | aborted) where ≥1 move was
+// played, snapshot the match into chess_games under the "Live Matches"
+// collection. This is the durable archive: chess_matches is hot working
+// state and the midnight cron sweeps it after 24h, but chess_games is
+// permanent so either player can revisit the game forever from /chess.
+// Zero-move aborts skip the archive — there's no PGN to keep.
+function archiveMatchToGames(row) {
+  try {
+    if (!row || row.moveCount < 1) return;
+    const datePart = new Date(row.completedAt || Date.now()).toLocaleDateString('en-GB');
+    const white = row.whiteName || 'White';
+    const black = row.blackName || 'Black';
+    const tag   = row.status === 'aborted' ? ' · aborted' : '';
+    createGame({
+      name:           `Live · ${white} vs ${black} · ${row.moveCount}m${tag} · ${datePart}`,
+      pgn:            row.pgn || '',
+      fen:            row.fen,
+      side:           'both',
+      mode:           'live',
+      engineName:     null,
+      engineType:     null,
+      engineStrength: null,
+      timeControl:    row.timeControlId || null,
+      result:         row.status === 'aborted' ? '*' : (row.result || '*'),
+      moveCount:      row.moveCount,
+      collection:     'Live Matches',
+    });
+  } catch (err) {
+    logger.warn(`chess archive to chess_games failed for ${row?.id}: ${err.message}`);
+  }
+}
+
 export const getMatchState = (req, res) => {
   const row = getMatch(req.params.id);
   if (!row) return error(res, 'match not found', 404);
@@ -251,6 +283,9 @@ export const getMatchState = (req, res) => {
         result: '*',
         completedAt: nowIso,
       });
+      // ≥1 move played? Snapshot to chess_games so the partial game
+      // survives the 24h chess_matches sweep.
+      archiveMatchToGames(aborted);
       return success(res, publicView(aborted));
     }
   }
@@ -342,6 +377,9 @@ export const postMatchMove = (req, res) => {
     }
 
     const updated = updateMatch(id, patch);
+    // Terminal transition (checkmate / draw / flag) — archive the
+    // finished game into the permanent saved-games library.
+    if (patch.status === 'completed') archiveMatchToGames(updated);
     return success(res, publicView(updated));
   } catch (err) {
     logger.error('chess match move failed', err.message);
@@ -367,6 +405,7 @@ export const postResignMatch = (req, res) => {
       result,
       completedAt: now,
     });
+    archiveMatchToGames(updated);
     return success(res, publicView(updated));
   } catch (err) {
     logger.error('chess match resign failed', err.message);
