@@ -33,6 +33,20 @@ const AUDIO_QUALITY = {
   '320': '0',
 };
 
+// Real browser UA — yt-dlp's default UA gets caught by YouTube's
+// anti-bot heuristics from cloud-IP ranges. Pretending to be Safari
+// (which corresponds to one of the player_client values below) lines
+// up better with the headers YouTube expects.
+const BROWSER_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
+
+// Player-client chain. As of 2025-Q2, datacenter IPs hitting the default
+// `web` player hit the "Sign in to confirm you're not a bot" wall almost
+// immediately. The TV-embedded + iOS clients use different signed-URL
+// shapes that YouTube hasn't locked down to the same extent. Listing
+// multiple makes yt-dlp fall through in order until one works.
+const PLAYER_CLIENTS = 'tv_embedded,ios,web_safari';
+
 function buildArgs({ url, format, quality, jobId }) {
   // Output template — prefix with job id so concurrent jobs don't collide.
   // %(title)s gets sanitised by yt-dlp.
@@ -43,8 +57,19 @@ function buildArgs({ url, format, quality, jobId }) {
     '--no-colors',
     '--no-warnings',
     '--restrict-filenames',         // ASCII-only filenames so the FE Content-Disposition is safe
+    '--user-agent', BROWSER_UA,
+    '--extractor-args', `youtube:player_client=${PLAYER_CLIENTS}`,
+    '--sleep-requests', '1',        // be polite — 1s between API requests so we don't rate-limit ourselves
     '-o', out,
   ];
+  // Optional: path to a cookies.txt exported from a logged-in browser.
+  // Most reliable bypass for "Sign in to confirm you're not a bot" when
+  // the player_client chain isn't enough. Defaults to
+  // <cwd>/data/yt-cookies.txt — drop a file there and yt-dlp uses it
+  // automatically.
+  const defaultCookies = path.join(ROOT, 'data', 'yt-cookies.txt');
+  const cookiesPath = process.env.YT_COOKIES_PATH || (fs.existsSync(defaultCookies) ? defaultCookies : null);
+  if (cookiesPath) base.push('--cookies', cookiesPath);
   if (format === 'mp3') {
     const q = AUDIO_QUALITY[quality] ?? '0';
     base.push('-x', '--audio-format', 'mp3', '--audio-quality', q);
