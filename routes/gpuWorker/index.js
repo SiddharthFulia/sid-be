@@ -11,6 +11,7 @@ import {
   postChatJob, postChatProgress, postChatComplete, postChatFailed,
   postMeshJob, postMeshProgress, postMeshComplete, postMeshFailed,
   postDeepfakeJob, postDeepfakeProgress, postDeepfakeComplete, postDeepfakeFailed,
+  postYtJob, postYtProgress, postYtComplete, postYtFailed,
 } from '../../controllers/gpuWorker/index.js';
 
 const router = Router();
@@ -53,5 +54,13 @@ router.get( '/gpu-worker/deepfake-job/:jobId', postDeepfakeJob);
 router.post('/gpu-worker/deepfake-progress',   postDeepfakeProgress);
 router.post('/gpu-worker/deepfake-complete',   postDeepfakeComplete);
 router.post('/gpu-worker/deepfake-failed',     postDeepfakeFailed);
+
+// YouTube downloader 5090 worker callbacks. /yt-complete/:jobId takes
+// a multipart upload — multer is wrapped inside the controller export
+// itself, no additional middleware needed at the route layer.
+router.get( '/gpu-worker/yt-job/:jobId',       postYtJob);
+router.post('/gpu-worker/yt-progress',         postYtProgress);
+router.post('/gpu-worker/yt-complete/:jobId',  postYtComplete);
+router.post('/gpu-worker/yt-failed',           postYtFailed);
 
 export default router;

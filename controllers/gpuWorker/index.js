@@ -648,3 +648,110 @@ export const postDeepfakeFailed = (req, res) => {
   return success(res, row);
 };
 
+
+// ─── YouTube downloader worker callbacks (5090 'home' lane) ─────────
+// Same shape as mesh: worker pulls the yt_jobs row by id, streams
+// progress, then completes by POSTing the actual file as multipart so
+// the BE can store it on disk where the existing /api/yt-dl/file/:id
+// streaming endpoint already expects it.
+
+import multer from 'multer';
+import fsNode from 'fs';
+import pathNode from 'path';
+import {
+  getJob as getYtJob,
+  updateJob as updateYtJob,
+} from '../../services/ytdl/store.js';
+import { DOWNLOADS_DIR as YT_DOWNLOADS_DIR } from '../../services/ytdl/runner.js';
+
+// Worker uploads via multipart, file stored to disk under the standard
+// yt-downloads dir. multer's diskStorage names the file with the jobId
+// prefix to match the Cobalt-lane convention.
+const ytUpload = multer({
+  storage: multer.diskStorage({
+    destination: YT_DOWNLOADS_DIR,
+    filename: (req, file, cb) => {
+      const jobId = req.params.jobId || req.body?.jobId || 'noid';
+      const ext = (pathNode.extname(file.originalname) || '').toLowerCase() || '.bin';
+      const base = pathNode.basename(file.originalname, ext)
+        .replace(/[\/\:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim()
+        .slice(0, 160) || `yt-${jobId}`;
+      cb(null, `${jobId}-${base}${ext}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 * 1024 },     // 5 GB hard cap
+});
+
+export const postYtJob = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const row = getYtJob(parseInt(req.params.jobId, 10));
+  if (!row) return error(res, 'YT job not found', 404);
+  return success(res, row);
+};
+
+export const postYtProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, percent, message } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const existing = getYtJob(jobId);
+  if (!existing) return error(res, 'YT job not found', 404);
+  if (existing.status === 'queued') {
+    updateYtJob(jobId, { status: 'processing' });
+  }
+  const patch = {};
+  if (typeof percent === 'number') patch.progress = Math.max(0, Math.min(100, Math.floor(percent)));
+  if (Object.keys(patch).length) updateYtJob(jobId, patch);
+  if (typeof message === 'string' && message.trim()) {
+    // yt-dlp progress lines are noisy; we don't need them in the unified
+    // log lane, but keep the option open for future debugging.
+    // appendJobLog(jobId, 'yt', message.trim());
+  }
+  return success(res, { ok: true });
+};
+
+// Worker uploads the finished file via multipart. The 'file' field
+// carries the MP3/MP4 bytes; the form body carries jobId + title +
+// duration so the row reflects the same metadata Cobalt provides.
+export const postYtComplete = [
+  (req, res, next) => {
+    if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+    return ytUpload.single('file')(req, res, next);
+  },
+  (req, res) => {
+    const jobId = parseInt(req.params.jobId || req.body?.jobId, 10);
+    if (!jobId || !req.file) return error(res, 'jobId + file required', 400);
+    const row = getYtJob(jobId);
+    if (!row) {
+      try { fsNode.unlinkSync(req.file.path); } catch {}
+      return error(res, 'YT job not found', 404);
+    }
+    const titleFromForm = (req.body?.title || '').toString().slice(0, 200) || null;
+    const durationFromForm = parseInt(req.body?.duration, 10);
+    const updated = updateYtJob(jobId, {
+      status:      'completed',
+      progress:    100,
+      title:       titleFromForm || row.title || req.file.originalname.replace(/\.[^.]+$/, ''),
+      duration:    Number.isFinite(durationFromForm) ? durationFromForm : row.duration || null,
+      filePath:    req.file.path,
+      fileName:    req.file.filename,
+      fileSize:    req.file.size,
+      completedAt: new Date().toISOString(),
+    });
+    logger.info(`yt-dl (home) complete jobId=${jobId} size=${req.file.size} file=${req.file.filename}`);
+    return success(res, updated);
+  },
+];
+
+export const postYtFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, error: errMsg } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  const row = updateYtJob(jobId, {
+    status:      'failed',
+    error:       String(errMsg || 'unknown').slice(0, 800),
+    completedAt: new Date().toISOString(),
+  });
+  if (!row) return error(res, 'YT job not found', 404);
+  logger.warn(`yt-dl (home) failed jobId=${jobId}: ${errMsg}`);
+  return success(res, row);
+};

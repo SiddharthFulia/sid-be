@@ -17,26 +17,44 @@ import {
   createJob, getJob, listJobs, updateJob, deleteJob,
 } from '../../services/ytdl/store.js';
 import { isValidYtUrl, scheduleNext } from '../../services/ytdl/runner.js';
+import { publishYtJob } from '../../services/aiVideo/messageQueue.js';
 
 const ALLOWED_FORMATS = new Set(['mp3', 'mp4']);
 const ALLOWED_AUDIO_Q = new Set(['128', '192', '320']);
 const ALLOWED_VIDEO_Q = new Set(['360', '720', '1080', 'best']);
+const ALLOWED_WORKERS = new Set(['cobalt', 'home']);
 
-export const postCreate = (req, res) => {
+export const postCreate = async (req, res) => {
   try {
-    const { url, format, quality } = req.body || {};
+    const { url, format, quality, worker = 'cobalt' } = req.body || {};
     if (!isValidYtUrl(url))   return error(res, 'A valid YouTube URL is required', 400);
     if (!ALLOWED_FORMATS.has(format)) return error(res, "format must be 'mp3' or 'mp4'", 400);
     const qSet = format === 'mp3' ? ALLOWED_AUDIO_Q : ALLOWED_VIDEO_Q;
     if (!qSet.has(quality)) return error(res, `quality must be one of ${Array.from(qSet).join(', ')}`, 400);
+    if (!ALLOWED_WORKERS.has(worker)) return error(res, "worker must be 'cobalt' or 'home'", 400);
 
-    // Always insert as 'queued'; the scheduler picks it up immediately
-    // if there's a free concurrency slot, otherwise it stays queued
-    // until a running job finishes. No 429 — the client can submit as
-    // many as they want and the BE serialises.
+    // Always insert as 'queued'. Routing then diverges by worker:
+    //   • cobalt → in-process scheduler picks it up against MAX_CONCURRENT
+    //     and POSTs to api.cobalt.tools.
+    //   • home   → publish to RabbitMQ (yt_queue); the 5090 worker pulls
+    //     the row via /gpu-worker/yt-job/:jobId and runs yt-dlp on its
+    //     residential IP, then POSTs progress/complete callbacks.
     const job = createJob({ url: String(url).trim(), format, quality });
-    scheduleNext();
-    return success(res, { jobId: job.id, status: job.status });
+    updateJob(job.id, { worker });
+    if (worker === 'home') {
+      const ok = await publishYtJob({ jobId: job.id });
+      if (!ok) {
+        updateJob(job.id, {
+          status:      'failed',
+          error:       'RabbitMQ unavailable — 5090 worker can\'t be reached. Try the Online (Cobalt) worker.',
+          completedAt: new Date().toISOString(),
+        });
+        return error(res, 'RabbitMQ unavailable for the 5090 lane', 503);
+      }
+    } else {
+      scheduleNext();
+    }
+    return success(res, { jobId: job.id, status: job.status, worker });
   } catch (err) {
     logger.error('yt-dl postCreate failed', err.message);
     return error(res, err.message);

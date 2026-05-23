@@ -5,6 +5,7 @@ import { db } from '../aiVideo/db.js';
 const ALLOWED_UPDATES = new Set([
   'status', 'progress', 'title', 'duration', 'fileSize',
   'fileName', 'filePath', 'thumbnail', 'error', 'pid', 'completedAt',
+  'worker',
 ]);
 
 export function createJob({ url, format, quality }) {

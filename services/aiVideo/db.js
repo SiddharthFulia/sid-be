@@ -646,6 +646,11 @@ db.exec(`
 addColumnIfMissing('audio_jobs',    'analysis', 'TEXT');
 addColumnIfMissing('deepfake_jobs', 'analysis', 'TEXT');
 
+// yt_jobs.worker — 'cobalt' (public API, instant, default) | 'home'
+// (5090 worker on residential IP). Older rows default to 'cobalt' to
+// keep behaviour unchanged for jobs created before this column existed.
+addColumnIfMissing('yt_jobs', 'worker', "TEXT NOT NULL DEFAULT 'cobalt'");
+
 // ─── YouTube downloader (yt-dlp wrapper) ────────────────────────
 // Each row is one download job. The BE spawns yt-dlp as a subprocess,
 // streams stdout progress into the row, and on exit moves the final

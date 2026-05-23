@@ -27,6 +27,7 @@ const QUEUE_AUDIO   = 'audio_queue';
 const QUEUE_CHAT    = 'chat_queue';
 export const QUEUE_MESH    = 'mesh_queue';
 export const QUEUE_DEEPFAKE = 'deepfake_queue';
+export const QUEUE_YT      = 'yt_queue';
 const EXCHANGE_DLX = 'video.dlx';
 const EXCHANGE_IMAGE_DLX = 'image.dlx';
 const EXCHANGE_LIPSYNC_DLX = 'lipsync.dlx';
@@ -34,6 +35,7 @@ const EXCHANGE_AUDIO_DLX   = 'audio.dlx';
 const EXCHANGE_CHAT_DLX    = 'chat.dlx';
 export const EXCHANGE_MESH_DLX = 'mesh.dlx';
 export const EXCHANGE_DEEPFAKE_DLX = 'deepfake.dlx';
+export const EXCHANGE_YT_DLX       = 'yt.dlx';
 
 let connection = null;
 let channel = null;
@@ -151,7 +153,15 @@ async function ensureChannel() {
       await channel.bindQueue('deepfake_failed_queue', EXCHANGE_DEEPFAKE_DLX, '');
       await channel.assertQueue(QUEUE_DEEPFAKE, { durable: true, deadLetterExchange: EXCHANGE_DEEPFAKE_DLX });
 
-      logger.info('RabbitMQ ready — video/image/lipsync/audio/chat/mesh/deepfake queues connected');
+      // YouTube downloader DLX + queue (5090 worker lane — residential IP
+      // bypasses YouTube's datacenter-IP anti-bot. Online lane is Cobalt,
+      // doesn't touch RabbitMQ at all.)
+      await channel.assertExchange(EXCHANGE_YT_DLX, 'fanout', { durable: true });
+      await channel.assertQueue('yt_failed_queue', { durable: true });
+      await channel.bindQueue('yt_failed_queue', EXCHANGE_YT_DLX, '');
+      await channel.assertQueue(QUEUE_YT, { durable: true, deadLetterExchange: EXCHANGE_YT_DLX });
+
+      logger.info('RabbitMQ ready — video/image/lipsync/audio/chat/mesh/deepfake/yt queues connected');
       return channel;
     } catch (err) {
       logger.error('RabbitMQ connect failed (workers will fall back to HTTP polling)', err.message);
@@ -317,6 +327,26 @@ export async function publishChatJob({ jobId, model }) {
     }
   }
   logger.error('RabbitMQ chat publish failed');
+  return false;
+}
+
+// Publish a YouTube-download trigger to the 5090 worker. Worker pulls
+// the full yt_jobs row via /api/gpu-worker/yt-job/:jobId after this nudge.
+export async function publishYtJob({ jobId }) {
+  if (!isConfigured()) return false;
+  const body = Buffer.from(JSON.stringify({ jobId, enqueuedAt: Date.now() }));
+  for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
+    const ch = await ensureChannel();
+    if (!ch) return false;
+    try {
+      const ok = ch.sendToQueue(QUEUE_YT, body, { persistent: true, contentType: 'application/json' });
+      if (ok) return true;
+    } catch (err) { channel = null; }
+    if (attempt < PUBLISH_MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, PUBLISH_RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+    }
+  }
+  logger.error('RabbitMQ yt publish failed');
   return false;
 }
 

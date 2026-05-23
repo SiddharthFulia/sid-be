@@ -181,12 +181,18 @@ export async function startDownload(job) {
 // Picks the oldest queued job and spawns it, as long as the count of
 // 'processing' rows is below MAX_CONCURRENT.
 export function scheduleNext() {
+  // Only count + pick rows the BE actually owns. 'home' rows are the
+  // 5090 worker's responsibility — they live in RabbitMQ + the worker's
+  // own process pool, not ours.
   const active = db
-    .prepare(`SELECT COUNT(*) AS n FROM yt_jobs WHERE status = 'processing'`)
+    .prepare(`SELECT COUNT(*) AS n FROM yt_jobs WHERE status = 'processing' AND COALESCE(worker, 'cobalt') = 'cobalt'`)
     .get().n;
   if (active >= MAX_CONCURRENT) return;
   const next = db
-    .prepare(`SELECT * FROM yt_jobs WHERE status = 'queued' ORDER BY createdAt ASC LIMIT 1`)
+    .prepare(`SELECT * FROM yt_jobs
+              WHERE status = 'queued'
+                AND COALESCE(worker, 'cobalt') = 'cobalt'
+              ORDER BY createdAt ASC LIMIT 1`)
     .get();
   if (!next) return;
   startDownload(next);
