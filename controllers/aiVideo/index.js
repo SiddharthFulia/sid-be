@@ -644,9 +644,13 @@ export const postImageEnhance = async (req, res) => {
       return error(res, 'engine must be cloud or atelier', 400);
     }
     // Workflow allowlist for atelier; cloud only uses presets/prompts.
+    // Keep this in lockstep with comfyui_client.py's wid dispatch on the
+    // worker — anything the worker can run should be allowed here, or the
+    // FE will get a 400 even though the lane works end-to-end.
     const ATELIER_WORKFLOWS = new Set([
       'realesrgan-x4', 'ultrasharp-x4', 'nmkd-siax',
       'sdxl-polish', 'sdxl-t2i', 'flux-kontext-edit',
+      'flux-dev-t2i', 'flux-schnell',
       'custom-sdxl', 'custom-t2i',
     ]);
     if (eng === 'atelier' && workflow && !ATELIER_WORKFLOWS.has(workflow)) {
