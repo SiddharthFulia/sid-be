@@ -59,6 +59,12 @@ function buildArgs({ url, format, quality, jobId }) {
     '--restrict-filenames',         // ASCII-only filenames so the FE Content-Disposition is safe
     '--user-agent', BROWSER_UA,
     '--extractor-args', `youtube:player_client=${PLAYER_CLIENTS}`,
+    // YouTube has been rolling out signed-URL JS challenges that yt-dlp
+    // can't solve without the EJS (External JS) solver scripts. This arg
+    // pulls them from yt-dlp's official GitHub on first use + caches
+    // them locally. Without it, some formats fail with "n challenge
+    // solving failed".
+    '--remote-components', 'ejs:github',
     '--sleep-requests', '1',        // be polite — 1s between API requests so we don't rate-limit ourselves
     '-o', out,
   ];
