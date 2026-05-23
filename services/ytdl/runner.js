@@ -1,235 +1,185 @@
-// yt-dlp subprocess runner. Spawns the binary with the appropriate
-// format / quality args, parses progress lines off stdout, and persists
-// the final filename + size to the yt_jobs row when the child exits.
+// yt-dl runner — backed by Cobalt (api.cobalt.tools).
 //
-// Assumes `yt-dlp` is on PATH. Install on Ubuntu/Oracle ARM:
-//   sudo apt install yt-dlp ffmpeg    (or `pip install -U yt-dlp` for newer)
-// ffmpeg is required for MP3 extraction + the bestvideo+bestaudio mux.
+// Why Cobalt instead of yt-dlp directly: YouTube blocks datacenter IPs
+// (Oracle ARM, AWS, GCP) with "Sign in to confirm you're not a bot"
+// regardless of cookies, because the cookie + IP shape doesn't match
+// a residential browser session. Cobalt's infrastructure routes
+// extraction through residential pools + rotating accounts that they
+// maintain, so a single POST to their API returns a tunnel URL we can
+// stream. No cookies, no proxies, no headless-Chrome on our side.
+// MIT-licensed; we can self-host later (github.com/imputnet/cobalt)
+// if the public instance flakes.
+//
+// Env overrides:
+//   COBALT_API_URL  — defaults to https://api.cobalt.tools
+//   COBALT_API_KEY  — set if your instance requires `Authorization`
 
-import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import logger from '../../helpers/logger.js';
 import { db } from '../aiVideo/db.js';
-import { updateJob, getJob } from './store.js';
+import { updateJob } from './store.js';
 
-// At most 3 yt-dlp subprocesses concurrently. Anything beyond this stays
-// in 'queued' status and gets picked up by scheduleNext() as capacity
-// frees. Higher values just thrash CPU + network without buying speed.
+const COBALT_API_URL = (process.env.COBALT_API_URL || 'https://api.cobalt.tools').replace(/\/+$/, '');
+const COBALT_API_KEY = process.env.COBALT_API_KEY || null;
 const MAX_CONCURRENT = 3;
 
 const ROOT = process.cwd();
 export const DOWNLOADS_DIR = path.join(ROOT, 'data', 'yt-downloads');
 fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
-// Sanity-check the URL pattern before we spawn anything — covers
-// youtube.com/watch, youtu.be/, youtube.com/shorts/, youtube.com/playlist.
+// Same URL validator the old runner used so the controller doesn't have
+// to change.
 const YT_URL_RE = /^(https?:\/\/)?(www\.|m\.)?(youtube\.com|youtu\.be)\/.+/i;
 export const isValidYtUrl = (u) => typeof u === 'string' && YT_URL_RE.test(u.trim());
 
-const AUDIO_QUALITY = {
-  '128': '5',     // yt-dlp scale 0(best)..10(worst); 5 ≈ 128k
-  '192': '3',
-  '320': '0',
+// Map our 6 quality knobs to Cobalt's enum strings.
+const VIDEO_QUALITY_MAP = {
+  '360':  '360',
+  '720':  '720',
+  '1080': '1080',
+  'best': 'max',
 };
+const AUDIO_BITRATE_SET = new Set(['128', '192', '320']);
 
-// Real browser UA — yt-dlp's default UA gets caught by YouTube's
-// anti-bot heuristics from cloud-IP ranges. Pretending to be Safari
-// (which corresponds to one of the player_client values below) lines
-// up better with the headers YouTube expects.
-const BROWSER_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
-
-// Player-client chain. As of 2025-Q2, datacenter IPs hitting the default
-// `web` player hit the "Sign in to confirm you're not a bot" wall almost
-// immediately. The TV-embedded + iOS clients use different signed-URL
-// shapes that YouTube hasn't locked down to the same extent. Listing
-// multiple makes yt-dlp fall through in order until one works.
-const PLAYER_CLIENTS = 'tv_embedded,ios,web_safari';
-
-function buildArgs({ url, format, quality, jobId }) {
-  // Output template — prefix with job id so concurrent jobs don't collide.
-  // %(title)s gets sanitised by yt-dlp.
-  const out = path.join(DOWNLOADS_DIR, `${jobId}-%(title).80s.%(ext)s`);
-  const base = [
-    '--no-playlist',
-    '--newline',                    // emit \n on progress (not \r) — easier to line-parse
-    '--no-colors',
-    '--no-warnings',
-    '--restrict-filenames',         // ASCII-only filenames so the FE Content-Disposition is safe
-    '--user-agent', BROWSER_UA,
-    '--extractor-args', `youtube:player_client=${PLAYER_CLIENTS}`,
-    // YouTube has been rolling out signed-URL JS challenges that yt-dlp
-    // can't solve without the EJS (External JS) solver scripts. This arg
-    // pulls them from yt-dlp's official GitHub on first use + caches
-    // them locally. Without it, some formats fail with "n challenge
-    // solving failed".
-    '--remote-components', 'ejs:github',
-    '--sleep-requests', '1',        // be polite — 1s between API requests so we don't rate-limit ourselves
-    '-o', out,
-  ];
-  // Optional: path to a cookies.txt exported from a logged-in browser.
-  // Most reliable bypass for "Sign in to confirm you're not a bot" when
-  // the player_client chain isn't enough. Defaults to
-  // <cwd>/data/yt-cookies.txt — drop a file there and yt-dlp uses it
-  // automatically.
-  const defaultCookies = path.join(ROOT, 'data', 'yt-cookies.txt');
-  const cookiesPath = process.env.YT_COOKIES_PATH || (fs.existsSync(defaultCookies) ? defaultCookies : null);
-  if (cookiesPath) base.push('--cookies', cookiesPath);
+function buildCobaltBody({ url, format, quality }) {
   if (format === 'mp3') {
-    const q = AUDIO_QUALITY[quality] ?? '0';
-    base.push('-x', '--audio-format', 'mp3', '--audio-quality', q);
-  } else {
-    // mp4. 'best' = no height cap.
-    const cap = quality === 'best' ? '' : `[height<=${parseInt(quality, 10) || 720}]`;
-    base.push(
-      '-f', `bestvideo${cap}+bestaudio/best${cap}`,
-      '--merge-output-format', 'mp4',
-    );
+    return {
+      url,
+      downloadMode:  'audio',
+      audioFormat:   'mp3',
+      audioBitrate:  AUDIO_BITRATE_SET.has(quality) ? quality : '320',
+      filenameStyle: 'pretty',
+    };
   }
-  base.push(url);
-  return base;
-}
-
-// Look for the produced file on disk. yt-dlp's output template gives us
-// `{jobId}-<title>.<ext>` — we glob the downloads dir for the prefix.
-function findProducedFile(jobId, format) {
-  const prefix = `${jobId}-`;
-  const ext = format === 'mp3' ? '.mp3' : '.mp4';
-  try {
-    const files = fs.readdirSync(DOWNLOADS_DIR)
-      .filter(f => f.startsWith(prefix) && f.endsWith(ext));
-    if (!files.length) return null;
-    // Prefer the most-recently-modified one if somehow multiple matched.
-    let best = files[0];
-    let bestMtime = 0;
-    for (const f of files) {
-      const m = fs.statSync(path.join(DOWNLOADS_DIR, f)).mtimeMs;
-      if (m > bestMtime) { best = f; bestMtime = m; }
-    }
-    return path.join(DOWNLOADS_DIR, best);
-  } catch (err) {
-    logger.warn(`yt-dlp findProducedFile error: ${err.message}`);
-    return null;
-  }
-}
-
-// Parse a stdout line for the progress percentage. yt-dlp emits:
-//   [download]   5.2% of ~123.4MiB at 1.2MiB/s ETA 01:23
-//   [download] 100% of 123.4MiB in 00:42
-const PROGRESS_RE   = /\[download\]\s+(\d+(?:\.\d+)?)%/;
-const TITLE_RE      = /\[info\]\s+([^\:]+):\s+Downloading/;          // weak signal but it's free
-const DURATION_RE   = /\bDuration:\s*(\d+):(\d+):(\d+)/i;             // ffmpeg-passthrough lines
-
-export function startDownload(job) {
-  const args = buildArgs({
-    url:    job.url,
-    format: job.format,
-    quality: job.quality,
-    jobId:  job.id,
-  });
-  logger.info(`yt-dlp start jobId=${job.id} fmt=${job.format} q=${job.quality} url=${job.url}`);
-
-  const proc = spawn('yt-dlp', args, { windowsHide: true });
-  updateJob(job.id, { status: 'processing', progress: 0, pid: proc.pid });
-
-  let lastProgress = 0;
-  let stderrBuf = '';
-  let detectedTitle = null;
-  let detectedDuration = null;
-
-  // Throttle DB writes — only update if the percent moved by at least 1.
-  const onLine = (line) => {
-    const pm = PROGRESS_RE.exec(line);
-    if (pm) {
-      const pct = Math.max(0, Math.min(100, Math.floor(parseFloat(pm[1]))));
-      if (pct - lastProgress >= 1) {
-        lastProgress = pct;
-        updateJob(job.id, { progress: pct });
-      }
-      return;
-    }
-    const tm = TITLE_RE.exec(line);
-    if (tm && !detectedTitle) {
-      detectedTitle = tm[1].trim();
-    }
-    const dm = DURATION_RE.exec(line);
-    if (dm && !detectedDuration) {
-      detectedDuration = (+dm[1]) * 3600 + (+dm[2]) * 60 + (+dm[3]);
-    }
+  return {
+    url,
+    downloadMode:        'auto',
+    videoQuality:        VIDEO_QUALITY_MAP[quality] || '720',
+    filenameStyle:       'pretty',
+    youtubeVideoCodec:   'h264',         // h264 muxes into mp4 cleanly; av1/vp9 prefer mkv
   };
+}
 
-  proc.stdout.on('data', (chunk) => {
-    const lines = String(chunk).split(/\r?\n/);
-    for (const l of lines) if (l) onLine(l);
-  });
-  proc.stderr.on('data', (chunk) => {
-    stderrBuf += String(chunk);
-    // yt-dlp uses stderr for some informational lines too; mine progress
-    // there as a fallback.
-    const lines = String(chunk).split(/\r?\n/);
-    for (const l of lines) if (l) onLine(l);
-  });
+async function callCobalt(body) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept':       'application/json',
+  };
+  if (COBALT_API_KEY) headers['Authorization'] = `Api-Key ${COBALT_API_KEY}`;
 
-  proc.on('error', (err) => {
-    logger.error(`yt-dlp spawn failed jobId=${job.id}: ${err.message}`);
+  const res = await fetch(COBALT_API_URL + '/', {
+    method:  'POST',
+    headers,
+    body:    JSON.stringify(body),
+    signal:  AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Cobalt API ${res.status}: ${text.slice(0, 240) || res.statusText}`);
+  }
+  const data = await res.json();
+  if (data.status === 'error') {
+    const code = data.error?.code || 'unknown';
+    throw new Error(`Cobalt refused: ${code}`);
+  }
+  if (data.status === 'picker') {
+    throw new Error('That URL returned a multi-track picker (likely a playlist) — submit a single video');
+  }
+  // Both 'tunnel' and 'redirect' give us a downloadable URL.
+  if (!data.url) throw new Error('Cobalt returned no download URL');
+  return { downloadUrl: data.url, filename: data.filename || null };
+}
+
+// Stream the Cobalt tunnel response straight into the final job file
+// path, updating the progress column at most once per percentage point.
+async function streamToDisk(downloadUrl, finalPath, jobId) {
+  const res = await fetch(downloadUrl, { signal: AbortSignal.timeout(15 * 60_000) });
+  if (!res.ok) throw new Error(`Tunnel HTTP ${res.status} ${res.statusText}`);
+  const totalBytes = parseInt(res.headers.get('content-length') || '0', 10);
+
+  const tmpPath = finalPath + '.tmp';
+  const file = fs.createWriteStream(tmpPath);
+  let received = 0;
+  let lastPct = 0;
+
+  const reader = res.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      file.write(Buffer.from(value));
+      received += value.length;
+      if (totalBytes) {
+        const pct = Math.floor((received / totalBytes) * 100);
+        if (pct - lastPct >= 1) {
+          lastPct = pct;
+          updateJob(jobId, { progress: pct });
+        }
+      }
+    }
+  } finally {
+    await new Promise((resolve, reject) => file.end(err => err ? reject(err) : resolve()));
+  }
+  fs.renameSync(tmpPath, finalPath);
+  return received;
+}
+
+// Sanitise the filename Cobalt returns so it's safe on every FS we care
+// about. We DON'T restrict to ASCII — Cobalt's 'pretty' style produces
+// readable Unicode titles which we want to keep for the FE display.
+function safeFilename(name) {
+  return String(name || '')
+    .replace(/[\/\\:*?"<>|\x00-\x1f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
+// Public entry point — controller calls scheduleNext() after creating a
+// row, which calls this for each free slot.
+export async function startDownload(job) {
+  updateJob(job.id, { status: 'processing', progress: 0 });
+  try {
+    const body = buildCobaltBody({ url: job.url, format: job.format, quality: job.quality });
+    logger.info(`cobalt start jobId=${job.id} fmt=${job.format} q=${job.quality} url=${job.url}`);
+    const { downloadUrl, filename } = await callCobalt(body);
+
+    const fallbackName = `yt-${job.id}.${job.format}`;
+    const cleanFilename = safeFilename(filename) || fallbackName;
+    // Prefix with jobId so concurrent jobs can't collide on the same name.
+    const finalName = `${job.id}-${cleanFilename}`;
+    const finalPath = path.join(DOWNLOADS_DIR, finalName);
+
+    const bytes = await streamToDisk(downloadUrl, finalPath, job.id);
+
     updateJob(job.id, {
-      status: 'failed',
-      error: `yt-dlp not available on the BE (install yt-dlp + ffmpeg). ${err.message}`,
+      status:      'completed',
+      progress:    100,
+      title:       cleanFilename.replace(/\.[^.]+$/, ''),
+      filePath:    finalPath,
+      fileName:    finalName,
+      fileSize:    bytes,
       completedAt: new Date().toISOString(),
     });
-  });
-
-  const finalise = () => {
-    // Always try to pull the next queued job after this one terminates,
-    // regardless of success/failure. Run on next tick so the row we just
-    // updated is committed.
+    logger.info(`cobalt done jobId=${job.id} size=${bytes} file=${finalName}`);
+  } catch (err) {
+    updateJob(job.id, {
+      status:      'failed',
+      error:       err?.message || String(err),
+      completedAt: new Date().toISOString(),
+    });
+    logger.warn(`cobalt failed jobId=${job.id}: ${err?.message || err}`);
+  } finally {
+    // Whether we succeeded or failed, give the next queued job a chance
+    // to start now that we've freed a slot.
     setImmediate(scheduleNext);
-  };
-
-  proc.on('close', (code) => {
-    if (code === 0) {
-      const filePath = findProducedFile(job.id, job.format);
-      if (!filePath) {
-        updateJob(job.id, {
-          status: 'failed',
-          error: 'yt-dlp exited 0 but no output file matched the job prefix',
-          completedAt: new Date().toISOString(),
-        });
-        return;
-      }
-      let fileSize = 0;
-      try { fileSize = fs.statSync(filePath).size; } catch {}
-      const fileName = path.basename(filePath);
-      updateJob(job.id, {
-        status:      'completed',
-        progress:    100,
-        title:       detectedTitle || fileName,
-        duration:    detectedDuration || null,
-        filePath, fileName, fileSize,
-        completedAt: new Date().toISOString(),
-      });
-      logger.info(`yt-dlp done jobId=${job.id} size=${fileSize} file=${fileName}`);
-    } else {
-      const errText = (stderrBuf || '').slice(-1200).trim() || `yt-dlp exited with code ${code}`;
-      updateJob(job.id, {
-        status:      'failed',
-        error:       errText,
-        completedAt: new Date().toISOString(),
-      });
-      logger.warn(`yt-dlp failed jobId=${job.id} code=${code}: ${errText.slice(0, 240)}`);
-    }
-    finalise();
-  });
-
-  return proc;
+  }
 }
 
 // ─── Scheduler ──────────────────────────────────────────────────────
 // Picks the oldest queued job and spawns it, as long as the count of
-// 'processing' rows is below MAX_CONCURRENT. Called whenever a job is
-// created or finishes; also runs once at boot to drain anything left
-// 'queued' from before a BE restart.
+// 'processing' rows is below MAX_CONCURRENT.
 export function scheduleNext() {
   const active = db
     .prepare(`SELECT COUNT(*) AS n FROM yt_jobs WHERE status = 'processing'`)
@@ -243,30 +193,24 @@ export function scheduleNext() {
 }
 
 // ─── Orphan recovery ────────────────────────────────────────────────
-// On BE boot, any row still flagged 'processing' is stale — the yt-dlp
-// child is gone (BE was restarted). Mark them failed so the FE shows
-// the truth instead of an infinite spinner. The user can re-submit.
+// On boot, any row still flagged 'processing' is stale (the BE was
+// restarted mid-download). Mark them failed so the FE shows truth.
 export function recoverOrphans() {
   try {
-    const stmt = db.prepare(
+    const res = db.prepare(
       `UPDATE yt_jobs
        SET status='failed',
            error='BE restarted while this job was running — please re-submit',
            completedAt=?,
            pid=NULL
        WHERE status='processing'`
-    );
-    const now = new Date().toISOString();
-    const res = stmt.run(now);
-    if (res.changes > 0) logger.warn(`yt-dlp recovered ${res.changes} orphan(s) on boot`);
+    ).run(new Date().toISOString());
+    if (res.changes > 0) logger.warn(`yt-dl recovered ${res.changes} orphan(s) on boot`);
   } catch (err) {
-    logger.warn(`yt-dlp orphan recovery failed: ${err.message}`);
+    logger.warn(`yt-dl orphan recovery failed: ${err.message}`);
   }
 }
 
-// Boot-time pass: clear stale 'processing' rows, then drain the queue
-// up to MAX_CONCURRENT in case the BE restarted with queued work
-// pending. Wrapped in setImmediate so module-load order is fine.
 setImmediate(() => {
   recoverOrphans();
   scheduleNext();
