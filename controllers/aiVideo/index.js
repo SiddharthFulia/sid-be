@@ -77,6 +77,7 @@ export const postGenerateVideo = async (req, res) => {
       mode,           // 'preview' | 'balanced' | 'quality' — only meaningful for the optimized provider
       withMusic = false,           // 5090 lanes only: have MusicGen produce a backing track
       musicPrompt = '',            // optional override; falls back to the video prompt if empty
+      vault: bodyVault = false,    // honoured only when req.vault is truthy (auth check below)
     } = req.body || {};
 
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -102,7 +103,12 @@ export const postGenerateVideo = async (req, res) => {
         category: nsfw.category,
       });
     }
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: false };
+    // FE flips vault=true when the source image came from a Vault library
+    // item (or arrived with ?vault=1 on a hand-off). Only honoured when
+    // the request carries a valid Vault token — anonymous callers can't
+    // sneak content into the private library.
+    const opts_vault = !!bodyVault && !!req.vault;
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: opts_vault };
 
     // For the 'optimized' provider, mode picks the MODEL + STEPS (the
     // actual "speed" knobs). The user's duration / resolution / aspect
