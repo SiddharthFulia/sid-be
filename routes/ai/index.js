@@ -1,0 +1,44 @@
+// AI chat + assist endpoints — Ollama (local + Oracle), Groq, Gemini,
+// conversation persistence, prompt coach. The 5090 lane uses the
+// queued chat_jobs pattern; cloud lanes return inline.
+
+import { Router } from 'express';
+import {
+  postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postPromptCoach,
+  postChatLocal, getChatStatus, getLocalModels,
+  postCreateConversation, getListConversations, getOneConversation,
+  patchConversation, deleteOneConversation, postConversationsBulk, postSendMessage,
+  postCompactConversation, postCompactFinalize,
+} from '../../controllers/ai/index.js';
+
+const router = Router();
+
+// AI (Ollama local — on Oracle BE)
+router.post('/chat', postChat);
+router.post('/ai',   postAI);
+
+// AI Chat 5090 lane — Ollama running on the home RTX 5090
+router.post('/chat/local',          postChatLocal);          // legacy single-shot
+router.get( '/chat/status/:jobId',  getChatStatus);
+router.get( '/chat/local-models',   getLocalModels);
+
+// Conversation-aware multi-turn chat with persistence
+router.post(  '/chat/conversations',                          postCreateConversation);
+router.get(   '/chat/conversations',                          getListConversations);
+router.post(  '/chat/conversations/bulk',                     postConversationsBulk);
+router.get(   '/chat/conversations/:chatId',                  getOneConversation);
+router.patch( '/chat/conversations/:chatId',                  patchConversation);
+router.delete('/chat/conversations/:chatId',                  deleteOneConversation);
+router.post(  '/chat/conversations/:chatId/messages',         postSendMessage);
+router.post(  '/chat/conversations/:chatId/compact',          postCompactConversation);
+router.post(  '/chat/conversations/:chatId/compact/finalize', postCompactFinalize);
+
+// Cloud lanes
+router.post('/groq',          postGroqChat);
+router.post('/gemini',        postGeminiChat);
+router.post('/gemini/vision', postGeminiVision);
+
+// Prompt coach — turns a plain-English idea into a model-tuned image prompt.
+router.post('/ai/prompt-coach', postPromptCoach);
+
+export default router;
