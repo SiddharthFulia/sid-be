@@ -656,8 +656,14 @@ export const postImageEnhance = async (req, res) => {
     if (eng === 'atelier' && workflow && !ATELIER_WORKFLOWS.has(workflow)) {
       return error(res, `unknown atelier workflow: ${workflow}`, 400);
     }
-    // Source-image rule: t2i workflows don't need an image.
-    const isT2I = workflow === 'sdxl-t2i' || workflow === 'custom-t2i';
+    // Source-image rule: text-to-image workflows don't need an image.
+    // Keep this set in lockstep with the ATELIER_WORKFLOWS set above —
+    // any new t2i workflow must be listed here too or the BE will
+    // reject the request as "needs a source image".
+    const T2I_WORKFLOWS = new Set([
+      'sdxl-t2i', 'custom-t2i', 'flux-dev-t2i', 'flux-schnell',
+    ]);
+    const isT2I = T2I_WORKFLOWS.has(workflow);
     if (!isT2I && !dataUrl && !imageUrl) {
       const friendly = workflow
         ? `Workflow "${workflow}" needs a source image. Upload one, or pick a "text→image" workflow.`
