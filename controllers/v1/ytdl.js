@@ -91,7 +91,22 @@ export const streamFile = (req, res) => {
   const stat = fs.statSync(row.filePath);
   const fileSize = stat.size;
   const range = req.headers.range;
-  const safeName = (row.fileName || `yt-${id}.${row.format}`).replace(/[^\w.\-]/g, '_');
+  // Pretty Content-Disposition: strip the {jobId}- prefix yt-dlp's
+  // output template prepends, replace the --restrict-filenames _-_
+  // sequence with " - ", remaining _ with spaces, and trim any
+  // filesystem-unsafe leftovers. Result for the Rick Astley test
+  // case goes from "7-Rick_Astley_-_Never_Gonna_Give_You_Up_Official_Video_4K_Remaster.mp4"
+  // to "Rick Astley - Never Gonna Give You Up Official Video 4K Remaster.mp4".
+  const prettyName = (() => {
+    const raw = row.fileName || `yt-${id}.${row.format}`;
+    const noPrefix = raw.replace(new RegExp(`^${id}-`), '');
+    return noPrefix
+      .replace(/_-_/g, ' - ')
+      .replace(/_/g, ' ')
+      .replace(/[\/\\:*?"<>|\x00-\x1f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim() || `yt-${id}.${row.format}`;
+  })();
   const ctype = row.format === 'mp3' ? 'audio/mpeg' : 'video/mp4';
 
   if (range) {
@@ -105,7 +120,7 @@ export const streamFile = (req, res) => {
       'Accept-Ranges':   'bytes',
       'Content-Length':  chunkSize,
       'Content-Type':    ctype,
-      'Content-Disposition': `attachment; filename="${safeName}"`,
+      'Content-Disposition': `attachment; filename="${prettyName}"`,
     });
     fs.createReadStream(row.filePath, { start, end }).pipe(res);
     // Range delivery → don't auto-delete; daily cron picks it up later.
@@ -113,7 +128,7 @@ export const streamFile = (req, res) => {
     res.writeHead(200, {
       'Content-Length':  fileSize,
       'Content-Type':    ctype,
-      'Content-Disposition': `attachment; filename="${safeName}"`,
+      'Content-Disposition': `attachment; filename="${prettyName}"`,
       'Accept-Ranges':   'bytes',
     });
     const stream = fs.createReadStream(row.filePath);
