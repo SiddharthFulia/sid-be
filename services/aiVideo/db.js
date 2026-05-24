@@ -651,6 +651,29 @@ addColumnIfMissing('deepfake_jobs', 'analysis', 'TEXT');
 // keep behaviour unchanged for jobs created before this column existed.
 addColumnIfMissing('yt_jobs', 'worker', "TEXT NOT NULL DEFAULT 'cobalt'");
 
+// ─── Combined videos (ffmpeg concat from N library or uploaded videos) ──
+// One row per "combine" job. Async — POST creates 'queued', the ffmpeg
+// pass runs inline in a Promise (fast enough not to need RabbitMQ for
+// portfolio-scale loads, ~10-60s for 4 clips). FE polls /status/:id.
+// File auto-deletes on first download just like yt-dl.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS combined_videos (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    sources       TEXT NOT NULL,                    -- JSON array of {videoId?, url?, title?}
+    title         TEXT,                              -- user-supplied or auto-built
+    status        TEXT NOT NULL DEFAULT 'queued',   -- queued | processing | completed | failed
+    progress      INTEGER NOT NULL DEFAULT 0,        -- 0..100
+    strategy      TEXT,                              -- 'copy' | 'reencode' once done
+    outputPath    TEXT,                              -- absolute disk path
+    fileSize      INTEGER,
+    error         TEXT,
+    createdAt     TEXT NOT NULL,
+    completedAt   TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_combined_videos_status_created
+    ON combined_videos(status, createdAt DESC);
+`);
+
 // ─── YouTube downloader (yt-dlp wrapper) ────────────────────────
 // Each row is one download job. The BE spawns yt-dlp as a subprocess,
 // streams stdout progress into the row, and on exit moves the final

@@ -37,8 +37,8 @@ router.post('/export', postExport);
 router.get('/job-logs/:lane/:jobId', maybeVault, (req, res) => {
   const lane = String(req.params.lane || '').toLowerCase();
   const jobId = req.params.jobId;
-  if (!['video', 'image', 'lipsync', 'audio', 'mesh', 'deepfake'].includes(lane)) {
-    return error(res, "lane must be 'video' | 'image' | 'lipsync' | 'audio' | 'mesh' | 'deepfake'", 400);
+  if (!['video', 'image', 'lipsync', 'audio', 'mesh', 'deepfake', 'combine'].includes(lane)) {
+    return error(res, "lane must be 'video' | 'image' | 'lipsync' | 'audio' | 'mesh' | 'deepfake' | 'combine'", 400);
   }
   if (!jobId) return error(res, 'jobId required', 400);
   const sinceTs = parseInt(req.query.since, 10) || 0;

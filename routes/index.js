@@ -23,6 +23,7 @@ import studioRoutes        from './studio/index.js';
 import faceRoutes          from './face/index.js';
 import nasaRoutes          from './nasa/index.js';
 import toolsRoutes         from './tools/index.js';
+import combineRoutes       from './combine/index.js';
 
 const router = Router();
 
@@ -42,5 +43,6 @@ router.use('/', studioRoutes);
 router.use('/', faceRoutes);
 router.use('/', nasaRoutes);
 router.use('/', toolsRoutes);
+router.use('/', combineRoutes);
 
 export default router;
