@@ -4,13 +4,14 @@ import { Router } from 'express';
 import { requireVault } from '../../services/auth/vault.js';
 import {
   getServerStats, getDbStats, getQueueStats, getWorkers,
-  postPurgeQueue, getActivityTimeseries,
+  postPurgeQueue, getActivityTimeseries, getDiskStats,
 } from '../../controllers/admin/index.js';
 
 const router = Router();
 
 router.get( '/admin/server-stats', requireVault, getServerStats);
 router.get( '/admin/db-stats',     requireVault, getDbStats);
+router.get( '/admin/disk-stats',   requireVault, getDiskStats);
 router.get( '/admin/queues',       requireVault, getQueueStats);
 router.get( '/admin/workers',      requireVault, getWorkers);
 router.get( '/admin/activity',     requireVault, getActivityTimeseries);

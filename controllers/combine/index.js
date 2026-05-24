@@ -23,13 +23,20 @@ import { db } from '../../services/aiVideo/db.js';
 
 // Resolve a source-spec to a concrete URL the ffmpeg helper can fetch.
 // videoId hits the `videos` table for its Cloudinary videoUrl. A bare
-// url passes through.
+// url passes through. Also returns the source row's vault flag so the
+// controller can OR them together for the resulting combine row.
 function resolveSource(spec) {
-  if (spec?.url) return { url: spec.url, title: spec.title || null };
+  if (spec?.url) return { url: spec.url, title: spec.title || null, vault: 0 };
   if (spec?.videoId) {
-    const row = db.prepare('SELECT videoId, videoUrl, prompt FROM videos WHERE videoId = ?').get(spec.videoId);
+    const row = db.prepare(
+      'SELECT videoId, videoUrl, prompt, vault FROM videos WHERE videoId = ?'
+    ).get(spec.videoId);
     if (!row) throw new Error(`videoId ${spec.videoId} not found in library`);
-    return { url: row.videoUrl, title: spec.title || row.prompt?.slice(0, 60) || row.videoId };
+    return {
+      url: row.videoUrl,
+      title: spec.title || row.prompt?.slice(0, 60) || row.videoId,
+      vault: row.vault ? 1 : 0,
+    };
   }
   throw new Error('source must have { videoId } or { url }');
 }
@@ -48,7 +55,11 @@ export const postCreate = async (req, res) => {
     try { resolved = sources.map(resolveSource); }
     catch (err) { return error(res, err.message, 400); }
 
-    const job = createCombine({ sources: resolved, title });
+    // Vault propagation — if ANY source is from the vault library, the
+    // combined output inherits the flag and stays hidden from anonymous
+    // viewers. Pasted URLs default to vault=0 (we can't know their origin).
+    const inheritVault = resolved.some(r => r.vault) ? 1 : 0;
+    const job = createCombine({ sources: resolved, title, vault: inheritVault });
 
     // Fire-and-forget — controller returns immediately with the jobId;
     // FE polls /status/:id. ffmpeg writes progress/log into the row +
@@ -92,14 +103,29 @@ export const getStatus = (req, res) => {
   const id = parseInt(req.params.id, 10);
   const row = getCombine(id);
   if (!row) return error(res, 'combine job not found', 404);
+  // Vault-private rows are 404 to anonymous viewers — same shape as a
+  // genuinely missing id so we don't leak existence.
+  if (row.vault && !req.vault) return error(res, 'combine job not found', 404);
   // Don't leak the absolute disk path.
   const { outputPath: _op, ...safe } = row;
   return success(res, safe);
 };
 
+// Paginated list. Query: ?visibility=public|vault&status=&page=&pageSize=
+// pageSize is clamped server-side to [1, 1000]; default 20.
+// visibility=vault only succeeds when req.vault is true; otherwise we
+// silently coerce to 'public' so unauthenticated callers can't enumerate
+// vaulted rows.
 export const getList = (req, res) => {
-  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 30));
-  return success(res, { items: listCombines({ limit }) });
+  const visibility = (req.query.visibility || 'public').toLowerCase();
+  const wantsVault = visibility === 'vault' && req.vault;
+  const status = typeof req.query.status === 'string' && req.query.status
+    ? req.query.status
+    : undefined;
+  const page     = parseInt(req.query.page, 10)     || 1;
+  const pageSize = parseInt(req.query.pageSize, 10) || 20;
+  const result = listCombines({ vault: wantsVault ? 1 : 0, status, page, pageSize });
+  return success(res, { ...result, visibility: wantsVault ? 'vault' : 'public' });
 };
 
 // Auto-delete after first full (non-range) download finishes, matching
@@ -119,6 +145,7 @@ export const streamFile = (req, res) => {
   const id  = parseInt(req.params.id, 10);
   const row = getCombine(id);
   if (!row)                        return error(res, 'combine job not found', 404);
+  if (row.vault && !req.vault)     return error(res, 'combine job not found', 404);
   if (row.status !== 'completed')  return error(res, `job is ${row.status}`, 400);
   if (!row.outputPath || !fs.existsSync(row.outputPath)) {
     return error(res, 'file no longer on disk', 410);
@@ -163,6 +190,9 @@ export const removeJob = (req, res) => {
   const id  = parseInt(req.params.id, 10);
   const row = getCombine(id);
   if (!row) return error(res, 'combine job not found', 404);
+  // Deleting a vault-private combine requires vault auth — same gate as
+  // any other destructive op on a vault asset.
+  if (row.vault && !req.vault) return error(res, 'combine job not found', 404);
   if (row.outputPath) {
     try { fs.unlinkSync(row.outputPath); } catch {}
   }

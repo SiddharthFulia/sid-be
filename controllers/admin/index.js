@@ -14,6 +14,9 @@
 // production publish lane.
 
 import os from 'os';
+import fs from 'fs';
+import fsp from 'fs/promises';
+import path from 'path';
 import amqplib from 'amqplib';
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
@@ -227,6 +230,141 @@ export const getActivityTimeseries = async (req, res) => {
     return success(res, { days, series });
   } catch (err) {
     logger.error('admin getActivityTimeseries failed', err.message);
+    return error(res, err.message, 500);
+  }
+};
+
+// ─── Disk stats ─────────────────────────────────────────────────
+// What lives on this filesystem and how much room is left? We expose:
+//   1) Filesystem totals via fs.statfs (Node 18.15+). On Windows this can
+//      throw — fallback returns null totals so the FE skips the header.
+//   2) Per-bucket sizes — walk the well-known data folders and sum file
+//      bytes. Buckets are the lanes that actually persist binaries:
+//        • sqlite     : data/sid.db (+ -wal / -shm)
+//        • combined   : data/combined-videos/  (ffmpeg-concat outputs)
+//        • ytdl       : data/yt-downloads/     (yt-dlp / Cobalt downloads)
+//        • workersJSON: small status JSONs (tokens, gpu-worker-status)
+//   3) Aggregate row counts that map to "what's in the DB" — chess games,
+//      meshes, videos, audio, lipsync, deepfake, cinema projects.
+//
+// Symlinks are not followed (avoid loops). Hidden/dot files are counted.
+// Errors on individual entries are ignored so one bad symlink doesn't
+// nuke the whole report.
+const BUCKET_DEFS = [
+  { id: 'combined',    label: 'Combined videos',  rel: 'data/combined-videos',  emoji: '🎬' },
+  { id: 'ytdl',        label: 'YouTube downloads', rel: 'data/yt-downloads',    emoji: '📼' },
+];
+
+async function walkSize(dirPath) {
+  let total = 0, files = 0;
+  try {
+    const entries = await fsp.readdir(dirPath, { withFileTypes: true });
+    for (const ent of entries) {
+      if (ent.isSymbolicLink()) continue;
+      const full = path.join(dirPath, ent.name);
+      if (ent.isDirectory()) {
+        const sub = await walkSize(full);
+        total += sub.total; files += sub.files;
+      } else if (ent.isFile()) {
+        try {
+          const st = await fsp.stat(full);
+          total += st.size; files += 1;
+        } catch {}
+      }
+    }
+  } catch {}
+  return { total, files };
+}
+
+export const getDiskStats = async (_req, res) => {
+  try {
+    const ROOT = process.cwd();
+    const DATA_DIR = path.join(ROOT, 'data');
+
+    // Filesystem totals.
+    let disk = null;
+    try {
+      const st = await fsp.statfs(DATA_DIR);
+      const blockSize = Number(st.bsize || 0);
+      const total = Number(st.blocks || 0) * blockSize;
+      const free  = Number(st.bavail || st.bfree || 0) * blockSize;
+      disk = { totalBytes: total, freeBytes: free, usedBytes: Math.max(0, total - free) };
+    } catch (e) {
+      logger.warn('admin disk statfs failed', e.message);
+    }
+
+    // SQLite — main db plus WAL & SHM if present.
+    const sqliteFiles = ['sid.db', 'sid.db-wal', 'sid.db-shm'];
+    let sqliteSize = 0, sqliteCount = 0;
+    for (const fname of sqliteFiles) {
+      try {
+        const st = await fsp.stat(path.join(DATA_DIR, fname));
+        if (st.isFile()) { sqliteSize += st.size; sqliteCount += 1 }
+      } catch {}
+    }
+
+    const buckets = [{
+      id: 'sqlite', label: 'SQLite database', emoji: '💾',
+      path: 'data/sid.db', sizeBytes: sqliteSize, fileCount: sqliteCount,
+    }];
+
+    // Walk the binary lanes.
+    for (const def of BUCKET_DEFS) {
+      const abs = path.join(ROOT, def.rel);
+      const w = await walkSize(abs);
+      buckets.push({
+        id: def.id, label: def.label, emoji: def.emoji,
+        path: def.rel, sizeBytes: w.total, fileCount: w.files,
+      });
+    }
+
+    // Loose JSON state files under data/ (everything not already counted).
+    let other = 0, otherCount = 0;
+    try {
+      const entries = await fsp.readdir(DATA_DIR, { withFileTypes: true });
+      const known = new Set(['sid.db', 'sid.db-wal', 'sid.db-shm', 'combined-videos', 'yt-downloads']);
+      for (const ent of entries) {
+        if (known.has(ent.name)) continue
+        const full = path.join(DATA_DIR, ent.name);
+        if (ent.isFile()) {
+          try { const st = await fsp.stat(full); other += st.size; otherCount += 1 } catch {}
+        } else if (ent.isDirectory()) {
+          const w = await walkSize(full); other += w.total; otherCount += w.files;
+        }
+      }
+    } catch {}
+    buckets.push({
+      id: 'other', label: 'State files',  emoji: '📦',
+      path: 'data/*.json', sizeBytes: other, fileCount: otherCount,
+    });
+
+    // Per-domain row counts that the user mentally maps to "size".
+    const domainTables = [
+      { id: 'chess_games',     label: 'Chess games (PGN)',  table: 'chess_games' },
+      { id: 'chess_matches',   label: 'Live chess matches', table: 'chess_matches' },
+      { id: 'videos',          label: 'Generated videos',   table: 'videos' },
+      { id: 'enhanced_images', label: 'Enhanced images',    table: 'enhanced_images' },
+      { id: 'mesh_jobs',       label: 'Mesh jobs',          table: 'mesh_jobs' },
+      { id: 'lipsync_jobs',    label: 'Lipsync jobs',       table: 'lipsync_jobs' },
+      { id: 'audio_jobs',      label: 'Audio jobs',         table: 'audio_jobs' },
+      { id: 'cinema_projects', label: 'Cinema projects',    table: 'cinema_projects' },
+      { id: 'deepfake_jobs',   label: 'Deepfake jobs',      table: 'deepfake_jobs' },
+      { id: 'chat_messages',   label: 'Chat messages',      table: 'chat_messages' },
+    ];
+    const domains = [];
+    for (const d of domainTables) {
+      try {
+        const row = db.prepare(`SELECT COUNT(*) AS n FROM ${d.table}`).get();
+        domains.push({ ...d, rows: Number(row?.n || 0) });
+      } catch {
+        // Table missing on older DBs — skip.
+      }
+    }
+
+    const tracked = buckets.reduce((s, b) => s + b.sizeBytes, 0);
+    return success(res, { disk, buckets, trackedBytes: tracked, domains });
+  } catch (err) {
+    logger.error('admin getDiskStats failed', err.message);
     return error(res, err.message, 500);
   }
 };

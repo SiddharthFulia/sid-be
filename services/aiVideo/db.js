@@ -304,6 +304,10 @@ addColumnIfMissing('enhanced_images', 'customModel', 'TEXT'); // checkpoint over
 // Optional negative prompt — forwarded to ComfyUI's negative CLIPTextEncode
 // for SDXL/Pony/Flux workflows. Helps tame "deformed, watermark, blurry" etc.
 addColumnIfMissing('enhanced_images', 'negativePrompt', 'TEXT');
+// Combined-video vault propagation: if any source video used in a combine
+// was vault-flagged then the resulting combined row is too — so it shows
+// up in the Vault library and stays hidden from anonymous viewers.
+addColumnIfMissing('combined_videos', 'vault', 'INTEGER NOT NULL DEFAULT 0');
 
 // Speech-to-Text result. `audio_jobs.kind='stt'` rows store the transcribed
 // text here instead of in a Cloudinary URL — the "output" of STT is plain
