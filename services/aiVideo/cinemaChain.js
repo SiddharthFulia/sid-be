@@ -38,7 +38,7 @@ import { createInflightJob } from './storage.js';
 import { getLocalVideo } from './videoStore.js';
 import { uploadSourceImage } from './cloudinaryStore.js';
 import { publishJob } from './messageQueue.js';
-import { appendLog } from './logStore.js';
+import { appendLog, tagJobsToRender } from './logStore.js';
 import { db } from './db.js';
 import { createCombine, updateCombine } from '../ffmpeg/combineStore.js';
 import { combineVideos } from '../ffmpeg/combine.js';
@@ -155,6 +155,12 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
   publishJob({ provider, role, jobId: job.videoId, videoId: job.videoId })
     .catch((err) => logger.warn(`Cinema chain publish skipped: ${err.message}`));
 
+  // Tag the new shot's jobId with the parent renderId so every log
+  // line written by the worker (or by the postJobProgress controller)
+  // lands in job_logs.cinemaRenderId. The unified
+  // /api/cinema/render/:renderId/logs endpoint reads from there.
+  tagJobsToRender(render.renderId, [job.videoId]);
+
   return job;
 }
 
@@ -164,7 +170,9 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
 async function runCombineAsync({ render, project, combineId, sourceUrls }) {
   try {
     const result = await combineVideos(combineId, sourceUrls, {
-      onLog:      (line) => appendLog(combineId, 'combine', line),
+      // Explicit renderId on every combine log so the unified stream
+      // catches them even if the cache hasn't seen this combineId yet.
+      onLog:      (line) => appendLog(String(combineId), 'combine', line, render.renderId),
       onProgress: (pct)  => updateCombine(combineId, { progress: pct }),
     });
     updateCombine(combineId, {
@@ -240,6 +248,9 @@ async function triggerCombine(render, project) {
   });
   updateCinemaRender(render.renderId, { combineJobId: combine.id });
   updateCombine(combine.id, { status: 'processing', progress: 0 });
+  // Tag the combine's id under lane='combine' so its ffmpeg log lines
+  // show up in the unified-by-render stream too.
+  tagJobsToRender(render.renderId, [String(combine.id)]);
 
   // Fire-and-forget — combine runs in the background; the worker
   // callback returns immediately and the render row gets updated when

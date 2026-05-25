@@ -495,6 +495,9 @@ import {
   deleteCinemaRender, listCinemaRenders,
 } from '../../services/aiVideo/cinemaRenderStore.js';
 import { notifyCinemaChainOfCompletion } from '../../services/aiVideo/cinemaChain.js';
+import {
+  tagJobsToRender, listLogsByRender,
+} from '../../services/aiVideo/logStore.js';
 
 // POST /api/cinema/:projectId/render
 // Creates a render row tied to the project. Returns { renderId } so the
@@ -532,8 +535,56 @@ export const getCinemaRenderStatus = (req, res) => {
   const row = getCinemaRender(req.params.renderId);
   if (!row) return error(res, 'Cinema render not found', 404);
   if (row.vault && !req.vault) return error(res, 'Cinema render not found', 404);
+  // Re-tag the in-memory jobId→renderId cache on every status read.
+  // Cheap (just a Map set per shot) and keeps the cache warm after
+  // process restarts so worker logs land with the right cinemaRenderId.
+  tagJobsToRender(row.renderId, [
+    ...(row.shotJobIds || []).filter(Boolean),
+    row.combineJobId != null ? String(row.combineJobId) : null,
+  ].filter(Boolean));
   const project = getCinemaProject(row.projectId);
   return success(res, { ...row, project });
+};
+
+// GET /api/cinema/render/:renderId/logs?since=<ms>&limit=500
+// Unified log stream for a whole cinema render. Every line written for
+// any shot's video job + the combine step lands in job_logs.cinemaRenderId
+// (either via the in-memory cache, or via explicit stamping by the
+// orchestrator). This endpoint returns every line in chronological
+// order, annotated with jobId + lane + shotIndex, so the FE can render
+// one timeline instead of N per-shot accordions.
+export const getCinemaRenderLogs = (req, res) => {
+  const row = getCinemaRender(req.params.renderId);
+  if (!row) return error(res, 'Cinema render not found', 404);
+  if (row.vault && !req.vault) return error(res, 'Cinema render not found', 404);
+
+  const since = parseInt(req.query.since, 10) || 0;
+  const limit = parseInt(req.query.limit, 10) || 500;
+  const raw = listLogsByRender({ renderId: row.renderId, sinceTs: since, limit });
+
+  // Annotate each log line with which shot it belongs to (or -1 for
+  // the combine step). Lookup table built once per request.
+  const jobIdToShotIndex = new Map();
+  (row.shotJobIds || []).forEach((jobId, idx) => {
+    if (jobId) jobIdToShotIndex.set(jobId, idx);
+  });
+  const combineIdStr = row.combineJobId != null ? String(row.combineJobId) : null;
+
+  const logs = raw.map(line => {
+    const shotIndex = jobIdToShotIndex.has(line.jobId)
+      ? jobIdToShotIndex.get(line.jobId)
+      : (combineIdStr && line.jobId === combineIdStr ? -1 : null);
+    return {
+      ts: line.ts,
+      msg: line.msg,
+      jobId: line.jobId,
+      lane: line.lane,
+      shotIndex,                          // 0..N-1 for shots, -1 for combine, null if unknown
+    };
+  });
+
+  const nextSince = logs.length ? logs[logs.length - 1].ts : since;
+  return success(res, { logs, nextSince });
 };
 
 // PATCH /api/cinema/render/:renderId

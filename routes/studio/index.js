@@ -11,6 +11,7 @@ import {
   postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots, postCinemaBulkAction,
   postCinemaRender, getCinemaRenderStatus, patchCinemaRender,
   getCinemaRendersList, deleteCinemaRenderCtrl, postCinemaRenderResume,
+  getCinemaRenderLogs,
 } from '../../controllers/studio/index.js';
 
 const router = Router();
@@ -42,6 +43,7 @@ router.post(  '/cinema/bulk',              maybeVault, postCinemaBulkAction);
 // get swallowed by the projectId route — Express matches in order.
 router.post(  '/cinema/:projectId/render',         maybeVault, postCinemaRender);
 router.get(   '/cinema/render/:renderId',          maybeVault, getCinemaRenderStatus);
+router.get(   '/cinema/render/:renderId/logs',     maybeVault, getCinemaRenderLogs);
 router.patch( '/cinema/render/:renderId',          maybeVault, patchCinemaRender);
 router.post(  '/cinema/render/:renderId/resume',   maybeVault, postCinemaRenderResume);
 router.delete('/cinema/render/:renderId',          maybeVault, deleteCinemaRenderCtrl);

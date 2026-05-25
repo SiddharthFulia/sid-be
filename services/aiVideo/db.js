@@ -315,6 +315,14 @@ addColumnIfMissing('combined_videos', 'vault', 'INTEGER NOT NULL DEFAULT 0');
 // before this lane existed) keep working with the legacy default.
 addColumnIfMissing('cinema_renders', 'provider',      'TEXT');
 addColumnIfMissing('cinema_renders', 'optimizedMode', 'TEXT');
+// job_logs.cinemaRenderId — when a log line belongs to a shot in a
+// cinema render, this column carries the parent renderId. Lets the
+// new GET /api/cinema/render/:renderId/logs endpoint stream every
+// log line across all 4 (or whatever N) shots PLUS the combine step
+// in one ordered timeline, so the user can scroll the whole render
+// without hopping between per-shot accordions. Nullable so non-cinema
+// jobs (regular AI Video, Image, etc.) leave it blank.
+addColumnIfMissing('job_logs', 'cinemaRenderId', 'TEXT');
 // ─── Mesh job advanced controls (TRELLIS, TRELLIS v2, Hunyuan3D) ────
 // `seed`             — reproducibility across all engines
 // `guidance`         — classifier-free guidance scale; for TRELLIS this

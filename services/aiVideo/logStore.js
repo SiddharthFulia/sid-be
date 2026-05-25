@@ -15,10 +15,10 @@
 
 import { db } from './db.js';
 
-const VALID_LANES = new Set(['video', 'image', 'lipsync', 'audio', 'mesh']);
+const VALID_LANES = new Set(['video', 'image', 'lipsync', 'audio', 'mesh', 'combine', 'deepfake']);
 
 const insertStmt = db.prepare(
-  'INSERT INTO job_logs (jobId, lane, ts, msg) VALUES (@jobId, @lane, @ts, @msg)'
+  'INSERT INTO job_logs (jobId, lane, ts, msg, cinemaRenderId) VALUES (@jobId, @lane, @ts, @msg, @cinemaRenderId)'
 );
 const listSinceStmt = db.prepare(
   `SELECT ts, msg FROM job_logs
@@ -32,16 +32,52 @@ const listAllStmt = db.prepare(
     ORDER BY ts DESC
     LIMIT @limit`
 );
+// Unified-by-render query — every log across every shot + the combine
+// step in one chronologically-ordered stream. Annotated with jobId
+// and lane so the FE can group / colour by shot.
+const listByRenderStmt = db.prepare(
+  `SELECT jobId, lane, ts, msg FROM job_logs
+    WHERE cinemaRenderId = @renderId AND ts > @since
+    ORDER BY ts ASC
+    LIMIT @limit`
+);
+
+// Tiny in-memory cache: jobId → renderId. Populated by tagJobsToRender()
+// when the cinema chain queues a shot, consulted by appendLog so worker
+// logs land with the right cinemaRenderId WITHOUT a SQL lookup on every
+// log write. Cleared on process restart — that's fine; logs written in
+// the gap stay untagged, and the chain unblocks once the next shot of
+// the render kicks off (which re-populates the cache via tagJobsToRender).
+const jobIdToRenderId = new Map();
+
+export function tagJobsToRender(renderId, jobIds = []) {
+  if (!renderId || !Array.isArray(jobIds)) return;
+  for (const jobId of jobIds) {
+    if (jobId) jobIdToRenderId.set(jobId, renderId);
+  }
+}
+
+export function untagJob(jobId) {
+  if (jobId) jobIdToRenderId.delete(jobId);
+}
 
 /**
  * Append a single log line. Truncates msg at 300 chars to keep rows small.
+ * If the jobId has been tagged with a cinema renderId (via
+ * tagJobsToRender), the row is stamped with that renderId so the unified
+ * /api/cinema/render/:renderId/logs endpoint can include it. Optional
+ * `explicitRenderId` overrides the cache (used by the orchestrator for
+ * combine-step logs where the cache might not be populated yet).
  * Returns the inserted row's id.
  */
-export function appendLog(jobId, lane, msg) {
+export function appendLog(jobId, lane, msg, explicitRenderId = null) {
   if (!jobId || !VALID_LANES.has(lane)) return null;
   const line = String(msg || '').slice(0, 300);
   if (!line) return null;
-  const info = insertStmt.run({ jobId, lane, ts: Date.now(), msg: line });
+  const cinemaRenderId = explicitRenderId || jobIdToRenderId.get(jobId) || null;
+  const info = insertStmt.run({
+    jobId, lane, ts: Date.now(), msg: line, cinemaRenderId,
+  });
   return info.lastInsertRowid;
 }
 
@@ -58,6 +94,15 @@ export function listLogs({ jobId, lane, sinceTs = 0, limit = 80 } = {}) {
   }
   // Initial load — grab last N descending, then flip to chronological order
   return listAllStmt.all({ jobId, lane, limit: safeLimit }).reverse();
+}
+
+// Stream of every log written under a cinema renderId, across every
+// shot + the combine step, in one ordered timeline. Each row carries
+// its own jobId + lane so the FE can colour by shot / step.
+export function listLogsByRender({ renderId, sinceTs = 0, limit = 500 } = {}) {
+  if (!renderId) return [];
+  const safeLimit = Math.min(Math.max(limit, 1), 2000);
+  return listByRenderStmt.all({ renderId, since: sinceTs, limit: safeLimit });
 }
 
 /** Convenience for status endpoints — returns the last 80 entries. */
