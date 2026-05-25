@@ -10,7 +10,7 @@
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import {
-  createMeshJob, getMeshJob, listMeshJobs,
+  createMeshJob, getMeshJob, listMeshJobs, deleteMeshJob,
 } from '../../services/aiVideo/meshStore.js';
 import { publishMeshJob } from '../../services/aiVideo/messageQueue.js';
 
@@ -194,19 +194,36 @@ export const getMeshStatus = (req, res) => {
   return success(res, rest);
 };
 
-// GET /api/mesh/list?status=...&limit=...
+// GET /api/mesh/list?status=...&page=...&pageSize=...
+// Returns `{ items, total, page, pageSize }`. items are slimmed of the
+// chunky per-row `logs` field so a 200-row page stays well under 100KB.
 export const listMeshJobsCtrl = (req, res) => {
   try {
-    const status = typeof req.query.status === 'string' && req.query.status
+    const status = typeof req.query.status === 'string' && req.query.status && req.query.status !== 'all'
       ? req.query.status
       : undefined;
-    const limit = parseInt(req.query.limit, 10) || 24;
-    const items = listMeshJobs({ status, limit });
-    // Strip per-row `logs` to keep the list payload small.
-    const slim = items.map(({ logs: _logs, ...rest }) => rest);
-    return success(res, { items: slim, total: slim.length });
+    const page = parseInt(req.query.page, 10) || 1;
+    const pageSize = parseInt(req.query.pageSize, 10) || parseInt(req.query.limit, 10) || 24;
+    const result = listMeshJobs({ status, page, pageSize });
+    const slim = result.items.map(({ logs: _logs, ...rest }) => rest);
+    return success(res, { ...result, items: slim });
   } catch (err) {
     logger.error('Mesh list failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// DELETE /api/mesh/:jobId — removes the row. Cloudinary cleanup is best-
+// effort and silent (cloudinary URLs orphan-clean themselves on a
+// monthly cron; mesh GLBs aren't expensive enough to roundtrip a delete
+// API call inline).
+export const deleteMeshJobCtrl = (req, res) => {
+  try {
+    const ok = deleteMeshJob(req.params.jobId);
+    if (!ok) return error(res, 'Mesh job not found', 404);
+    return success(res, { ok: true, jobId: req.params.jobId });
+  } catch (err) {
+    logger.error('Mesh delete failed', err.message);
     return error(res, err.message);
   }
 };

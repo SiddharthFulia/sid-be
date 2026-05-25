@@ -98,19 +98,33 @@ export function deleteMeshJob(jobId) {
   return deleteStmt.run(jobId).changes > 0;
 }
 
-// Paginated list with optional status filter. Mirrors the chat-store shape:
-// returns the rows array directly (no pagination envelope) so the FE can
-// drop them straight into a grid.
-export function listMeshJobs({ status, limit = 24 } = {}) {
-  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 24, 1), 200);
-  if (status) {
-    return db.prepare(
-      `SELECT * FROM mesh_jobs WHERE status = ? ORDER BY createdAt DESC LIMIT ?`
-    ).all(status, safeLimit);
-  }
-  return db.prepare(
-    `SELECT * FROM mesh_jobs ORDER BY createdAt DESC LIMIT ?`
-  ).all(safeLimit);
+// Paginated list with optional status filter. Returns
+// `{ items, total, page, pageSize }` so the FE library can render with
+// antd Pagination + total counter. pageSize clamped to [1, 1000] per
+// the same convention combine uses.
+export function listMeshJobs({ status, page = 1, pageSize = 24, limit } = {}) {
+  // Back-compat: callers that pass `limit` instead of `pageSize` still work.
+  const requested = pageSize ?? limit ?? 24;
+  const pg = Math.max(parseInt(page, 10) || 1, 1);
+  const ps = Math.min(Math.max(parseInt(requested, 10) || 24, 1), 1000);
+  const offset = (pg - 1) * ps;
+
+  const where = [];
+  const params = {};
+  if (status) { where.push('status = @status'); params.status = status; }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+  const items = db.prepare(
+    `SELECT * FROM mesh_jobs ${whereSql}
+       ORDER BY createdAt DESC
+       LIMIT @ps OFFSET @offset`
+  ).all({ ...params, ps, offset });
+
+  const totalRow = db.prepare(
+    `SELECT COUNT(*) AS n FROM mesh_jobs ${whereSql}`
+  ).get(params);
+
+  return { items, total: Number(totalRow?.n || 0), page: pg, pageSize: ps };
 }
 
 // Cheap GC — older completed/failed rows after N days. Call from a cron
