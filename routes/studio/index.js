@@ -10,7 +10,7 @@ import {
   postAudio, getAudioStatus, getAudioList, deleteAudio, postAudioBulkAction,
   postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots, postCinemaBulkAction,
   postCinemaRender, getCinemaRenderStatus, patchCinemaRender,
-  getCinemaRendersList, deleteCinemaRenderCtrl,
+  getCinemaRendersList, deleteCinemaRenderCtrl, postCinemaRenderResume,
 } from '../../controllers/studio/index.js';
 
 const router = Router();
@@ -40,10 +40,11 @@ router.post(  '/cinema/bulk',              maybeVault, postCinemaBulkAction);
 // Cinema renders (per-attempt resumable state). Listed BEFORE the
 // `/cinema/:projectId` route above so the `/render/...` path doesn't
 // get swallowed by the projectId route — Express matches in order.
-router.post(  '/cinema/:projectId/render',    maybeVault, postCinemaRender);
-router.get(   '/cinema/render/:renderId',     maybeVault, getCinemaRenderStatus);
-router.patch( '/cinema/render/:renderId',     maybeVault, patchCinemaRender);
-router.delete('/cinema/render/:renderId',     maybeVault, deleteCinemaRenderCtrl);
-router.get(   '/cinema/renders',              maybeVault, getCinemaRendersList);
+router.post(  '/cinema/:projectId/render',         maybeVault, postCinemaRender);
+router.get(   '/cinema/render/:renderId',          maybeVault, getCinemaRenderStatus);
+router.patch( '/cinema/render/:renderId',          maybeVault, patchCinemaRender);
+router.post(  '/cinema/render/:renderId/resume',   maybeVault, postCinemaRenderResume);
+router.delete('/cinema/render/:renderId',          maybeVault, deleteCinemaRenderCtrl);
+router.get(   '/cinema/renders',                   maybeVault, getCinemaRendersList);
 
 export default router;

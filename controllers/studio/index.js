@@ -494,6 +494,7 @@ import {
   createCinemaRender, getCinemaRender, updateCinemaRender,
   deleteCinemaRender, listCinemaRenders,
 } from '../../services/aiVideo/cinemaRenderStore.js';
+import { notifyCinemaChainOfCompletion } from '../../services/aiVideo/cinemaChain.js';
 
 // POST /api/cinema/:projectId/render
 // Creates a render row tied to the project. Returns { renderId } so the
@@ -581,6 +582,45 @@ export const getCinemaRendersList = (req, res) => {
     logger.error('Cinema renders list failed', err.message);
     return error(res, err.message);
   }
+};
+
+// POST /api/cinema/render/:renderId/resume
+// User clicked "Resume from shot N" after a failed / cancelled render.
+// Re-uses the same chain machinery: figure out the LAST shot that has
+// a completed videoId on the videos table, then call
+// notifyCinemaChainOfCompletion on it. The orchestrator does the right
+// thing — extracts that shot's last frame and queues the next shot, or
+// triggers combine if every shot is already done.
+//
+// If NO shots are done yet, this endpoint short-circuits to a hint —
+// the FE startRender path should submit shot 1 in that case, not /resume.
+export const postCinemaRenderResume = async (req, res) => {
+  const row = getCinemaRender(req.params.renderId);
+  if (!row) return error(res, 'Cinema render not found', 404);
+  if (row.vault && !req.vault) return error(res, 'Cinema render not found', 404);
+
+  // Find the last index with a populated jobId whose video has a
+  // completed entry in the videos table. That's where the BE chain
+  // last "left off".
+  const { getLocalVideo } = await import('../../services/aiVideo/videoStore.js');
+  let lastCompletedIdx = -1;
+  for (let idx = row.shotJobIds.length - 1; idx >= 0; idx -= 1) {
+    const jobId = row.shotJobIds[idx];
+    if (!jobId) continue;
+    const video = getLocalVideo(jobId);
+    if (video?.videoUrl) { lastCompletedIdx = idx; break; }
+  }
+
+  if (lastCompletedIdx === -1) {
+    return error(res, 'No completed shots yet — call startRender (POST /api/ai-video/generate for shot 1) before /resume', 400);
+  }
+
+  // Clear the error state + flip to rendering so the FE poll sees
+  // progress immediately. The orchestrator will overwrite phase as
+  // it does its work.
+  updateCinemaRender(row.renderId, { status: 'rendering', phase: 'rendering', error: null });
+  notifyCinemaChainOfCompletion(row.shotJobIds[lastCompletedIdx]);
+  return success(res, { ok: true, resumedFromShotIndex: lastCompletedIdx });
 };
 
 // DELETE /api/cinema/render/:renderId

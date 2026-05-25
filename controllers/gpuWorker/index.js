@@ -15,6 +15,9 @@ function normalizeRole(role) {
 import logger from '../../helpers/logger.js';
 import { recordFailure } from '../../services/aiVideo/failureStore.js';
 import { recordVideo } from '../../services/aiVideo/videoStore.js';
+import {
+  notifyCinemaChainOfCompletion, notifyCinemaChainOfFailure,
+} from '../../services/aiVideo/cinemaChain.js';
 import { generateGroqCaption } from '../../services/aiVideo/caption.js';
 import { updateImage, appendImageLog } from '../../services/aiVideo/enhancedImageStore.js';
 import { updateLipsyncJob, appendLipsyncLog } from '../../services/aiVideo/lipsyncStore.js';
@@ -148,6 +151,15 @@ export const postJobComplete = async (req, res) => {
 
   await removeInflightJob(jobId);
   logger.info(`Job ${jobId} completed by worker → ${videoUrl}${caption ? ' (with caption)' : ''}`);
+
+  // Cinema chain hook: if this videoId belongs to an active cinema_render,
+  // advance the chain (extract last frame → upload → queue next shot,
+  // or trigger combine on the last shot). Fire-and-forget — the BE
+  // orchestrator runs in the background; the worker can move to the
+  // next job immediately. No-op when the videoId isn't part of any
+  // render, so this is safe for every video completion.
+  notifyCinemaChainOfCompletion(jobId);
+
   return success(res, { ok: true, videoId: jobId, videoUrl, caption });
 };
 
@@ -179,6 +191,10 @@ export const postJobFailed = async (req, res) => {
     } catch (e) {
       logger.error('Failed to record failure audit row', e.message);
     }
+    // Cinema chain hook: if a job in an active render terminally
+    // failed, flip the render to failed so the page can show the
+    // error + the Resume button.
+    notifyCinemaChainOfFailure(jobId, errMsg);
   }
 
   logger.warn(`Job ${jobId} failed (attempt ${attemptCount + 1}/3): ${errMsg}. ${shouldRequeue ? 'Requeued.' : 'Final.'}`);
