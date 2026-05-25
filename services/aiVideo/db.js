@@ -331,6 +331,12 @@ addColumnIfMissing('mesh_jobs', 'meshQuality',       'INTEGER');
 addColumnIfMissing('mesh_jobs', 'textureQuality',    'INTEGER');
 addColumnIfMissing('mesh_jobs', 'textureResolution', 'INTEGER');
 addColumnIfMissing('mesh_jobs', 'polygonTarget',     'INTEGER');
+// Reference image for image-conditioned mesh generation. TRELLIS image-
+// large (default for `trellis` / `trellis-v2`) and Hunyuan3D-2 both take
+// a single RGB image as the structural conditioning signal — the worker
+// pulls this URL, decodes locally, and feeds it into the pipeline. Null
+// = pure text-to-3D (Shap-E, TripoSR fallback, or TRELLIS-text-large).
+addColumnIfMissing('mesh_jobs', 'imageUrl',          'TEXT');
 
 // Speech-to-Text result. `audio_jobs.kind='stt'` rows store the transcribed
 // text here instead of in a Cloudinary URL — the "output" of STT is plain

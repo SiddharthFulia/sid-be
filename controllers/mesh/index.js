@@ -37,6 +37,11 @@ const VALID_MODELS = new Set([
   'shap-e', 'tripo', 'trellis', 'trellis-v2', 'hunyuan3d',
 ]);
 const QUALITY_MODELS = new Set(['trellis', 'trellis-v2', 'hunyuan3d']);
+// Engines that natively accept a reference image (image-to-3D pipeline).
+// Shap-E is pure text; TripoSR auto-generates its own image via Flux so
+// a user-supplied reference would conflict with its single-image step.
+const IMAGE_CAPABLE_MODELS = new Set(['trellis', 'trellis-v2', 'hunyuan3d']);
+const IMAGE_URL_MAX_CHARS = 600;
 
 const PROMPT_MAX_CHARS = 600;
 const STEPS_MIN = 16;
@@ -94,6 +99,7 @@ export const postCreateMeshJob = (req, res) => {
       textureQuality,
       textureResolution,
       polygonTarget,
+      imageUrl,
     } = req.body || {};
 
     // Validate prompt.
@@ -131,6 +137,24 @@ export const postCreateMeshJob = (req, res) => {
     const safePolygonTarget = polygonTarget != null
       ? clampInt(polygonTarget, POLYGON_MIN, POLYGON_MAX, null) : null;
 
+    // Reference image — accepted only for the image-capable engines.
+    // Must be a string URL starting with http(s):// to keep us from
+    // accidentally storing data: blobs (too big) or local paths.
+    let safeImageUrl = null;
+    if (typeof imageUrl === 'string' && imageUrl.trim()) {
+      const trimmed = imageUrl.trim();
+      if (!IMAGE_CAPABLE_MODELS.has(model)) {
+        return error(res, `imageUrl is only supported on: ${[...IMAGE_CAPABLE_MODELS].join(', ')}`, 400);
+      }
+      if (!/^https?:\/\//i.test(trimmed)) {
+        return error(res, 'imageUrl must start with http:// or https://', 400);
+      }
+      if (trimmed.length > IMAGE_URL_MAX_CHARS) {
+        return error(res, `imageUrl must be ≤ ${IMAGE_URL_MAX_CHARS} characters`, 400);
+      }
+      safeImageUrl = trimmed;
+    }
+
     const job = createMeshJob({
       prompt, model, steps: safeSteps,
       seed: safeSeed,
@@ -140,6 +164,7 @@ export const postCreateMeshJob = (req, res) => {
       textureQuality: safeTextureQuality,
       textureResolution: safeTextureRes,
       polygonTarget: safePolygonTarget,
+      imageUrl: safeImageUrl,
     });
     publishMeshJob({ jobId: job.jobId, model }).catch(e =>
       logger.warn(`Mesh publish skipped: ${e.message}`));
@@ -147,7 +172,8 @@ export const postCreateMeshJob = (req, res) => {
     const qualityTag = QUALITY_MODELS.has(model)
       ? ` | mesh=${safeMeshQuality ?? '-'} tex=${safeTextureQuality ?? '-'} texRes=${safeTextureRes ?? '-'}`
       : '';
-    logger.info(`MESH NEW | ${job.jobId} | model=${model} | steps=${safeSteps}${qualityTag} | prompt="${prompt.slice(0, 80)}"`);
+    const imageTag = safeImageUrl ? ' | img=Y' : '';
+    logger.info(`MESH NEW | ${job.jobId} | model=${model} | steps=${safeSteps}${qualityTag}${imageTag} | prompt="${prompt.slice(0, 80)}"`);
     return success(res, {
       jobId: job.jobId,
       status: job.status,

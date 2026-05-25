@@ -15,6 +15,7 @@ const insertStmt = db.prepare(`INSERT INTO mesh_jobs (
   jobId, status, prompt, model, steps,
   seed, guidance, negativePrompt,
   meshQuality, textureQuality, textureResolution, polygonTarget,
+  imageUrl,
   glbUrl, publicId, bytes, elapsedMs,
   error, workerId, logs, progressMessage,
   createdAt, startedAt, completedAt
@@ -22,6 +23,7 @@ const insertStmt = db.prepare(`INSERT INTO mesh_jobs (
   @jobId, @status, @prompt, @model, @steps,
   @seed, @guidance, @negativePrompt,
   @meshQuality, @textureQuality, @textureResolution, @polygonTarget,
+  @imageUrl,
   @glbUrl, @publicId, @bytes, @elapsedMs,
   @error, @workerId, @logs, @progressMessage,
   @createdAt, @startedAt, @completedAt
@@ -34,6 +36,7 @@ const COLUMNS = new Set([
   'status', 'prompt', 'model', 'steps',
   'seed', 'guidance', 'negativePrompt',
   'meshQuality', 'textureQuality', 'textureResolution', 'polygonTarget',
+  'imageUrl',
   'glbUrl', 'publicId', 'bytes', 'elapsedMs',
   'error', 'workerId', 'logs', 'progressMessage',
   'startedAt', 'completedAt',
@@ -44,6 +47,7 @@ export function createMeshJob({
   seed = null, guidance = null, negativePrompt = null,
   meshQuality = null, textureQuality = null,
   textureResolution = null, polygonTarget = null,
+  imageUrl = null,
 }) {
   const row = {
     jobId: newMeshJobId(),
@@ -58,6 +62,7 @@ export function createMeshJob({
     textureQuality,
     textureResolution,
     polygonTarget,
+    imageUrl,
     glbUrl: null,
     publicId: null,
     bytes: null,
