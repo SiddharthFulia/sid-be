@@ -375,16 +375,30 @@ export const postCinema = async (req, res) => {
       return error(res, 'shotCount must be 2-12', 400);
     }
 
+    // Duration-aware sizing band. The video models can only produce so
+    // much motion per second of output — a 360° rotation or multi-beat
+    // action ("then ... then ...") that's fine in a 7s clip turns into
+    // smeared frame chaos when squeezed into 3s. The system prompt
+    // hands Groq a budget so the per-shot prose actually fits.
+    const safeDuration = Math.round(durationPerShot);
+    const durationBand = safeDuration <= 3
+      ? '12-20 words. ONE static or simple motion only. NO "then / next / after". NO 360° / multi-axis camera moves — they don\'t resolve in 3s.'
+      : safeDuration <= 5
+      ? '20-35 words. ONE clear action with an optional second beat. Mention lighting (golden hour, neon, etc.). Single-axis camera move okay (dolly, pan, push).'
+      : '30-50 words. Can describe TWO connected actions (intro → payoff). Lighting + camera-move detail welcome (drone, crane, tracking shot).';
+
     // Use Groq to split the master prompt into N shot prompts.
-    const system = `You are a cinema director breaking down a one-line idea into ${shotCount} sequential shot prompts for AI video generation.
+    const system = `You are a cinema director breaking down a one-line idea into ${shotCount} sequential shot prompts for AI video generation. Each shot will be rendered as a ${safeDuration}-second clip on a single-model pipeline.
 
 Output rules:
 - EXACTLY ${shotCount} shot prompts, separated by newlines.
-- Each line is ONE shot prompt (15-30 words, no bullets, no numbering).
-- Shots should flow narratively from the master idea.
+- Each line is ONE shot prompt sized for a ${safeDuration}s clip:
+    ${durationBand}
+- Shots should flow narratively from the master idea (act 1 → climax → resolution shape).
 - Each prompt describes: subject, action, camera framing, lighting.
 - Tone & subject continuity across shots — same person/place/style.
-- Just output the prompts. No preamble, no explanation, no quotes.`;
+- NEVER use "then", "and then", "after that", "later" — video models render ONE continuous moment per clip, not a sequence.
+- Just output the prompts. No preamble, no explanation, no quotes, no numbering.`;
 
     let shotPrompts = [];
     try {
@@ -473,15 +487,118 @@ export const patchCinemaShots = (req, res) => {
   const row = getCinemaProject(req.params.projectId);
   if (!row) return error(res, 'Not found', 404);
   if (row.vault && !req.vault) return error(res, 'Not found', 404);
-  const { shotJobIds, status, outputUrl, errorMsg } = req.body || {};
+  const { shotJobIds, shotPrompts, status, outputUrl, errorMsg } = req.body || {};
   const patch = {};
   if (Array.isArray(shotJobIds)) patch.shotJobIds = shotJobIds;
+  // Editable shot prompts — the FE planner lets the user tune each
+  // shot's prose before kicking off the render. We just trust the
+  // array shape; per-shot length validation happens client-side.
+  if (Array.isArray(shotPrompts)) {
+    patch.shotPrompts = shotPrompts
+      .map(s => typeof s === 'string' ? s.trim() : '')
+      .filter(Boolean)
+      .slice(0, row.shotCount);
+  }
   if (status) patch.status = status;
   if (outputUrl) patch.outputUrl = outputUrl;
   if (errorMsg) patch.error = errorMsg;
   if (status === 'completed' || status === 'failed') patch.completedAt = new Date().toISOString();
   const updated = updateCinemaProject(req.params.projectId, patch);
   return success(res, updated);
+};
+
+// POST /api/cinema/:projectId/shots/:shotIndex/review
+//   { currentPrompt?: string, engine?: 'groq' | 'gemini' }
+//
+// Asks the model to assess a per-shot prompt against the project's
+// duration budget. Returns:
+//   {
+//     assessment: 'too_detailed' | 'good' | 'too_vague',
+//     feedback: string,
+//     suggested: string   // a rewritten prompt the user can apply with one click
+//   }
+//
+// Groq (llama-3.3-70b) is the default — sub-second, free. Gemini is
+// stub-wired here for parity once the user wants a second opinion; we
+// pass through to the same chatGemini helper the rest of the BE uses.
+export const postCinemaShotReview = async (req, res) => {
+  try {
+    const projectId = req.params.projectId;
+    const shotIndex = parseInt(req.params.shotIndex, 10);
+    const row = getCinemaProject(projectId);
+    if (!row) return error(res, 'Cinema project not found', 404);
+    if (row.vault && !req.vault) return error(res, 'Cinema project not found', 404);
+    if (!Number.isFinite(shotIndex) || shotIndex < 0 || shotIndex >= row.shotCount) {
+      return error(res, `shotIndex must be 0..${row.shotCount - 1}`, 400);
+    }
+
+    const { currentPrompt, engine = 'groq' } = req.body || {};
+    const prompt = (typeof currentPrompt === 'string' && currentPrompt.trim())
+      ? currentPrompt.trim()
+      : (row.shotPrompts || [])[shotIndex] || '';
+    if (!prompt) return error(res, 'No prompt to review', 400);
+
+    const safeDuration = row.durationPerShot || 5;
+    const reviewSystem = `You are a video-prompt critic. The user is about to render a ${safeDuration}-second AI video clip from this prompt. Your job: decide if the prompt fits the duration budget.
+
+Budget guide:
+- ≤3s clips → 12-20 words, ONE static or simple motion, NO multi-beat actions, NO 360°/multi-axis camera moves.
+- 5s clips  → 20-35 words, ONE action + optional second beat, single-axis camera move okay.
+- 7s+ clips → 30-50 words, can have TWO connected actions, lighting + camera detail welcome.
+
+Words like "then", "and then", "after that", "later" are red flags — video models render ONE continuous moment per clip.
+
+Output STRICT JSON only (no markdown, no code fences, no preamble):
+{
+  "assessment": "too_detailed" | "good" | "too_vague",
+  "feedback":   "one short sentence explaining why, max 25 words",
+  "suggested":  "a rewritten prompt that fits the budget, applying your feedback"
+}`;
+
+    let raw = '';
+    if (engine === 'gemini') {
+      // Lazy-import so we don't pull Gemini deps when Groq is the only path.
+      const { chatGemini } = await import('../../services/ai/geminiService.js').catch(() => ({}));
+      if (typeof chatGemini !== 'function') {
+        return error(res, 'Gemini engine not configured on this BE', 503);
+      }
+      const result = await chatGemini(prompt, [], 'gemini-2.5-flash', { system: reviewSystem, temperature: 0.3 });
+      raw = (result?.reply || '').trim();
+    } else {
+      const result = await chatGroq(prompt, [], 'llama-3.3-70b', {
+        system: reviewSystem,
+        temperature: 0.3,
+        maxTokens: 400,
+      });
+      raw = (result?.reply || '').trim();
+    }
+
+    // Parse the strict JSON the model was asked for. Models sometimes
+    // wrap in ```json fences anyway — strip them defensively.
+    const stripped = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+    let parsed = null;
+    try { parsed = JSON.parse(stripped); } catch {}
+    if (!parsed || typeof parsed !== 'object') {
+      return success(res, {
+        assessment: 'good',
+        feedback: raw.slice(0, 200) || 'No structured feedback returned',
+        suggested: prompt,
+        engine,
+      });
+    }
+
+    const out = {
+      assessment: ['too_detailed', 'good', 'too_vague'].includes(parsed.assessment) ? parsed.assessment : 'good',
+      feedback:   String(parsed.feedback || '').slice(0, 400),
+      suggested:  String(parsed.suggested || prompt).slice(0, 600),
+      engine,
+    };
+    logger.info(`CINEMA REVIEW | ${projectId} | shot ${shotIndex} | ${out.assessment} | engine=${engine}`);
+    return success(res, out);
+  } catch (err) {
+    logger.error('Cinema shot review failed', err.message);
+    return error(res, err.message);
+  }
 };
 
 // ─── Cinema renders (per-attempt resumable state) ──────────────

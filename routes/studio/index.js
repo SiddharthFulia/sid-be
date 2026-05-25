@@ -11,7 +11,7 @@ import {
   postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots, postCinemaBulkAction,
   postCinemaRender, getCinemaRenderStatus, patchCinemaRender,
   getCinemaRendersList, deleteCinemaRenderCtrl, postCinemaRenderResume,
-  getCinemaRenderLogs,
+  getCinemaRenderLogs, postCinemaShotReview,
 } from '../../controllers/studio/index.js';
 
 const router = Router();
@@ -35,8 +35,9 @@ router.post(  '/cinema',                   maybeVault, postCinema);
 router.get(   '/cinema/status/:projectId', maybeVault, getCinemaStatus);
 router.get(   '/cinema/list',              maybeVault, getCinemaList);
 router.delete('/cinema/:projectId',        maybeVault, deleteCinema);
-router.patch( '/cinema/:projectId',        maybeVault, patchCinemaShots);
-router.post(  '/cinema/bulk',              maybeVault, postCinemaBulkAction);
+router.patch( '/cinema/:projectId',                       maybeVault, patchCinemaShots);
+router.post(  '/cinema/:projectId/shots/:shotIndex/review', maybeVault, postCinemaShotReview);
+router.post(  '/cinema/bulk',                             maybeVault, postCinemaBulkAction);
 
 // Cinema renders (per-attempt resumable state). Listed BEFORE the
 // `/cinema/:projectId` route above so the `/render/...` path doesn't
