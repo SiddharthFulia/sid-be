@@ -308,6 +308,29 @@ addColumnIfMissing('enhanced_images', 'negativePrompt', 'TEXT');
 // was vault-flagged then the resulting combined row is too — so it shows
 // up in the Vault library and stays hidden from anonymous viewers.
 addColumnIfMissing('combined_videos', 'vault', 'INTEGER NOT NULL DEFAULT 0');
+// ─── Mesh job advanced controls (TRELLIS, TRELLIS v2, Hunyuan3D) ────
+// `seed`             — reproducibility across all engines
+// `guidance`         — classifier-free guidance scale; for TRELLIS this
+//                      is `ss_guidance` (typical 7.5), for Hunyuan3D it
+//                      is the shape-gen DiT guidance (typical 5.0)
+// `negativePrompt`   — soft negative for Hunyuan3D (Shap-E ignores)
+// `meshQuality`      — 0..100 slider; the worker maps to engine-specific
+//                      knobs: TRELLIS → `ss_steps` (sparse-structure flow
+//                      sampling steps), Hunyuan3D → `octree_resolution`
+//                      (256 → 384 → 512 across the slider range)
+// `textureQuality`   — 0..100 slider; maps to TRELLIS `slat_steps`
+//                      (structured-latent flow) or Hunyuan3D
+//                      `texture_steps` (texture DiT inference steps)
+// `textureResolution`— 512 / 1024 / 2048 — texture map output size
+// `polygonTarget`    — target triangle count after decimation
+//                      (TRELLIS `mesh_simplify`, Hunyuan3D `target_face_num`)
+addColumnIfMissing('mesh_jobs', 'seed',              'INTEGER');
+addColumnIfMissing('mesh_jobs', 'guidance',          'REAL');
+addColumnIfMissing('mesh_jobs', 'negativePrompt',    'TEXT');
+addColumnIfMissing('mesh_jobs', 'meshQuality',       'INTEGER');
+addColumnIfMissing('mesh_jobs', 'textureQuality',    'INTEGER');
+addColumnIfMissing('mesh_jobs', 'textureResolution', 'INTEGER');
+addColumnIfMissing('mesh_jobs', 'polygonTarget',     'INTEGER');
 
 // Speech-to-Text result. `audio_jobs.kind='stt'` rows store the transcribed
 // text here instead of in a Cloudinary URL — the "output" of STT is plain

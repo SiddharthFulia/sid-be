@@ -16,22 +16,85 @@ import { publishMeshJob } from '../../services/aiVideo/messageQueue.js';
 
 // Whitelist of accepted text-to-3D models. Locked down here so the FE
 // can't sneak unknown engine slugs through to the worker.
-// shap-e   — pure text→3D (OpenAI Shap-E). Solid, ~30-60s, lower fidelity.
-// tripo    — text → Cloudflare Flux image → TripoSR. Higher fidelity,
-//            faster total (~10-15s) but quality depends on the
-//            intermediate image. Best for recognisable objects.
-const VALID_MODELS = new Set(['shap-e', 'tripo']);
+//
+//   shap-e     — OpenAI Shap-E. Pure text → 3D. Solid, ~30-60s, lower
+//                fidelity. Uses only `steps`.
+//   tripo      — Cloudflare Flux image → TripoSR. ~10-15s, higher
+//                fidelity, image-conditioned. Uses only `steps`.
+//   trellis    — Microsoft TRELLIS. Two-stage flow (sparse-structure +
+//                structured-latent) → high-quality mesh + texture.
+//                ~2-3m. Honours meshQuality / textureQuality /
+//                textureResolution / polygonTarget + seed / guidance /
+//                negativePrompt.
+//   trellis-v2 — TRELLIS v2 with the larger SLAT decoder. Same params,
+//                ~3-5m, finer mesh + cleaner texture seams.
+//   hunyuan3d  — Tencent Hunyuan3D-2. DiT shape generator + texture
+//                generator. ~4-6m. Honours the same quality params,
+//                with `meshQuality` mapped to `octree_resolution`
+//                (256 / 384 / 512) and `textureQuality` mapped to
+//                `texture_steps`.
+const VALID_MODELS = new Set([
+  'shap-e', 'tripo', 'trellis', 'trellis-v2', 'hunyuan3d',
+]);
+const QUALITY_MODELS = new Set(['trellis', 'trellis-v2', 'hunyuan3d']);
 
 const PROMPT_MAX_CHARS = 600;
 const STEPS_MIN = 16;
 const STEPS_MAX = 64;
 const STEPS_DEFAULT = 32;
+// Quality knobs — accepted on every model but only QUALITY_MODELS forward
+// them to the worker. Clamping happens server-side so the worker can trust
+// the row contents.
+const QUALITY_MIN = 0;
+const QUALITY_MAX = 100;
+const QUALITY_DEFAULT = 50;
+const VALID_TEXTURE_RES = new Set([512, 1024, 2048]);
+const POLYGON_MIN = 1000;
+const POLYGON_MAX = 250000;
+const GUIDANCE_MIN = 0;
+const GUIDANCE_MAX = 30;
+const NEGATIVE_MAX_CHARS = 400;
+
+const clampInt = (raw, min, max, fallback) => {
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+};
+const clampFloat = (raw, min, max, fallback) => {
+  const parsed = parseFloat(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+};
 
 // POST /api/mesh/generate
-//   { prompt: string, model?: 'shap-e', steps?: int (16..64, default 32) }
+//   {
+//     prompt: string,
+//     model?: 'shap-e' | 'tripo' | 'trellis' | 'trellis-v2' | 'hunyuan3d',
+//     steps?: int (16..64, default 32),
+//     // Quality knobs — only honoured on trellis / trellis-v2 / hunyuan3d.
+//     // Stored on every row so the FE round-trips the user's choice.
+//     seed?: int,
+//     guidance?: float (0..30),
+//     negativePrompt?: string (≤ 400 chars),
+//     meshQuality?: int (0..100, default 50),
+//     textureQuality?: int (0..100, default 50),
+//     textureResolution?: 512 | 1024 | 2048,
+//     polygonTarget?: int (1000..250000),
+//   }
 export const postCreateMeshJob = (req, res) => {
   try {
-    let { prompt, model = 'shap-e', steps = STEPS_DEFAULT } = req.body || {};
+    let {
+      prompt,
+      model = 'shap-e',
+      steps = STEPS_DEFAULT,
+      seed,
+      guidance,
+      negativePrompt,
+      meshQuality,
+      textureQuality,
+      textureResolution,
+      polygonTarget,
+    } = req.body || {};
 
     // Validate prompt.
     if (typeof prompt !== 'string') return error(res, 'prompt is required', 400);
@@ -46,17 +109,45 @@ export const postCreateMeshJob = (req, res) => {
       return error(res, `model must be one of: ${[...VALID_MODELS].join(', ')}`, 400);
     }
 
-    // Clamp steps to [STEPS_MIN, STEPS_MAX]. Non-integers fall back to default.
-    const stepsInt = parseInt(steps, 10);
-    const safeSteps = Number.isFinite(stepsInt)
-      ? Math.min(Math.max(stepsInt, STEPS_MIN), STEPS_MAX)
-      : STEPS_DEFAULT;
+    // Clamp steps to [STEPS_MIN, STEPS_MAX].
+    const safeSteps = clampInt(steps, STEPS_MIN, STEPS_MAX, STEPS_DEFAULT);
 
-    const job = createMeshJob({ prompt, model, steps: safeSteps });
+    // Clamp the advanced quality knobs. We store them on every row (so the
+    // FE can round-trip the user's choice for the History view) but only
+    // QUALITY_MODELS actually forward them to the worker pipeline.
+    const safeSeed = seed != null && Number.isFinite(parseInt(seed, 10))
+      ? clampInt(seed, 0, 0x7fffffff, null) : null;
+    const safeGuidance = guidance != null
+      ? clampFloat(guidance, GUIDANCE_MIN, GUIDANCE_MAX, null) : null;
+    const safeNegative = typeof negativePrompt === 'string' && negativePrompt.trim()
+      ? negativePrompt.trim().slice(0, NEGATIVE_MAX_CHARS) : null;
+    const safeMeshQuality = meshQuality != null
+      ? clampInt(meshQuality, QUALITY_MIN, QUALITY_MAX, QUALITY_DEFAULT) : null;
+    const safeTextureQuality = textureQuality != null
+      ? clampInt(textureQuality, QUALITY_MIN, QUALITY_MAX, QUALITY_DEFAULT) : null;
+    const safeTextureRes = textureResolution != null
+      && VALID_TEXTURE_RES.has(parseInt(textureResolution, 10))
+      ? parseInt(textureResolution, 10) : null;
+    const safePolygonTarget = polygonTarget != null
+      ? clampInt(polygonTarget, POLYGON_MIN, POLYGON_MAX, null) : null;
+
+    const job = createMeshJob({
+      prompt, model, steps: safeSteps,
+      seed: safeSeed,
+      guidance: safeGuidance,
+      negativePrompt: safeNegative,
+      meshQuality: safeMeshQuality,
+      textureQuality: safeTextureQuality,
+      textureResolution: safeTextureRes,
+      polygonTarget: safePolygonTarget,
+    });
     publishMeshJob({ jobId: job.jobId, model }).catch(e =>
       logger.warn(`Mesh publish skipped: ${e.message}`));
 
-    logger.info(`MESH NEW | ${job.jobId} | model=${model} | steps=${safeSteps} | prompt="${prompt.slice(0, 80)}"`);
+    const qualityTag = QUALITY_MODELS.has(model)
+      ? ` | mesh=${safeMeshQuality ?? '-'} tex=${safeTextureQuality ?? '-'} texRes=${safeTextureRes ?? '-'}`
+      : '';
+    logger.info(`MESH NEW | ${job.jobId} | model=${model} | steps=${safeSteps}${qualityTag} | prompt="${prompt.slice(0, 80)}"`);
     return success(res, {
       jobId: job.jobId,
       status: job.status,

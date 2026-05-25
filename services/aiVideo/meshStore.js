@@ -13,11 +13,15 @@ export function newMeshJobId() {
 
 const insertStmt = db.prepare(`INSERT INTO mesh_jobs (
   jobId, status, prompt, model, steps,
+  seed, guidance, negativePrompt,
+  meshQuality, textureQuality, textureResolution, polygonTarget,
   glbUrl, publicId, bytes, elapsedMs,
   error, workerId, logs, progressMessage,
   createdAt, startedAt, completedAt
 ) VALUES (
   @jobId, @status, @prompt, @model, @steps,
+  @seed, @guidance, @negativePrompt,
+  @meshQuality, @textureQuality, @textureResolution, @polygonTarget,
   @glbUrl, @publicId, @bytes, @elapsedMs,
   @error, @workerId, @logs, @progressMessage,
   @createdAt, @startedAt, @completedAt
@@ -28,18 +32,32 @@ const deleteStmt = db.prepare('DELETE FROM mesh_jobs WHERE jobId = ?');
 
 const COLUMNS = new Set([
   'status', 'prompt', 'model', 'steps',
+  'seed', 'guidance', 'negativePrompt',
+  'meshQuality', 'textureQuality', 'textureResolution', 'polygonTarget',
   'glbUrl', 'publicId', 'bytes', 'elapsedMs',
   'error', 'workerId', 'logs', 'progressMessage',
   'startedAt', 'completedAt',
 ]);
 
-export function createMeshJob({ prompt, model = 'shap-e', steps = 32 }) {
+export function createMeshJob({
+  prompt, model = 'shap-e', steps = 32,
+  seed = null, guidance = null, negativePrompt = null,
+  meshQuality = null, textureQuality = null,
+  textureResolution = null, polygonTarget = null,
+}) {
   const row = {
     jobId: newMeshJobId(),
     status: 'queued',
     prompt,
     model,
     steps,
+    seed,
+    guidance,
+    negativePrompt,
+    meshQuality,
+    textureQuality,
+    textureResolution,
+    polygonTarget,
     glbUrl: null,
     publicId: null,
     bytes: null,
