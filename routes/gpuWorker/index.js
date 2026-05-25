@@ -9,7 +9,7 @@ import {
   postLipsyncProgress, postLipsyncComplete, postLipsyncFailed,
   postAudioProgress, postAudioComplete, postAudioFailed,
   postChatJob, postChatProgress, postChatComplete, postChatFailed,
-  postMeshJob, postMeshProgress, postMeshComplete, postMeshFailed,
+  postMeshJob, postMeshProgress, postMeshComplete, postMeshCompleteBinary, postMeshFailed,
   postDeepfakeJob, postDeepfakeProgress, postDeepfakeComplete, postDeepfakeFailed,
   postYtJob, postYtProgress, postYtComplete, postYtFailed,
 } from '../../controllers/gpuWorker/index.js';
@@ -46,8 +46,9 @@ router.post('/gpu-worker/chat-failed',      postChatFailed);
 // Mesh worker callbacks (text → 3D on 5090).
 router.get( '/gpu-worker/mesh-job/:jobId',  postMeshJob);
 router.post('/gpu-worker/mesh-progress',    postMeshProgress);
-router.post('/gpu-worker/mesh-complete',    postMeshComplete);
-router.post('/gpu-worker/mesh-failed',      postMeshFailed);
+router.post('/gpu-worker/mesh-complete',         postMeshComplete);
+router.post('/gpu-worker/mesh-complete-binary',  postMeshCompleteBinary);
+router.post('/gpu-worker/mesh-failed',           postMeshFailed);
 
 // Deepfake worker callbacks (Vault-gated lane).
 router.get( '/gpu-worker/deepfake-job/:jobId', postDeepfakeJob);

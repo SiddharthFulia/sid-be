@@ -29,7 +29,21 @@ const insertStmt = db.prepare(`INSERT INTO mesh_jobs (
   @createdAt, @startedAt, @completedAt
 )`);
 
-const selectStmt = db.prepare('SELECT * FROM mesh_jobs WHERE jobId = ?');
+// SELECT * is fine for single-row reads UNTIL we started storing the
+// generated GLB as a BLOB in this table — a single row could be 100MB+
+// of binary and we don't want every status poll to load that. Enumerate
+// every column EXCEPT glbBlob; the binary is only fetched on demand via
+// getMeshBlob(jobId).
+const MESH_COLS_NO_BLOB = `
+  jobId, status, prompt, model, steps,
+  seed, guidance, negativePrompt,
+  meshQuality, textureQuality, textureResolution, polygonTarget,
+  imageUrl,
+  glbUrl, publicId, bytes, elapsedMs,
+  error, workerId, logs, progressMessage,
+  createdAt, startedAt, completedAt
+`;
+const selectStmt = db.prepare(`SELECT ${MESH_COLS_NO_BLOB} FROM mesh_jobs WHERE jobId = ?`);
 const deleteStmt = db.prepare('DELETE FROM mesh_jobs WHERE jobId = ?');
 
 const COLUMNS = new Set([
@@ -37,10 +51,20 @@ const COLUMNS = new Set([
   'seed', 'guidance', 'negativePrompt',
   'meshQuality', 'textureQuality', 'textureResolution', 'polygonTarget',
   'imageUrl',
-  'glbUrl', 'publicId', 'bytes', 'elapsedMs',
+  'glbUrl', 'glbBlob', 'publicId', 'bytes', 'elapsedMs',
   'error', 'workerId', 'logs', 'progressMessage',
   'startedAt', 'completedAt',
 ]);
+
+// Read just the binary GLB column for streaming. Kept separate from the
+// regular getMeshJob() so list/status reads don't pull a 100MB BLOB into
+// memory by accident — only /api/mesh/file/:jobId calls this.
+const blobSelectStmt = db.prepare('SELECT glbBlob, bytes FROM mesh_jobs WHERE jobId = ?');
+export function getMeshBlob(jobId) {
+  const row = blobSelectStmt.get(jobId);
+  if (!row || !row.glbBlob) return null;
+  return { buffer: row.glbBlob, bytes: row.bytes || row.glbBlob.length };
+}
 
 export function createMeshJob({
   prompt, model = 'shap-e', steps = 32,
@@ -115,7 +139,7 @@ export function listMeshJobs({ status, page = 1, pageSize = 24, limit } = {}) {
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
   const items = db.prepare(
-    `SELECT * FROM mesh_jobs ${whereSql}
+    `SELECT ${MESH_COLS_NO_BLOB} FROM mesh_jobs ${whereSql}
        ORDER BY createdAt DESC
        LIMIT @ps OFFSET @offset`
   ).all({ ...params, ps, offset });

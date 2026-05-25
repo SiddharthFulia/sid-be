@@ -337,6 +337,12 @@ addColumnIfMissing('mesh_jobs', 'polygonTarget',     'INTEGER');
 // pulls this URL, decodes locally, and feeds it into the pipeline. Null
 // = pure text-to-3D (Shap-E, TripoSR fallback, or TRELLIS-text-large).
 addColumnIfMissing('mesh_jobs', 'imageUrl',          'TEXT');
+// Generated GLB stored as a BLOB directly inside SQLite. Reference image
+// (input) still goes to Cloudinary so the FE preview is a normal <img
+// src=…>; the OUTPUT GLB lives here so the asset is owned by the BE and
+// not subject to Cloudinary's free-tier 25GB cap. The /api/mesh/file/:jobId
+// endpoint streams this column out with model/gltf-binary content-type.
+addColumnIfMissing('mesh_jobs', 'glbBlob',           'BLOB');
 
 // Speech-to-Text result. `audio_jobs.kind='stt'` rows store the transcribed
 // text here instead of in a Cloudinary URL — the "output" of STT is plain

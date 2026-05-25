@@ -338,6 +338,27 @@ export const getDiskStats = async (_req, res) => {
       path: 'data/*.json', sizeBytes: other, fileCount: otherCount,
     });
 
+    // Mesh GLBs live as a BLOB column on `mesh_jobs` (not on Cloudinary,
+    // not on disk). Surface their total + count separately so the user
+    // sees the cost of the in-DB-storage choice without having to
+    // mental-math from the raw sqlite file size.
+    try {
+      const meshAgg = db.prepare(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(glbBlob)), 0) AS total
+           FROM mesh_jobs WHERE glbBlob IS NOT NULL`
+      ).get();
+      buckets.push({
+        id: 'mesh_blobs',
+        label: 'Mesh GLB BLOBs',
+        emoji: '🧊',
+        path: 'mesh_jobs.glbBlob',
+        sizeBytes: Number(meshAgg?.total || 0),
+        fileCount: Number(meshAgg?.n || 0),
+      });
+    } catch {
+      // Column doesn't exist yet on older DB files — skip silently.
+    }
+
     // Per-domain row counts that the user mentally maps to "size".
     const domainTables = [
       { id: 'chess_games',     label: 'Chess games (PGN)',  table: 'chess_games' },

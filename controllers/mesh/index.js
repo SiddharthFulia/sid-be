@@ -10,7 +10,7 @@
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import {
-  createMeshJob, getMeshJob, listMeshJobs, deleteMeshJob,
+  createMeshJob, getMeshJob, listMeshJobs, deleteMeshJob, getMeshBlob,
 } from '../../services/aiVideo/meshStore.js';
 import { publishMeshJob } from '../../services/aiVideo/messageQueue.js';
 
@@ -211,6 +211,42 @@ export const listMeshJobsCtrl = (req, res) => {
     logger.error('Mesh list failed', err.message);
     return error(res, err.message);
   }
+};
+
+// GET /api/mesh/file/:jobId — streams the generated GLB out from the
+// `glbBlob` column with the right Content-Type so drei's useGLTF can
+// fetch it directly. Supports the simple subset of HTTP Range requests
+// (single bytes=start-end) so the browser can resume partial loads on
+// flaky connections.
+export const streamMeshFile = (req, res) => {
+  const blobRow = getMeshBlob(req.params.jobId);
+  if (!blobRow) return error(res, 'GLB not available for this mesh job', 404);
+
+  const totalBytes = blobRow.bytes;
+  const range = req.headers.range;
+  // Cache for an hour — the BLOB never changes once the worker has
+  // posted it back (immutable per jobId).
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('Content-Type', 'model/gltf-binary');
+  res.setHeader('Accept-Ranges', 'bytes');
+
+  if (range) {
+    const match = /bytes=(\d+)-(\d*)/.exec(range);
+    if (match) {
+      const start = parseInt(match[1], 10);
+      const end   = match[2] ? parseInt(match[2], 10) : (totalBytes - 1);
+      if (start >= totalBytes) { res.status(416).end(); return; }
+      const slice = blobRow.buffer.subarray(start, end + 1);
+      res.writeHead(206, {
+        'Content-Range':  `bytes ${start}-${end}/${totalBytes}`,
+        'Content-Length': slice.length,
+      });
+      return res.end(slice);
+    }
+  }
+
+  res.setHeader('Content-Length', totalBytes);
+  return res.end(blobRow.buffer);
 };
 
 // DELETE /api/mesh/:jobId — removes the row. Cloudinary cleanup is best-

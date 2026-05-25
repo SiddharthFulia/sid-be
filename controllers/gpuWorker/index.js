@@ -567,6 +567,57 @@ export const postMeshComplete = (req, res) => {
   return success(res, row);
 };
 
+// POST /api/gpu-worker/mesh-complete-binary — multipart upload of the
+// generated GLB. New "store binary in SQLite" lane (companion to the
+// JSON variant above which still stores a Cloudinary URL). Form fields:
+//   - glb       (file)   — the binary .glb output
+//   - jobId     (string) — mesh_jobs.jobId
+//   - elapsedMs (string) — optional wall-time in ms, parsed to int
+//
+// On success the row gets:
+//   status     = 'completed'
+//   glbBlob    = the file buffer
+//   glbUrl     = `/api/mesh/file/<jobId>` (relative — FE prepends BE_URL)
+//   bytes      = buffer length
+//   elapsedMs  = parsed from form
+// Multer is wrapped in the controller so the route layer needs no extra
+// middleware (mirrors the yt-complete pattern noted in routes/index.js).
+import multerMod from 'multer';
+const meshUpload = multerMod({
+  storage: multerMod.memoryStorage(),
+  // Hunyuan3D at ultra polygon target can push 200MB; 512MB hard cap
+  // leaves headroom without inviting accidental gigabyte payloads.
+  limits: { fileSize: 512 * 1024 * 1024 },
+});
+export const postMeshCompleteBinary = [
+  meshUpload.single('glb'),
+  (req, res) => {
+    if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+    const jobId = req.body?.jobId;
+    if (!jobId) return error(res, 'jobId required', 400);
+    if (!req.file?.buffer) return error(res, 'glb file part required', 400);
+
+    const elapsedRaw = req.body?.elapsedMs;
+    const elapsedMs = Number.isFinite(parseInt(elapsedRaw, 10))
+      ? parseInt(elapsedRaw, 10) : null;
+
+    const row = updateMeshJob(jobId, {
+      status: 'completed',
+      glbBlob: req.file.buffer,
+      // glbUrl is a relative path — the FE prepends VITE_BE_URL so drei
+      // loads the binary directly from this BE rather than Cloudinary.
+      glbUrl: `/api/mesh/file/${jobId}`,
+      publicId: null,
+      bytes: req.file.buffer.length,
+      elapsedMs,
+      completedAt: new Date().toISOString(),
+    });
+    if (!row) return error(res, 'Mesh job not found', 404);
+    logger.info(`Mesh ${jobId} completed (BLOB, ${(req.file.buffer.length / 1024 / 1024).toFixed(1)}MB) in ${elapsedMs ?? '?'}ms`);
+    return success(res, row);
+  },
+];
+
 export const postMeshFailed = (req, res) => {
   if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
   const { jobId, error: errMsg } = req.body || {};
