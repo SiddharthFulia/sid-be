@@ -127,14 +127,20 @@ export const getDeepfakeStatus = (req, res) => {
   return success(res, row);
 };
 
-// GET /api/deepfake/list?status=&kind=&limit= (Vault-gated)
+// GET /api/deepfake/list?status=&kind=&page=&pageSize= (Vault-gated)
+// Returns { items, total, page, pageSize, pages }. Server clamps
+// pageSize to [1, 1000]. The previous `total: items.length` shape was
+// a lie — page 2 would have reported the same wrong total as page 1.
 export const listDeepfakeJobsCtrl = (req, res) => {
   try {
-    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-    const kind   = typeof req.query.kind   === 'string' ? req.query.kind   : undefined;
-    const limit  = parseInt(req.query.limit, 10) || 24;
-    const items = listDeepfakeJobs({ status, kind, limit });
-    return success(res, { items, total: items.length });
+    const status = typeof req.query.status === 'string' && req.query.status && req.query.status !== 'all'
+      ? req.query.status : undefined;
+    const kind   = typeof req.query.kind   === 'string' && req.query.kind && req.query.kind !== 'all'
+      ? req.query.kind   : undefined;
+    const page     = parseInt(req.query.page, 10)     || 1;
+    const pageSize = parseInt(req.query.pageSize, 10) || parseInt(req.query.limit, 10) || 24;
+    const result = listDeepfakeJobs({ status, kind, page, pageSize });
+    return success(res, result);
   } catch (err) {
     logger.error('Deepfake list failed', err.message);
     return error(res, err.message);

@@ -87,16 +87,40 @@ export function deleteDeepfakeJob(jobId) {
   return deleteStmt.run(jobId).changes > 0;
 }
 
-export function listDeepfakeJobs({ status, kind, limit = 24 } = {}) {
-  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 24, 1), 200);
+// Paginated. Returns { items, total, page, pageSize, pages } so the FE
+// library can render with antd Pagination + total counter. Server clamps
+// pageSize to [1, 1000]. Legacy `limit` arg still honoured. The fake
+// `total: items.length` the controller used to wrap this with is gone.
+export function listDeepfakeJobs({ status, kind, page = 1, pageSize, limit } = {}) {
+  const requested = pageSize ?? limit ?? 24;
+  const pg = Math.max(parseInt(page, 10) || 1, 1);
+  const ps = Math.min(Math.max(parseInt(requested, 10) || 24, 1), 1000);
+  const offset = (pg - 1) * ps;
+
   const where = [];
   const params = [];
   if (status) { where.push('status = ?'); params.push(status); }
   if (kind)   { where.push('kind = ?');   params.push(kind); }
   const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  return db.prepare(
-    `SELECT * FROM deepfake_jobs ${whereClause} ORDER BY createdAt DESC LIMIT ?`
-  ).all(...params, safeLimit);
+
+  const items = db.prepare(
+    `SELECT * FROM deepfake_jobs ${whereClause}
+       ORDER BY createdAt DESC LIMIT ? OFFSET ?`
+  ).all(...params, ps, offset);
+
+  const totalRow = db.prepare(
+    `SELECT COUNT(*) AS n FROM deepfake_jobs ${whereClause}`
+  ).get(...params);
+  const total = Number(totalRow?.n || 0);
+
+  return {
+    items,
+    total,
+    page: pg,
+    pageSize: ps,
+    limit: ps,                                  // back-compat alias
+    pages: Math.max(1, Math.ceil(total / ps)),
+  };
 }
 
 export function getNextQueuedDeepfakeJob() {

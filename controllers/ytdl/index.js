@@ -70,10 +70,20 @@ export const getStatus = (req, res) => {
   return success(res, safe);
 };
 
+// GET /api/yt-dl/list?status=&page=&pageSize=
+// Returns { items, total, page, pageSize, pages }. Server clamps
+// pageSize to [1, 1000]. `filePath` + `pid` columns stripped from rows
+// so the response stays portable (no absolute disk paths leak).
 export const getList = (req, res) => {
-  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 30));
-  const items = listJobs({ limit }).map(({ filePath, pid, ...safe }) => safe);
-  return success(res, { items, total: items.length });
+  const status = typeof req.query.status === 'string' && req.query.status && req.query.status !== 'all'
+    ? req.query.status : undefined;
+  const page     = parseInt(req.query.page, 10)     || 1;
+  const pageSize = parseInt(req.query.pageSize, 10) || parseInt(req.query.limit, 10) || 30;
+  const result = listJobs({ status, page, pageSize });
+  return success(res, {
+    ...result,
+    items: result.items.map(({ filePath, pid, ...safe }) => safe),
+  });
 };
 
 // Streamed download — Content-Disposition forces the browser to save

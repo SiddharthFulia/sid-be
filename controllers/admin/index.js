@@ -390,6 +390,63 @@ export const getDiskStats = async (_req, res) => {
   }
 };
 
+// ─── Mesh-job stats (Visualize tab "Mesh details" card) ────────
+// Vault-gated, same as everything else here. Returns:
+//   - byStatus : { queued, processing, completed, failed }
+//   - byModel  : { shap-e, tripo, trellis, trellis-v2, hunyuan3d }
+//   - blob     : { count, totalBytes, avgBytes, maxBytes } — only rows
+//                with a non-null glbBlob count toward these aggregates
+//   - recent   : last 10 rows (jobId / model / status / prompt / bytes
+//                / createdAt) — chunky cols stripped so the payload
+//                stays small even with 100 entries
+export const getMeshStats = (_req, res) => {
+  try {
+    const statusRows = db.prepare(
+      `SELECT status, COUNT(*) AS n FROM mesh_jobs GROUP BY status`
+    ).all();
+    const byStatus = {};
+    for (const row of statusRows) byStatus[row.status || 'unknown'] = Number(row.n || 0);
+
+    const modelRows = db.prepare(
+      `SELECT model, COUNT(*) AS n FROM mesh_jobs GROUP BY model`
+    ).all();
+    const byModel = {};
+    for (const row of modelRows) byModel[row.model || 'unknown'] = Number(row.n || 0);
+
+    let blob = { count: 0, totalBytes: 0, avgBytes: 0, maxBytes: 0 };
+    try {
+      const blobAgg = db.prepare(
+        `SELECT COUNT(*) AS count,
+                COALESCE(SUM(LENGTH(glbBlob)), 0) AS total,
+                COALESCE(MAX(LENGTH(glbBlob)), 0) AS max
+           FROM mesh_jobs WHERE glbBlob IS NOT NULL`
+      ).get();
+      const count = Number(blobAgg?.count || 0);
+      const total = Number(blobAgg?.total || 0);
+      blob = {
+        count,
+        totalBytes: total,
+        avgBytes:   count ? Math.round(total / count) : 0,
+        maxBytes:   Number(blobAgg?.max || 0),
+      };
+    } catch {
+      // glbBlob column not present yet on older DBs — leave zeros.
+    }
+
+    const recent = db.prepare(
+      `SELECT jobId, model, status, prompt,
+              bytes, meshQuality, textureQuality, polygonTarget,
+              createdAt, completedAt
+         FROM mesh_jobs ORDER BY createdAt DESC LIMIT 10`
+    ).all();
+
+    return success(res, { byStatus, byModel, blob, recent });
+  } catch (err) {
+    logger.error('admin getMeshStats failed', err.message);
+    return error(res, err.message, 500);
+  }
+};
+
 // ─── Purge a single queue ───────────────────────────────────────
 // Whitelisted queue names only — body { queue }. Returns the count of
 // messages discarded so the FE can confirm.

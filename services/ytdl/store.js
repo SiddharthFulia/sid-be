@@ -21,10 +21,38 @@ export function getJob(id) {
   return db.prepare('SELECT * FROM yt_jobs WHERE id = ?').get(id) || null;
 }
 
-export function listJobs({ limit = 30 } = {}) {
-  return db.prepare(
-    `SELECT * FROM yt_jobs ORDER BY createdAt DESC LIMIT ?`
-  ).all(limit);
+// Paginated. Returns { items, total, page, pageSize, pages } — matches
+// the contract every other library list endpoint on this BE uses.
+// Legacy `limit` arg still honoured (treated as pageSize, page 1).
+export function listJobs({ status, page = 1, pageSize, limit } = {}) {
+  const requested = pageSize ?? limit ?? 30;
+  const pg = Math.max(parseInt(page, 10) || 1, 1);
+  const ps = Math.min(Math.max(parseInt(requested, 10) || 30, 1), 1000);
+  const offset = (pg - 1) * ps;
+
+  const where = [];
+  const params = [];
+  if (status && status !== 'all') { where.push('status = ?'); params.push(status); }
+  const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+  const items = db.prepare(
+    `SELECT * FROM yt_jobs ${whereClause}
+       ORDER BY createdAt DESC LIMIT ? OFFSET ?`
+  ).all(...params, ps, offset);
+
+  const totalRow = db.prepare(
+    `SELECT COUNT(*) AS n FROM yt_jobs ${whereClause}`
+  ).get(...params);
+  const total = Number(totalRow?.n || 0);
+
+  return {
+    items,
+    total,
+    page: pg,
+    pageSize: ps,
+    limit: ps,
+    pages: Math.max(1, Math.ceil(total / ps)),
+  };
 }
 
 export function updateJob(id, patch) {
