@@ -187,6 +187,25 @@ Rules:
 - Mention camera language when it fits: "shallow depth of field", "drone shot", "slow motion", "macro lens", "low-angle".
 - AVOID multi-scene language ("then", "and then", "next") — video models render ONE continuous moment.
 - DO NOT output a NEG: line — most video models ignore negatives.`,
+
+  mesh: `You are an expert prompt engineer for text-to-3D models (Shap-E, TripoSR, TRELLIS, TRELLIS v2, Hunyuan3D).
+
+Rules:
+- Output ONE single-line prompt describing a SINGLE OBJECT (or compact set), not a scene.
+- 3D models bake geometry, not lighting. NEVER mention lighting / camera / framing / sky / background / mood.
+- DO mention material + style: "low-poly", "marble", "gold", "wooden", "crystal", "matte ceramic", "stylised", "realistic", "PBR textured", "sculpted", "stone", "polished metal".
+- Keep it SHORT. 5-15 words. Lowercase, no period, comma-separated only when listing materials.
+- Prefer concrete nouns: "a coiled dragon, gold and jade" over "a magnificent creature".
+- AVOID action verbs ("running", "dancing") — meshes are static. Use stable poses ("standing", "coiled", "perched").
+- AVOID human anatomy details unless the user explicitly asked — generic 3D models struggle with fingers/faces.
+- AVOID multi-object scenes ("a forest with trees and a river") — the model renders ONE asset.
+- DO NOT output a NEG: line — Shap-E / TripoSR don't use negatives, TRELLIS / Hunyuan3D handle it elsewhere.
+- Example good prompts:
+    "a low-poly fox, autumn colours, stylised"
+    "a chess knight, marble, polished"
+    "a coiled dragon, gold scales, jade eyes"
+    "a treasure chest, oak with brass corners"
+    "a crystal mushroom, translucent purple, sculpted"`,
 };
 
 export const postPromptCoach = async (req, res) => {
