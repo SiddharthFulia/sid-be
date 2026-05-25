@@ -507,10 +507,13 @@ export const postCinemaRender = (req, res) => {
     if (!Array.isArray(project.shotPrompts) || project.shotPrompts.length === 0) {
       return error(res, 'Project has no planned shots — plan first', 400);
     }
+    const { provider, optimizedMode } = req.body || {};
     const row = createCinemaRender({
       projectId: project.projectId,
       shotCount: project.shotPrompts.length,
       vault: project.vault ? 1 : 0,
+      provider,
+      optimizedMode,
     });
     logger.info(`CINEMA RENDER NEW | ${row.renderId} | project=${project.projectId} | shots=${row.shotCount}`);
     return success(res, row);

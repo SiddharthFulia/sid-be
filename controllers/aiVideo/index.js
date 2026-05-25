@@ -78,6 +78,7 @@ export const postGenerateVideo = async (req, res) => {
       withMusic = false,           // 5090 lanes only: have MusicGen produce a backing track
       musicPrompt = '',            // optional override; falls back to the video prompt if empty
       vault: bodyVault = false,    // honoured only when req.vault is truthy (auth check below)
+      silentWake = false,          // FE opt-out for the Telegram wake alert (Cinema chain sets this so N shots don't fire N notifications)
     } = req.body || {};
 
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -108,7 +109,7 @@ export const postGenerateVideo = async (req, res) => {
     // the request carries a valid Vault token — anonymous callers can't
     // sneak content into the private library.
     const opts_vault = !!bodyVault && !!req.vault;
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: opts_vault };
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: opts_vault, silentWake: !!silentWake };
 
     // For the 'optimized' provider, mode picks the MODEL + STEPS (the
     // actual "speed" knobs). The user's duration / resolution / aspect
@@ -290,7 +291,13 @@ async function handleAsyncWorker(req, res, opts, role, originalProvider) {
 
   const ws = await getWorkerStatus(role);
   const online = isWorkerOnline(ws);
-  if (!online) {
+  // silentWake: FE flag for cases where the user has explicit context
+  // about the worker being needed and doesn't need a Telegram nudge —
+  // e.g. Cinema's multi-shot chain fires N submissions back-to-back, so
+  // the existing alert pattern would spam the user N times for one
+  // intentional render. The flag is opt-in (defaults to wake-as-normal)
+  // so the regular AI Video Generate tab is unaffected.
+  if (!online && !opts.silentWake) {
     tryWakeWorker({ jobId: job.videoId, prompt: opts.prompt, role }).catch(() => {});
   }
 

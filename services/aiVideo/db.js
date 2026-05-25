@@ -308,6 +308,13 @@ addColumnIfMissing('enhanced_images', 'negativePrompt', 'TEXT');
 // was vault-flagged then the resulting combined row is too — so it shows
 // up in the Vault library and stays hidden from anonymous viewers.
 addColumnIfMissing('combined_videos', 'vault', 'INTEGER NOT NULL DEFAULT 0');
+// Cinema render — which provider + mode the chain should use. Lets the
+// planner pick "5090 Optimized · Quality" (Wan 2.2 5B 30 steps),
+// "Balanced" (Wan 2.2 5B 14 steps), or "Preview" (LTX-distilled). The
+// columns are added lazily here so old cinema_renders rows (created
+// before this lane existed) keep working with the legacy default.
+addColumnIfMissing('cinema_renders', 'provider',      'TEXT');
+addColumnIfMissing('cinema_renders', 'optimizedMode', 'TEXT');
 // ─── Mesh job advanced controls (TRELLIS, TRELLIS v2, Hunyuan3D) ────
 // `seed`             — reproducibility across all engines
 // `guidance`         — classifier-free guidance scale; for TRELLIS this

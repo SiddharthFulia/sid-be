@@ -15,10 +15,12 @@ export function newRenderId() {
 const insertStmt = db.prepare(`INSERT INTO cinema_renders (
   renderId, projectId, status, phase, currentShotIndex, shotCount,
   shotJobIds, combineJobId, finalDownloadHref, error, vault,
+  provider, optimizedMode,
   createdAt, updatedAt, completedAt
 ) VALUES (
   @renderId, @projectId, @status, @phase, @currentShotIndex, @shotCount,
   @shotJobIds, @combineJobId, @finalDownloadHref, @error, @vault,
+  @provider, @optimizedMode,
   @createdAt, @updatedAt, @completedAt
 )`);
 
@@ -39,7 +41,13 @@ function deserialize(row) {
   return { ...row, shotJobIds };
 }
 
-export function createCinemaRender({ projectId, shotCount, vault = 0 }) {
+// Whitelist what we accept — the FE picks 'optimized' or 'local' for
+// provider and one of preview/balanced/quality for mode. Anything else
+// falls back to the safe defaults.
+const VALID_PROVIDERS = new Set(['optimized', 'local', 'zsky']);
+const VALID_MODES     = new Set(['preview', 'balanced', 'quality']);
+
+export function createCinemaRender({ projectId, shotCount, vault = 0, provider, optimizedMode }) {
   const now = new Date().toISOString();
   const row = {
     renderId: newRenderId(),
@@ -53,6 +61,8 @@ export function createCinemaRender({ projectId, shotCount, vault = 0 }) {
     finalDownloadHref: null,
     error: null,
     vault: vault ? 1 : 0,
+    provider:      VALID_PROVIDERS.has(provider) ? provider : 'optimized',
+    optimizedMode: VALID_MODES.has(optimizedMode) ? optimizedMode : 'balanced',
     createdAt: now,
     updatedAt: now,
     completedAt: null,
