@@ -387,34 +387,85 @@ export const postCinema = async (req, res) => {
       ? '20-35 words. ONE clear action with an optional second beat. Mention lighting (golden hour, neon, etc.). Single-axis camera move okay (dolly, pan, push).'
       : '30-50 words. Can describe TWO connected actions (intro → payoff). Lighting + camera-move detail welcome (drone, crane, tracking shot).';
 
-    // Use Groq to split the master prompt into N shot prompts.
-    const system = `You are a cinema director breaking down a one-line idea into ${shotCount} sequential shot prompts for AI video generation. Each shot will be rendered as a ${safeDuration}-second clip on a single-model pipeline.
+    // Groq now emits TWO things: a continuity bible (locked world facts)
+    // and an ACTION-ONLY shot list. The chain glues the bible to the
+    // front of every shot at submit time, so each shot prompt only
+    // carries the action that changes — not the whole world. This is
+    // the single biggest fix for character/lighting drift between shots.
+    const system = `You are a cinema director breaking a one-line idea into a CONTINUITY-LOCKED multi-shot plan for AI video. ${shotCount} shots, ${safeDuration} seconds each, ONE model running ONE locked seed across all shots.
 
-Output rules:
-- EXACTLY ${shotCount} shot prompts, separated by newlines.
-- Each line is ONE shot prompt sized for a ${safeDuration}s clip:
-    ${durationBand}
-- Shots should flow narratively from the master idea (act 1 → climax → resolution shape).
-- Each prompt describes: subject, action, camera framing, lighting.
-- Tone & subject continuity across shots — same person/place/style.
-- NEVER use "then", "and then", "after that", "later" — video models render ONE continuous moment per clip, not a sequence.
-- Just output the prompts. No preamble, no explanation, no quotes, no numbering.`;
+Output STRICT JSON ONLY (no markdown, no code fences, no preamble):
+{
+  "bible": {
+    "subject":     "the main subject — name, age, body, identifying features",
+    "wardrobe":    "exact outfit / costume / props the subject carries",
+    "environment": "the place — terrain, weather, time of day, scale",
+    "lighting":    "single short clause — direction + colour temperature",
+    "camera":      "lens + grade + film stock vibe (one phrase)",
+    "palette":     "3-5 colour words for the overall grade"
+  },
+  "actions": ["action 1", "action 2", ..., "action ${shotCount}"]
+}
+
+Bible rules:
+- Each field MUST be a single string, ≤ 18 words.
+- NEVER reference camera moves, time-shifts, or events in the bible — those go in actions.
+- Bible is LOCKED across all shots — describe the world that exists for the whole sequence.
+
+Action rules:
+- EXACTLY ${shotCount} entries.
+- ${durationBand}
+- Each action describes ONLY what CHANGES this shot — the verb, the camera move, the beat.
+- NEVER re-describe the subject's appearance, the environment, the lighting, or the palette. The bible already carries those.
+- NEVER use "then", "and then", "after that", "later" — one continuous moment per clip.
+- Narrative arc across the ${shotCount} actions: setup → development → climax → resolution (compressed to ${shotCount} beats).
+
+Example for a sci-fi idea:
+{"bible":{"subject":"young woman astronaut, mid-twenties, athletic","wardrobe":"white damaged NASA suit with orange chest stripe, gold reflective visor","environment":"wet black alien sand beach with cyan crystal formations, twin red suns low on horizon","lighting":"warm twin-sunset rim from the right, cool cyan bounce from crystals","camera":"anamorphic 50mm, soft halation, fine grain","palette":"obsidian, cyan, amber, ember red"},"actions":["wide shot, astronaut steps onto the wet sand, slow push-in","medium shot, she scans the horizon, slight handheld sway","close-up on her gloved hand brushing a crystal","over-shoulder reveal of the crystal field, slow dolly back"]}
+`;
 
     let shotPrompts = [];
+    let bible       = {};
     try {
       const groqRes = await chatGroq(masterPrompt.trim(), [], 'llama-3.3-70b', {
-        system, temperature: 0.7, maxTokens: 800,
+        system, temperature: 0.6, maxTokens: 1200,
       });
-      const raw = (groqRes.reply || '').trim();
-      shotPrompts = raw.split('\n').map(s => s.trim()).filter(Boolean).slice(0, shotCount);
+      let raw = (groqRes.reply || '').trim();
+      // Strip the occasional ```json fences Groq adds despite our ask.
+      raw = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch {}
+      if (parsed && Array.isArray(parsed.actions)) {
+        shotPrompts = parsed.actions.map(s => String(s || '').trim()).filter(Boolean).slice(0, shotCount);
+        if (parsed.bible && typeof parsed.bible === 'object') {
+          // Trust the keys but clamp lengths so a model that ignores
+          // the "≤ 18 words" rule can't poison the row.
+          const clamp = (s) => String(s || '').trim().split(/\s+/).slice(0, 25).join(' ');
+          bible = {
+            subject:     clamp(parsed.bible.subject),
+            wardrobe:    clamp(parsed.bible.wardrobe),
+            environment: clamp(parsed.bible.environment),
+            lighting:    clamp(parsed.bible.lighting),
+            camera:      clamp(parsed.bible.camera),
+            palette:     clamp(parsed.bible.palette),
+          };
+        }
+      } else {
+        // Legacy fallback — old plain-newlines format
+        shotPrompts = raw.split('\n').map(s => s.trim()).filter(Boolean).slice(0, shotCount);
+      }
       if (shotPrompts.length < shotCount) {
-        // Pad with copies of the master prompt if Groq under-delivered
         while (shotPrompts.length < shotCount) shotPrompts.push(masterPrompt.trim());
       }
     } catch (e) {
       logger.warn(`Cinema Groq split failed, falling back to master prompt: ${e.message}`);
       shotPrompts = Array(shotCount).fill(masterPrompt.trim());
     }
+
+    // Pre-seed a random lockedSeed at creation time so the chain has
+    // a deterministic starting point even if the user never touches
+    // the seed input. Range chosen to fit a 32-bit int comfortably.
+    const lockedSeed = Math.floor(Math.random() * 1_000_000_000);
 
     const project = createCinemaProject({
       status: 'planning',
@@ -424,12 +475,20 @@ Output rules:
       durationPerShot: Math.round(durationPerShot),
       aspectRatio, resolution,
     });
+    // Patch the bible + lockedSeed onto the freshly-created row. Two-
+    // step because createCinemaProject's insert only covers the legacy
+    // columns; the new continuity fields ride on the UPDATE path.
+    const updated = updateCinemaProject(project.projectId, {
+      continuityBible: bible,
+      lockedSeed,
+      motionStrength: 0.6,
+    }) || project;
 
     logger.info(`CINEMA CREATE | ${project.projectId} | shots=${shotCount}`);
     // NOTE: actual shot-by-shot rendering is left to a separate orchestrator
     // (or the FE can drive it via /api/ai-video/generate per shot). For now
     // we return the planned shotPrompts so the FE can show them.
-    return success(res, { ...project, shotPrompts });
+    return success(res, { ...updated, shotPrompts });
   } catch (err) {
     logger.error('Cinema create failed', err.message);
     return error(res, err.message);
@@ -487,7 +546,11 @@ export const patchCinemaShots = (req, res) => {
   const row = getCinemaProject(req.params.projectId);
   if (!row) return error(res, 'Not found', 404);
   if (row.vault && !req.vault) return error(res, 'Not found', 404);
-  const { shotJobIds, shotPrompts, shotModels, shotMusic, status, outputUrl, errorMsg } = req.body || {};
+  const {
+    shotJobIds, shotPrompts, shotModels, shotMusic,
+    continuityBible, lockedSeed, motionStrength, heroImageUrl,
+    status, outputUrl, errorMsg,
+  } = req.body || {};
   const patch = {};
   if (Array.isArray(shotJobIds)) patch.shotJobIds = shotJobIds;
   // Editable shot prompts — the FE planner lets the user tune each
@@ -510,6 +573,33 @@ export const patchCinemaShots = (req, res) => {
   // sees booleans courtesy of the deserialize() helper.
   if (Array.isArray(shotMusic)) {
     patch.shotMusic = shotMusic.map(v => !!v).slice(0, row.shotCount);
+  }
+  // Continuity-bible JSON object. Whitelist the 6 known string fields
+  // + clamp each to 25 words so an over-eager edit can't poison the
+  // prompt that gets glued to every shot.
+  if (continuityBible && typeof continuityBible === 'object' && !Array.isArray(continuityBible)) {
+    const ALLOWED_BIBLE_KEYS = ['subject', 'wardrobe', 'environment', 'lighting', 'camera', 'palette'];
+    const clamp = (s) => String(s || '').trim().split(/\s+/).slice(0, 25).join(' ');
+    const cleaned = {};
+    for (const k of ALLOWED_BIBLE_KEYS) {
+      if (typeof continuityBible[k] === 'string') cleaned[k] = clamp(continuityBible[k]);
+    }
+    patch.continuityBible = cleaned;
+  }
+  // Locked seed — integer, 0..2^31-1 (SQLite INTEGER fits comfortably).
+  if (lockedSeed !== undefined && lockedSeed !== null) {
+    const n = parseInt(lockedSeed, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 2_147_483_647) patch.lockedSeed = n;
+  }
+  // Motion strength clamp 0.1..1.0 (lower disables motion entirely
+  // on some models; higher mutates the subject).
+  if (motionStrength !== undefined && motionStrength !== null) {
+    const v = Number(motionStrength);
+    if (Number.isFinite(v)) patch.motionStrength = Math.max(0.1, Math.min(1.0, v));
+  }
+  // Hero image URL — string only. Empty string clears it.
+  if (typeof heroImageUrl === 'string') {
+    patch.heroImageUrl = heroImageUrl.trim() || null;
   }
   if (status) patch.status = status;
   if (outputUrl) patch.outputUrl = outputUrl;
@@ -659,13 +749,14 @@ export const postCinemaRender = (req, res) => {
     if (!Array.isArray(project.shotPrompts) || project.shotPrompts.length === 0) {
       return error(res, 'Project has no planned shots — plan first', 400);
     }
-    const { provider, optimizedMode } = req.body || {};
+    const { provider, optimizedMode, beastModel } = req.body || {};
     const row = createCinemaRender({
       projectId: project.projectId,
       shotCount: project.shotPrompts.length,
       vault: project.vault ? 1 : 0,
       provider,
       optimizedMode,
+      beastModel,
     });
     logger.info(`CINEMA RENDER NEW | ${row.renderId} | project=${project.projectId} | shots=${row.shotCount}`);
     return success(res, row);

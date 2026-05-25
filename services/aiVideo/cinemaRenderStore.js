@@ -15,12 +15,12 @@ export function newRenderId() {
 const insertStmt = db.prepare(`INSERT INTO cinema_renders (
   renderId, projectId, status, phase, currentShotIndex, shotCount,
   shotJobIds, combineJobId, finalDownloadHref, error, vault,
-  provider, optimizedMode,
+  provider, optimizedMode, beastModel,
   createdAt, updatedAt, completedAt
 ) VALUES (
   @renderId, @projectId, @status, @phase, @currentShotIndex, @shotCount,
   @shotJobIds, @combineJobId, @finalDownloadHref, @error, @vault,
-  @provider, @optimizedMode,
+  @provider, @optimizedMode, @beastModel,
   @createdAt, @updatedAt, @completedAt
 )`);
 
@@ -46,8 +46,15 @@ function deserialize(row) {
 // falls back to the safe defaults.
 const VALID_PROVIDERS = new Set(['optimized', 'local', 'zsky']);
 const VALID_MODES     = new Set(['preview', 'balanced', 'quality']);
+// Whitelist mirrors the Beast-lane models on AI Video Generate so the
+// FE can't smuggle an arbitrary model id through this column. Any
+// value outside the set falls back to wan-2.2 (the best-balance default).
+const VALID_BEAST_MODELS = new Set([
+  'ltx-video', 'wan-2.1', 'wan-2.1-i2v', 'hunyuan',
+  'wan-2.2', 'mochi', 'svd',
+]);
 
-export function createCinemaRender({ projectId, shotCount, vault = 0, provider, optimizedMode }) {
+export function createCinemaRender({ projectId, shotCount, vault = 0, provider, optimizedMode, beastModel }) {
   const now = new Date().toISOString();
   const row = {
     renderId: newRenderId(),
@@ -63,6 +70,7 @@ export function createCinemaRender({ projectId, shotCount, vault = 0, provider, 
     vault: vault ? 1 : 0,
     provider:      VALID_PROVIDERS.has(provider) ? provider : 'optimized',
     optimizedMode: VALID_MODES.has(optimizedMode) ? optimizedMode : 'balanced',
+    beastModel:    VALID_BEAST_MODELS.has(beastModel) ? beastModel : 'wan-2.2',
     createdAt: now,
     updatedAt: now,
     completedAt: null,

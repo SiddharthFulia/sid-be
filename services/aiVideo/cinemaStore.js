@@ -25,6 +25,7 @@ const deleteStmt = db.prepare('DELETE FROM cinema_projects WHERE projectId = ?')
 const COLUMNS = new Set([
   'status', 'masterPrompt', 'shotCount', 'shotPrompts', 'shotJobIds',
   'shotModels', 'shotMusic',
+  'continuityBible', 'lockedSeed', 'motionStrength', 'heroImageUrl',
   'outputUrl', 'error', 'durationPerShot', 'aspectRatio', 'resolution', 'vault',
   'completedAt',
 ]);
@@ -68,6 +69,13 @@ function deserialize(row) {
     shotMusic:   row.shotMusic
       ? safeParse(row.shotMusic, []).map(v => !!v)
       : [],
+    // continuityBible is a JSON object, NOT an array. Stored as a
+    // string column so the FE can mutate any field without a schema
+    // change. Defaults to an empty object so the FE can render its
+    // editor cleanly when the project predates this feature.
+    continuityBible: row.continuityBible
+      ? safeParse(row.continuityBible, {})
+      : {},
   };
 }
 
@@ -88,6 +96,10 @@ export function updateCinemaProject(projectId, patch) {
   for (const c of cols) {
     let v = patch[c];
     if (Array.isArray(v)) v = JSON.stringify(v);
+    // continuityBible is a single JSON object; stringify just like
+    // the array columns. Plain primitives (strings / numbers) pass
+    // through untouched.
+    else if (c === 'continuityBible' && v && typeof v === 'object') v = JSON.stringify(v);
     params[c] = v;
   }
   const set = cols.map(c => `${c} = @${c}`).join(', ');

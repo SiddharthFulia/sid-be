@@ -16,13 +16,13 @@ const insertStmt = db.prepare(`INSERT INTO jobs (
   resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption,
   attemptCount, createdAt, startedAt, completedAt, videoUrl, caption, error,
   workerId, estimatedSeconds, progressMessage, progressStep, progressTotal, logs,
-  withMusic, musicPrompt
+  withMusic, musicPrompt, seed, motionStrength
 ) VALUES (
   @videoId, @provider, @originalProvider, @status, @prompt, @model, @duration,
   @resolution, @aspectRatio, @steps, @style, @audio, @imageUrl, @generateCaption,
   @attemptCount, @createdAt, @startedAt, @completedAt, @videoUrl, @caption, @error,
   @workerId, @estimatedSeconds, @progressMessage, @progressStep, @progressTotal, @logs,
-  @withMusic, @musicPrompt
+  @withMusic, @musicPrompt, @seed, @motionStrength
 )`);
 
 const selectStmt   = db.prepare('SELECT * FROM jobs WHERE videoId = ?');
@@ -38,7 +38,7 @@ const COLUMN_SET = new Set([
   'imageUrl', 'generateCaption', 'attemptCount', 'createdAt', 'startedAt',
   'completedAt', 'videoUrl', 'caption', 'error', 'workerId',
   'estimatedSeconds', 'progressMessage', 'progressStep', 'progressTotal',
-  'logs', 'withMusic', 'musicPrompt', 'vault',
+  'logs', 'withMusic', 'musicPrompt', 'vault', 'seed', 'motionStrength',
 ]);
 
 export async function createInflightJob(jobData) {

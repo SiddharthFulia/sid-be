@@ -65,7 +65,7 @@ function findRenderForCompletedVideo(videoId) {
   const escapedToken = `%"${videoId.replaceAll('%', '\\%').replaceAll('_', '\\_')}"%`;
   const rows = db.prepare(
     `SELECT renderId, projectId, status, currentShotIndex, shotCount,
-            shotJobIds, vault, provider, optimizedMode
+            shotJobIds, vault, provider, optimizedMode, beastModel
        FROM cinema_renders
        WHERE shotJobIds LIKE ? ESCAPE '\\'
          AND status NOT IN ('completed', 'failed', 'cancelled')`
@@ -123,6 +123,24 @@ async function extractLastFrameToDataUrl(videoUrl) {
 // queueNextShot — create the inflight job + publish to RabbitMQ. Mirrors
 // what controllers/aiVideo's handleAsyncWorker does, minus the Express
 // request/response plumbing. Returns the created job row.
+// Glue a JSON continuity bible into a single prompt-friendly block.
+// Empty/missing fields are skipped so the model isn't given placeholder
+// noise. Returned as a single line so the worker's prompt-cleanup
+// regexes don't get tripped by newlines.
+function formatContinuityBible(bible) {
+  if (!bible || typeof bible !== 'object') return '';
+  const fields = ['subject', 'wardrobe', 'environment', 'lighting', 'camera', 'palette'];
+  const parts = [];
+  for (const f of fields) {
+    const v = bible[f];
+    if (typeof v === 'string' && v.trim()) parts.push(v.trim());
+  }
+  if (parts.length === 0) return '';
+  // "same X, same Y, …" framing — the model treats these as
+  // continuity instructions instead of new scene elements.
+  return parts.map(p => `same ${p}`).join(', ');
+}
+
 async function queueNextShot({ render, project, shotIndex, frameUrl }) {
   const provider = render.provider     || 'optimized';
   const mode     = render.optimizedMode || 'balanced';
@@ -134,26 +152,53 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
              : provider === 'zsky' ? 'worker'
              : 'local';
 
-  // Per-shot model override — only honoured when the chain runs on
-  // the Beast lane (`local`). Optimized's mode picker already drives
-  // the model choice; ZSky picks server-side. Falls back to the
-  // provider-default model otherwise.
-  const perShotModel = Array.isArray(project.shotModels) ? project.shotModels[shotIndex] : null;
-  const effectiveModel = (provider === 'local' && perShotModel && perShotModel.trim())
-    ? perShotModel.trim()
+  // Render-level model. Beast lane reads render.beastModel; optimized
+  // gets its model from the mode picker (mapped via OPTIMIZED_MODES);
+  // ZSky always uses its provider default.
+  const effectiveModel = provider === 'local'
+    ? (render.beastModel && render.beastModel.trim() ? render.beastModel.trim() : 'wan-2.2')
     : overrides.model;
 
-  // Per-shot background-music toggle. Default is OFF on every shot
-  // (intentional — music is opt-in per the user's spec). When the
-  // toggle is on we pass the shot's prompt as the music brief; the
-  // worker's MusicGen pass derives a 5-15s clip from it.
+  // Per-shot background-music toggle. Default OFF; opt-in. When on, the
+  // shot's prompt doubles as the music brief — worker's MusicGen pass
+  // derives a 5-15s clip from it.
   const perShotMusic = Array.isArray(project.shotMusic) ? !!project.shotMusic[shotIndex] : false;
-  const shotPrompt   = project.shotPrompts[shotIndex];
+
+  // ── Continuity-first prompt assembly ────────────────────────────
+  // Glue the project's continuity bible to the front of every shot's
+  // action prompt so the model rebuilds the same world (subject /
+  // wardrobe / lighting / camera / palette) each clip. Without this
+  // every shot is its own world and the character mutates between
+  // clips. Action verbs alone live in shotPrompts[i].
+  const bibleBlock = formatContinuityBible(project.continuityBible);
+  const action     = project.shotPrompts[shotIndex] || '';
+  const composedPrompt = bibleBlock
+    ? `${bibleBlock}. ${action}`.trim()
+    : action;
+
+  // Locked seed — same noise init across every shot. Random number
+  // assigned at project creation if the user didn't pick one. The
+  // worker passes this straight into the diffusion sampler.
+  const lockedSeed = Number.isFinite(project.lockedSeed) ? project.lockedSeed : null;
+
+  // Motion strength — only Wan/Hunyuan honour it; LTX ignores. Range
+  // 0.1-1.0; default 0.6 errs on the side of identity preservation.
+  const motionStrength = Number.isFinite(project.motionStrength)
+    ? Math.max(0.1, Math.min(1.0, project.motionStrength))
+    : 0.6;
+
+  // Hero image — when set + this is shot 1 (idx 0) + no frame was
+  // passed in (chain is just starting), use the hero as shot 1's
+  // source image. Subsequent shots use the previous shot's last
+  // frame (frameUrl supplied by advanceFromShotCompletion).
+  const isFirstShot = shotIndex === 0;
+  const startImageUrl = frameUrl
+    || (isFirstShot && project.heroImageUrl ? project.heroImageUrl : '');
 
   const job = await createInflightJob({
     provider: role,
     originalProvider: provider,
-    prompt: shotPrompt,
+    prompt: composedPrompt,
     model: effectiveModel,
     duration: project.durationPerShot || 5,
     resolution: project.resolution    || '720p',
@@ -161,10 +206,12 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
     steps: overrides.steps,
     style: 'cinematic',
     audio: true,
-    imageUrl: frameUrl || '',
+    imageUrl: startImageUrl,
     generateCaption: false,
     withMusic: perShotMusic,
-    musicPrompt: perShotMusic ? shotPrompt : '',
+    musicPrompt: perShotMusic ? action : '',
+    seed: lockedSeed,
+    motionStrength,
     vault: render.vault ? 1 : 0,
   });
 

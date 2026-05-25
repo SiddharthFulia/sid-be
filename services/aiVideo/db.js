@@ -232,6 +232,8 @@ export function jobToRow(j) {
     logs: j.logs ? JSON.stringify(j.logs) : null,
     withMusic: j.withMusic ? 1 : 0,
     musicPrompt: j.musicPrompt ?? null,
+    seed: Number.isFinite(j.seed) ? Math.floor(j.seed) : null,
+    motionStrength: Number.isFinite(j.motionStrength) ? Number(j.motionStrength) : null,
   };
 }
 
@@ -267,6 +269,8 @@ export function rowToJob(r) {
     logs: r.logs ? safeJSON(r.logs, []) : [],
     withMusic: !!r.withMusic,
     musicPrompt: r.musicPrompt,
+    seed: r.seed,
+    motionStrength: r.motionStrength,
   };
 }
 
@@ -325,6 +329,35 @@ addColumnIfMissing('cinema_renders', 'optimizedMode', 'TEXT');
 //               muxes a MusicGen track derived from the shot prompt.
 addColumnIfMissing('cinema_projects', 'shotModels', 'TEXT');
 addColumnIfMissing('cinema_projects', 'shotMusic',  'TEXT');
+// Cinematic-continuity columns. All nullable so existing rows keep
+// working. cinemaChain.queueNextShot reads each and falls back to a
+// sane default when the column is null.
+//   continuityBible — JSON {subject,wardrobe,environment,lighting,camera,palette}.
+//                     Prepended to every shot's prompt so the model rebuilds
+//                     the same world each clip instead of reinventing it.
+//   lockedSeed       — integer fed to the diffusion sampler's noise init.
+//                     Same seed + same prompt = same look. Random per render
+//                     unless the user overrides.
+//   motionStrength   — 0.1..1.0. Wan/Hunyuan honour it; LTX ignores. Lower
+//                     keeps the subject's identity stable, higher moves
+//                     the camera/scene more but risks mutation.
+//   heroImageUrl     — Cloudinary URL of the master first frame. When set,
+//                     the orchestrator uses this as shot 1's imageUrl so
+//                     the chain is I2V→I2V→… instead of T2V→I2V→…
+addColumnIfMissing('cinema_projects', 'continuityBible', 'TEXT');
+addColumnIfMissing('cinema_projects', 'lockedSeed',      'INTEGER');
+addColumnIfMissing('cinema_projects', 'motionStrength',  'REAL');
+addColumnIfMissing('cinema_projects', 'heroImageUrl',    'TEXT');
+// cinema_renders gets the render-level Beast model so the user can
+// keep the same project but A/B "Wan 2.2 5B" vs "Wan 2.1 I2V 14B" vs
+// "Hunyuan" between attempts. Only consulted when provider='local'.
+addColumnIfMissing('cinema_renders',  'beastModel',      'TEXT');
+// Per-job knobs needed by the cinema chain so each shot reproduces the
+// same noise init + motion behaviour. Plain video jobs from /generate
+// pass them through too — Wan/Hunyuan workflows on the worker side
+// read them at workflow-build time.
+addColumnIfMissing('jobs', 'seed',           'INTEGER');
+addColumnIfMissing('jobs', 'motionStrength', 'REAL');
 // job_logs.cinemaRenderId — when a log line belongs to a shot in a
 // cinema render, this column carries the parent renderId. Lets the
 // new GET /api/cinema/render/:renderId/logs endpoint stream every

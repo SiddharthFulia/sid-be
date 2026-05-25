@@ -79,6 +79,8 @@ export const postGenerateVideo = async (req, res) => {
       musicPrompt = '',            // optional override; falls back to the video prompt if empty
       vault: bodyVault = false,    // honoured only when req.vault is truthy (auth check below)
       silentWake = false,          // FE opt-out for the Telegram wake alert (Cinema chain sets this so N shots don't fire N notifications)
+      seed,                        // optional locked seed; null = roll random per shot (Cinema sets this)
+      motionStrength,              // optional 0.1..1.0 motion knob (Wan/Hunyuan honour it)
     } = req.body || {};
 
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -109,7 +111,7 @@ export const postGenerateVideo = async (req, res) => {
     // the request carries a valid Vault token — anonymous callers can't
     // sneak content into the private library.
     const opts_vault = !!bodyVault && !!req.vault;
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: opts_vault, silentWake: !!silentWake };
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: opts_vault, silentWake: !!silentWake, seed, motionStrength };
 
     // For the 'optimized' provider, mode picks the MODEL + STEPS (the
     // actual "speed" knobs). The user's duration / resolution / aspect
@@ -286,6 +288,13 @@ async function handleAsyncWorker(req, res, opts, role, originalProvider) {
     // ignore them today). worker.py reads job.withMusic + job.musicPrompt.
     withMusic: !!opts.withMusic,
     musicPrompt: (opts.musicPrompt || '').slice(0, 400),
+    // Cinema continuity knobs — Wan/Hunyuan workflows on the worker
+    // read these to lock noise init (seed) + tame mutation
+    // (motionStrength). LTX ignores both harmlessly. seed=null leaves
+    // the worker to roll random; motionStrength=null falls back to
+    // the workflow's built-in default.
+    seed: Number.isFinite(opts.seed) ? Math.floor(opts.seed) : null,
+    motionStrength: Number.isFinite(opts.motionStrength) ? Number(opts.motionStrength) : null,
     vault: opts.vault ? 1 : 0,
   });
 
