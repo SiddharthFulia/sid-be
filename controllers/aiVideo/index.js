@@ -24,7 +24,7 @@ import {
   setImagesVault, deleteImages as deleteImagesBulk, getImagesByIds,
 } from '../../services/aiVideo/enhancedImageStore.js';
 import {
-  setVideosVault, deleteLocalVideos, getLocalVideosByIds,
+  setVideosVault, deleteLocalVideo, deleteLocalVideos, getLocalVideosByIds,
 } from '../../services/aiVideo/videoStore.js';
 import { listRecentLogs, listLogs } from '../../services/aiVideo/logStore.js';
 import {
@@ -519,20 +519,52 @@ export const getFailuresList = (req, res) => {
 };
 
 // ─── Delete ─────────────────────────────────────────────────
+// A single id can live in TWO places: the `jobs` table (queued /
+// processing / failed in-flight rows) and the `videos` table (completed
+// rows after the worker posts back). We try both — `removeInflightJob`
+// is a no-op when the row isn't in `jobs`, and the same goes for
+// `deleteLocalVideo` against `videos`. Cloudinary cleanup runs only
+// when a completed row was actually removed. The "row still appears
+// after delete" bug from the Jobs tab was caused by skipping the
+// `deleteLocalVideo` call here — the Cloudinary asset got nuked but
+// the SQLite row stayed, so the next /api/ai-video/jobs?status=completed
+// poll still returned the orphan.
 export const deleteVideoById = async (req, res) => {
   try {
     const id = req.params.videoId;
     if (!id) return error(res, 'videoId required', 400);
 
-    // If it's an in-flight job, remove from JSON.
-    const removed = await removeInflightJob(id);
-    if (removed) return success(res, { ok: true, source: 'inflight' });
+    // 1) In-flight removal (queued / processing / failed).
+    const inflightRemoved = await removeInflightJob(id);
 
-    // Otherwise destroy on Cloudinary.
-    const result = await deleteVideo(id);
-    if (!result.ok) return error(res, `Delete failed: ${result.result}`, 500);
-    logger.info(`Deleted video ${id}`);
-    return success(res, { ok: true, source: 'cloudinary' });
+    // 2) Completed-video removal: nuke the SQLite row first, then the
+    //    Cloudinary asset. Order matters — if Cloudinary fails (network
+    //    blip / already-deleted), we still want the DB row gone so the
+    //    UI doesn't keep showing a card with a 404 video.
+    const videoRemoved = deleteLocalVideo(id);
+    let cloudinaryRemoved = false;
+    if (videoRemoved) {
+      const result = await deleteVideo(id).catch(err => ({ ok: false, result: err.message }));
+      cloudinaryRemoved = !!result?.ok;
+      if (!result?.ok) {
+        // Don't fail the whole delete — the DB row is the source of truth
+        // for what shows in the UI. Cloudinary will orphan-clean itself
+        // on the next monthly sweep.
+        logger.warn(`Cloudinary delete failed for ${id}: ${result?.result || 'unknown'}`);
+      }
+    }
+
+    if (!inflightRemoved && !videoRemoved) {
+      return error(res, 'Video not found', 404);
+    }
+
+    logger.info(`Deleted video ${id} | inflight=${inflightRemoved} db=${videoRemoved} cdn=${cloudinaryRemoved}`);
+    return success(res, {
+      ok: true,
+      inflightRemoved,
+      videoRemoved,
+      cloudinaryRemoved,
+    });
   } catch (err) {
     logger.error('Delete failed', err.message);
     return error(res, err.message);
