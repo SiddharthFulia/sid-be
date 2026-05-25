@@ -141,6 +141,22 @@ const safelyDeleteFile = (id, filePath) => {
   }
 };
 
+// slugify — turn a free-text title into something safe for a
+// Content-Disposition filename. Strips diacritics, lowercases, replaces
+// runs of non-alphanumerics with a single hyphen, trims to 60 chars so
+// browsers don't choke on a 200-char name. Falls back to the id when
+// the title is empty or all the characters got stripped.
+const slugify = (raw, id) => {
+  if (!raw || typeof raw !== 'string') return `combined-${id}`;
+  const cleaned = raw
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '')   // strip accents
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  return cleaned ? `${cleaned}-${id}` : `combined-${id}`;
+};
+
 export const streamFile = (req, res) => {
   const id  = parseInt(req.params.id, 10);
   const row = getCombine(id);
@@ -154,7 +170,11 @@ export const streamFile = (req, res) => {
   const stat = fs.statSync(row.outputPath);
   const fileSize = stat.size;
   const range = req.headers.range;
-  const safeName = `combined-${id}.mp4`;
+  // Derive a meaningful filename from the row's title (Cinema renders
+  // pass "Cinema · <master prompt>..." as the title when they create
+  // the combine; ad-hoc Build-tab combines pass the user-typed title).
+  // ID is appended so two downloads of the same title stay distinct.
+  const safeName = `${slugify(row.title, id)}.mp4`;
 
   if (range) {
     const m = /bytes=(\d+)-(\d*)/.exec(range);
