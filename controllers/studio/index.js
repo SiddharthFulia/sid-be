@@ -558,12 +558,21 @@ Output STRICT JSON only (no markdown, no code fences, no preamble):
     let raw = '';
     if (engine === 'gemini') {
       // Lazy-import so we don't pull Gemini deps when Groq is the only path.
-      const { chatGemini } = await import('../../services/ai/geminiService.js').catch(() => ({}));
+      // Path is `services/gemini.js`, not the older `ai/geminiService.js` —
+      // earlier wiring pointed at the wrong file and always 503'd.
+      const { chatGemini } = await import('../../services/gemini.js').catch(() => ({}));
       if (typeof chatGemini !== 'function') {
         return error(res, 'Gemini engine not configured on this BE', 503);
       }
-      const result = await chatGemini(prompt, [], 'gemini-2.5-flash', { system: reviewSystem, temperature: 0.3 });
-      raw = (result?.reply || '').trim();
+      try {
+        const result = await chatGemini(prompt, [], 'gemini-flash', { system: reviewSystem, temperature: 0.3 });
+        raw = (result?.reply || '').trim();
+      } catch (geminiErr) {
+        // Most common cause: GEMINI_API_KEY missing in env. Return a
+        // 503 with the underlying reason so the FE can show it instead
+        // of a generic 500.
+        return error(res, `Gemini review failed: ${geminiErr.message}`, 503);
+      }
     } else {
       const result = await chatGroq(prompt, [], 'llama-3.3-70b', {
         system: reviewSystem,

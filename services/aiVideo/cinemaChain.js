@@ -33,7 +33,7 @@ import os from 'os';
 
 import logger from '../../helpers/logger.js';
 import { getCinemaRender, updateCinemaRender } from './cinemaRenderStore.js';
-import { getCinemaProject } from './cinemaStore.js';
+import { getCinemaProject, updateCinemaProject } from './cinemaStore.js';
 import { createInflightJob } from './storage.js';
 import { getLocalVideo } from './videoStore.js';
 import { uploadSourceImage } from './cloudinaryStore.js';
@@ -190,6 +190,15 @@ async function runCombineAsync({ render, project, combineId, sourceUrls }) {
       finalDownloadHref: `/api/combine/file/${combineId}`,
       completedAt: new Date().toISOString(),
     });
+    // Also flip the parent cinema_projects row so it shows up in the
+    // Cinema Library (StudioLibrary queries cinema_projects with
+    // status=completed). Without this, finished renders stay invisible
+    // even though disk-stats counts them.
+    updateCinemaProject(project.projectId, {
+      status: 'completed',
+      outputUrl: `/api/combine/file/${combineId}`,
+      completedAt: new Date().toISOString(),
+    });
     appendLog(combineId, 'combine', `Cinema render ${render.renderId} complete · ${(result.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
     logger.info(`Cinema render ${render.renderId} complete → /api/combine/file/${combineId}`);
   } catch (err) {
@@ -203,6 +212,11 @@ async function runCombineAsync({ render, project, combineId, sourceUrls }) {
       status: 'failed',
       phase:  'failed',
       error:  `Combine: ${message}`,
+      completedAt: new Date().toISOString(),
+    });
+    updateCinemaProject(project.projectId, {
+      status: 'failed',
+      error:  `Combine: ${message}`.slice(0, 800),
       completedAt: new Date().toISOString(),
     });
     appendLog(combineId, 'combine', `Failed: ${message}`);
