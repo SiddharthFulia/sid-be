@@ -612,6 +612,7 @@ import {
   deleteCinemaRender, listCinemaRenders,
 } from '../../services/aiVideo/cinemaRenderStore.js';
 import { notifyCinemaChainOfCompletion } from '../../services/aiVideo/cinemaChain.js';
+import { db } from '../../services/aiVideo/db.js';
 import {
   tagJobsToRender, listLogsByRender,
 } from '../../services/aiVideo/logStore.js';
@@ -789,6 +790,43 @@ export const postCinemaRenderResume = async (req, res) => {
   updateCinemaRender(row.renderId, { status: 'rendering', phase: 'rendering', error: null });
   notifyCinemaChainOfCompletion(row.shotJobIds[lastCompletedIdx]);
   return success(res, { ok: true, resumedFromShotIndex: lastCompletedIdx });
+};
+
+// GET /api/cinema/disk-stats
+// Cinema-specific disk usage. Aggregates `combined_videos.fileSize` for
+// every combine row that's owned by a cinema_render — the user wants
+// to know "how much disk am I using just for Cinema, separately from
+// ad-hoc Build-tab combines". Returns counts + bytes + a per-render
+// breakdown so the FE library can highlight which rows contribute.
+export const getCinemaDiskStats = (req, res) => {
+  try {
+    const totalsRow = db.prepare(`
+      SELECT
+        COUNT(*) AS count,
+        COALESCE(SUM(cv.fileSize), 0) AS bytes
+      FROM combined_videos cv
+      WHERE cv.id IN (
+        SELECT combineJobId FROM cinema_renders WHERE combineJobId IS NOT NULL
+      )
+      AND cv.outputPath IS NOT NULL
+    `).get();
+
+    const perRender = db.prepare(`
+      SELECT cr.renderId, cr.projectId, cv.id AS combineId, cv.fileSize, cv.title, cv.createdAt
+      FROM cinema_renders cr
+      JOIN combined_videos cv ON cv.id = cr.combineJobId
+      WHERE cr.vault = 0 OR @vault = 1
+      ORDER BY cv.createdAt DESC
+    `).all({ vault: req.vault ? 1 : 0 });
+
+    return success(res, {
+      total: { count: Number(totalsRow?.count || 0), bytes: Number(totalsRow?.bytes || 0) },
+      perRender,
+    });
+  } catch (err) {
+    logger.error('Cinema disk stats failed', err.message);
+    return error(res, err.message);
+  }
 };
 
 // DELETE /api/cinema/render/:renderId
