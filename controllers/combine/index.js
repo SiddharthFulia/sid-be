@@ -12,6 +12,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import multer from 'multer';
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import { combineVideos } from '../../services/ffmpeg/combine.js';
@@ -20,6 +22,19 @@ import {
 } from '../../services/ffmpeg/combineStore.js';
 import { appendLog as appendJobLog } from '../../services/aiVideo/logStore.js';
 import { db } from '../../services/aiVideo/db.js';
+
+// Local uploads land here so they can be fed straight to ffmpeg without
+// a network round-trip. Cleaned by removeUpload (or never — these are
+// small enough not to matter for now).
+const ROOT = process.cwd();
+export const COMBINE_UPLOADS_DIR = path.join(ROOT, 'data', 'combine-uploads');
+fs.mkdirSync(COMBINE_UPLOADS_DIR, { recursive: true });
+
+// In-memory registry of uploaded files. Keyed by uploadId → absolute
+// path on disk. Survives until the process restarts; uploads picked up
+// by a subsequent combine become permanent under their combineJob row
+// (the file is read once at combine time, output written elsewhere).
+const uploadRegistry = new Map();
 
 // Resolve a source-spec to a concrete URL the ffmpeg helper can fetch.
 // videoId hits the `videos` table for its Cloudinary videoUrl. A bare
@@ -38,7 +53,34 @@ function resolveSource(spec) {
       vault: row.vault ? 1 : 0,
     };
   }
-  throw new Error('source must have { videoId } or { url }');
+  // combineId — feed a previous combine's output back in as a source.
+  // Lets users chain combines (e.g. combine A+B → that output + C).
+  if (spec?.combineId) {
+    const row = getCombine(parseInt(spec.combineId, 10));
+    if (!row)                      throw new Error(`combineId ${spec.combineId} not found`);
+    if (row.status !== 'completed') throw new Error(`combine ${spec.combineId} is ${row.status}, not completed`);
+    if (!row.outputPath || !fs.existsSync(row.outputPath)) {
+      throw new Error(`combine ${spec.combineId} file no longer on disk`);
+    }
+    return {
+      url: row.outputPath,   // local path — ffmpeg reads directly
+      title: spec.title || row.title || `combine-${row.id}`,
+      vault: row.vault ? 1 : 0,
+    };
+  }
+  // uploadId — local file the user dragged in via POST /api/combine/upload.
+  if (spec?.uploadId) {
+    const localPath = uploadRegistry.get(spec.uploadId);
+    if (!localPath || !fs.existsSync(localPath)) {
+      throw new Error(`uploadId ${spec.uploadId} not found (server restart?)`);
+    }
+    return {
+      url: localPath,        // local path — bypass HTTP fetch
+      title: spec.title || path.basename(localPath),
+      vault: 0,
+    };
+  }
+  throw new Error('source must have { videoId } or { url } or { combineId } or { uploadId }');
 }
 
 export const postCreate = async (req, res) => {
@@ -222,3 +264,68 @@ export const removeJob = (req, res) => {
   const ok = deleteCombine(id);
   return success(res, { ok });
 };
+
+// ── Upload endpoint ────────────────────────────────────────────────
+// POST /api/combine/upload  (multipart: field name 'file')
+// Stashes a user-supplied mp4 on disk + returns an uploadId the caller
+// passes back inside the sources array on POST /api/combine. Files live
+// under data/combine-uploads/ on the Oracle box so ffmpeg can read them
+// directly without going back over HTTP.
+const uploadStorage = multer.diskStorage({
+  destination: COMBINE_UPLOADS_DIR,
+  filename: (req, file, cb) => {
+    const uploadId = crypto.randomUUID();
+    const ext = (path.extname(file.originalname) || '.mp4').toLowerCase();
+    cb(null, `${uploadId}${ext}`);
+  },
+});
+const upload = multer({
+  storage: uploadStorage,
+  // 500 MB cap — typical AI-generated clips are well under this.
+  // Bumped from 200 MB after user feedback that some hand-shot mp4s
+  // were over the limit.
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    // Permissive on content-type because browsers/iOS occasionally send
+    // application/octet-stream for valid mp4s.
+    const ok = /^video\//i.test(file.mimetype) || file.mimetype === 'application/octet-stream';
+    if (!ok) return cb(new Error(`unsupported mimetype ${file.mimetype}`));
+    cb(null, true);
+  },
+});
+
+export const uploadMiddleware = upload.single('file');
+
+export const postUpload = (req, res) => {
+  try {
+    if (!req.file) return error(res, 'No file uploaded (expected field "file")', 400);
+    // multer wrote the file to disk with its random-UUID filename. The
+    // uploadId is just the filename without extension so we can recover
+    // it from registry lookups.
+    const uploadId = path.basename(req.file.filename, path.extname(req.file.filename));
+    uploadRegistry.set(uploadId, req.file.path);
+    return success(res, {
+      uploadId,
+      name:     req.file.originalname,
+      size:     req.file.size,
+      mimetype: req.file.mimetype,
+    });
+  } catch (err) {
+    logger.error('combine upload failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// Restore upload registry on startup by scanning the on-disk directory.
+// Without this, every restart loses references to uploads that haven't
+// been used in a combine yet.
+try {
+  const files = fs.readdirSync(COMBINE_UPLOADS_DIR);
+  for (const f of files) {
+    const uploadId = path.basename(f, path.extname(f));
+    uploadRegistry.set(uploadId, path.join(COMBINE_UPLOADS_DIR, f));
+  }
+  if (files.length) logger.info(`combine uploads · restored ${files.length} from disk`);
+} catch (err) {
+  logger.warn(`combine uploads · restore failed: ${err.message}`);
+}
