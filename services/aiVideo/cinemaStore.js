@@ -24,6 +24,7 @@ const deleteStmt = db.prepare('DELETE FROM cinema_projects WHERE projectId = ?')
 
 const COLUMNS = new Set([
   'status', 'masterPrompt', 'shotCount', 'shotPrompts', 'shotJobIds',
+  'shotModels', 'shotMusic',
   'outputUrl', 'error', 'durationPerShot', 'aspectRatio', 'resolution', 'vault',
   'completedAt',
 ]);
@@ -46,9 +47,11 @@ export function createCinemaProject(data) {
     completedAt: null,
     ...data,
   };
-  // shotPrompts / shotJobIds are stored as JSON strings if arrays
+  // shotPrompts / shotJobIds / shotModels / shotMusic stored as JSON
   if (Array.isArray(row.shotPrompts)) row.shotPrompts = JSON.stringify(row.shotPrompts);
-  if (Array.isArray(row.shotJobIds)) row.shotJobIds = JSON.stringify(row.shotJobIds);
+  if (Array.isArray(row.shotJobIds))  row.shotJobIds  = JSON.stringify(row.shotJobIds);
+  if (Array.isArray(row.shotModels))  row.shotModels  = JSON.stringify(row.shotModels);
+  if (Array.isArray(row.shotMusic))   row.shotMusic   = JSON.stringify(row.shotMusic.map(v => v ? 1 : 0));
   insertStmt.run(row);
   return row;
 }
@@ -59,6 +62,12 @@ function deserialize(row) {
     ...row,
     shotPrompts: row.shotPrompts ? safeParse(row.shotPrompts, []) : [],
     shotJobIds:  row.shotJobIds  ? safeParse(row.shotJobIds, [])  : [],
+    shotModels:  row.shotModels  ? safeParse(row.shotModels, [])  : [],
+    // shotMusic stored as JSON of 0/1; coerce back to booleans on read
+    // so the FE never has to translate (the toggle binds to a boolean).
+    shotMusic:   row.shotMusic
+      ? safeParse(row.shotMusic, []).map(v => !!v)
+      : [],
   };
 }
 

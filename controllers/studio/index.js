@@ -487,7 +487,7 @@ export const patchCinemaShots = (req, res) => {
   const row = getCinemaProject(req.params.projectId);
   if (!row) return error(res, 'Not found', 404);
   if (row.vault && !req.vault) return error(res, 'Not found', 404);
-  const { shotJobIds, shotPrompts, status, outputUrl, errorMsg } = req.body || {};
+  const { shotJobIds, shotPrompts, shotModels, shotMusic, status, outputUrl, errorMsg } = req.body || {};
   const patch = {};
   if (Array.isArray(shotJobIds)) patch.shotJobIds = shotJobIds;
   // Editable shot prompts — the FE planner lets the user tune each
@@ -498,6 +498,18 @@ export const patchCinemaShots = (req, res) => {
       .map(s => typeof s === 'string' ? s.trim() : '')
       .filter(Boolean)
       .slice(0, row.shotCount);
+  }
+  // Per-shot model selection (only meaningful when the chain runs on
+  // the Beast lane — the optimized + zsky providers ignore it).
+  if (Array.isArray(shotModels)) {
+    patch.shotModels = shotModels
+      .map(m => (typeof m === 'string' ? m.trim() : ''))
+      .slice(0, row.shotCount);
+  }
+  // Per-shot background-music toggle. Stored as 0/1 in SQLite; FE
+  // sees booleans courtesy of the deserialize() helper.
+  if (Array.isArray(shotMusic)) {
+    patch.shotMusic = shotMusic.map(v => !!v).slice(0, row.shotCount);
   }
   if (status) patch.status = status;
   if (outputUrl) patch.outputUrl = outputUrl;

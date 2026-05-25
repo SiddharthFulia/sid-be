@@ -315,6 +315,16 @@ addColumnIfMissing('combined_videos', 'vault', 'INTEGER NOT NULL DEFAULT 0');
 // before this lane existed) keep working with the legacy default.
 addColumnIfMissing('cinema_renders', 'provider',      'TEXT');
 addColumnIfMissing('cinema_renders', 'optimizedMode', 'TEXT');
+// Per-shot configuration so the Cinema planner can pick a different
+// model + music toggle for each shot when running on the Beast lane.
+// Both are nullable JSON arrays of length === shotCount. When null the
+// chain uses provider-level defaults (existing behaviour).
+//   shotModels: array of model ids (e.g. 'wan-2.2', 'ltx-video', …)
+//               applied only when provider === 'local'.
+//   shotMusic:  array of 0/1 booleans; if 1 the worker generates +
+//               muxes a MusicGen track derived from the shot prompt.
+addColumnIfMissing('cinema_projects', 'shotModels', 'TEXT');
+addColumnIfMissing('cinema_projects', 'shotMusic',  'TEXT');
 // job_logs.cinemaRenderId — when a log line belongs to a shot in a
 // cinema render, this column carries the parent renderId. Lets the
 // new GET /api/cinema/render/:renderId/logs endpoint stream every

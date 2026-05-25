@@ -134,11 +134,27 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
              : provider === 'zsky' ? 'worker'
              : 'local';
 
+  // Per-shot model override — only honoured when the chain runs on
+  // the Beast lane (`local`). Optimized's mode picker already drives
+  // the model choice; ZSky picks server-side. Falls back to the
+  // provider-default model otherwise.
+  const perShotModel = Array.isArray(project.shotModels) ? project.shotModels[shotIndex] : null;
+  const effectiveModel = (provider === 'local' && perShotModel && perShotModel.trim())
+    ? perShotModel.trim()
+    : overrides.model;
+
+  // Per-shot background-music toggle. Default is OFF on every shot
+  // (intentional — music is opt-in per the user's spec). When the
+  // toggle is on we pass the shot's prompt as the music brief; the
+  // worker's MusicGen pass derives a 5-15s clip from it.
+  const perShotMusic = Array.isArray(project.shotMusic) ? !!project.shotMusic[shotIndex] : false;
+  const shotPrompt   = project.shotPrompts[shotIndex];
+
   const job = await createInflightJob({
     provider: role,
     originalProvider: provider,
-    prompt: project.shotPrompts[shotIndex],
-    model: overrides.model,
+    prompt: shotPrompt,
+    model: effectiveModel,
     duration: project.durationPerShot || 5,
     resolution: project.resolution    || '720p',
     aspectRatio: project.aspectRatio  || '16:9',
@@ -147,8 +163,8 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
     audio: true,
     imageUrl: frameUrl || '',
     generateCaption: false,
-    withMusic: false,
-    musicPrompt: '',
+    withMusic: perShotMusic,
+    musicPrompt: perShotMusic ? shotPrompt : '',
     vault: render.vault ? 1 : 0,
   });
 
