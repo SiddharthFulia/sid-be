@@ -532,7 +532,7 @@ export const postCinemaShotReview = async (req, res) => {
       return error(res, `shotIndex must be 0..${row.shotCount - 1}`, 400);
     }
 
-    const { currentPrompt, engine = 'groq' } = req.body || {};
+    const { currentPrompt, engine = 'groq', model: modelOverride } = req.body || {};
     const prompt = (typeof currentPrompt === 'string' && currentPrompt.trim())
       ? currentPrompt.trim()
       : (row.shotPrompts || [])[shotIndex] || '';
@@ -564,8 +564,13 @@ Output STRICT JSON only (no markdown, no code fences, no preamble):
       if (typeof chatGemini !== 'function') {
         return error(res, 'Gemini engine not configured on this BE', 503);
       }
+      // Whitelist the same three Gemini aliases AI Chat exposes so the
+      // FE can offer a model picker without us shipping arbitrary
+      // upstream model ids.
+      const GEMINI_ALLOWED = new Set(['gemini-flash', 'gemini-flash-lite', 'gemini-pro']);
+      const geminiModel = GEMINI_ALLOWED.has(modelOverride) ? modelOverride : 'gemini-flash';
       try {
-        const result = await chatGemini(prompt, [], 'gemini-flash', { system: reviewSystem, temperature: 0.3 });
+        const result = await chatGemini(prompt, [], geminiModel, { system: reviewSystem, temperature: 0.3 });
         raw = (result?.reply || '').trim();
       } catch (geminiErr) {
         // Most common cause: GEMINI_API_KEY missing in env. Return a
@@ -596,13 +601,17 @@ Output STRICT JSON only (no markdown, no code fences, no preamble):
       });
     }
 
+    const reportedModel = engine === 'gemini'
+      ? (['gemini-flash', 'gemini-flash-lite', 'gemini-pro'].includes(modelOverride) ? modelOverride : 'gemini-flash')
+      : 'llama-3.3-70b';
     const out = {
       assessment: ['too_detailed', 'good', 'too_vague'].includes(parsed.assessment) ? parsed.assessment : 'good',
       feedback:   String(parsed.feedback || '').slice(0, 400),
       suggested:  String(parsed.suggested || prompt).slice(0, 600),
       engine,
+      model: reportedModel,
     };
-    logger.info(`CINEMA REVIEW | ${projectId} | shot ${shotIndex} | ${out.assessment} | engine=${engine}`);
+    logger.info(`CINEMA REVIEW | ${projectId} | shot ${shotIndex} | ${out.assessment} | engine=${engine} model=${reportedModel}`);
     return success(res, out);
   } catch (err) {
     logger.error('Cinema shot review failed', err.message);
