@@ -128,16 +128,22 @@ export const getList = (req, res) => {
   return success(res, { ...result, visibility: wantsVault ? 'vault' : 'public' });
 };
 
-// Auto-delete after first full (non-range) download finishes, matching
-// the yt-dl privacy behaviour. Range requests are spared so the daily
-// cron can clean them up later.
+// Auto-delete-on-first-download was REMOVED (2026-05-25) — it was a
+// YT-DL-style privacy mirror that didn't fit the Combine + Cinema
+// model. Combine outputs (especially Cinema renders) are deliverables
+// the user wants to keep + re-download; nuking the file after the
+// first save broke that. The file now persists until either:
+//   • the user explicitly hits DELETE /api/combine/:id (removeJob), or
+//   • a future sweeper cron evicts old rows (not wired yet).
+// safelyDeleteFile() is left intact (still called by removeJob) for
+// the explicit delete path.
 const safelyDeleteFile = (id, filePath) => {
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     updateCombine(id, { outputPath: null });
-    logger.info(`combine auto-deleted file after download jobId=${id}`);
+    logger.info(`combine file deleted jobId=${id}`);
   } catch (err) {
-    logger.warn(`combine auto-delete failed jobId=${id}: ${err.message}`);
+    logger.warn(`combine file delete failed jobId=${id}: ${err.message}`);
   }
 };
 
@@ -196,13 +202,10 @@ export const streamFile = (req, res) => {
       'Content-Disposition': `attachment; filename="${safeName}"`,
       'Accept-Ranges':   'bytes',
     });
-    const stream = fs.createReadStream(row.outputPath);
-    let bytesStreamed = 0;
-    stream.on('data', (c) => { bytesStreamed += c.length; });
-    res.once('finish', () => {
-      if (bytesStreamed >= fileSize) safelyDeleteFile(id, row.outputPath);
-    });
-    stream.pipe(res);
+    // No auto-delete after the response finishes — combine outputs
+    // are deliverables the user expects to be able to re-download.
+    // See safelyDeleteFile above for the long-form reason.
+    fs.createReadStream(row.outputPath).pipe(res);
   }
 };
 
