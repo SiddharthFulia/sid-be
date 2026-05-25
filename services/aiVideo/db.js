@@ -785,4 +785,49 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_cinema_status_created ON cinema_projects(status, createdAt DESC);
 `);
 
+// ─── Cinema renders (per-attempt resumable render state) ───────
+// One Cinema project can be rendered MANY times. Each render gets its
+// own row here so the FE can drive the multi-shot chain client-side but
+// the user can still:
+//   • close the tab + come back to /cinema/render/:renderId and see
+//     where the chain is
+//   • refresh mid-flight without losing per-shot state
+//   • share a render URL with someone else
+//
+// FE flow:
+//   1. POST /api/cinema/:projectId/render → returns { renderId }
+//   2. FE navigates to /cinema/render/:renderId
+//   3. The render page reads state on mount + polls
+//   4. FE chain PATCHes after every shot transition so the row stays in
+//      sync with what the browser is doing
+//
+//   shotJobIds : JSON array of videoIds in order. Position N is null until
+//                shot N kicks off, then becomes the videoId. Drives the
+//                "which shots are done / which is current" UI without
+//                needing a separate per-shot table.
+//   combineJobId / finalDownloadHref : populated after the chain hits the
+//                combine step.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS cinema_renders (
+    renderId          TEXT PRIMARY KEY,
+    projectId         TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'queued',
+                                      -- queued | rendering | extracting | uploading |
+                                      -- combining | completed | failed | cancelled
+    phase             TEXT,           -- mirrors FE PHASES — for the status pill
+    currentShotIndex  INTEGER NOT NULL DEFAULT 0,
+    shotCount         INTEGER NOT NULL,
+    shotJobIds        TEXT,           -- JSON array of videoIds, indexed by shot
+    combineJobId      INTEGER,        -- id from combined_videos
+    finalDownloadHref TEXT,           -- /api/combine/file/<id> for the stitched mp4
+    error             TEXT,
+    vault             INTEGER NOT NULL DEFAULT 0,
+    createdAt         TEXT NOT NULL,
+    updatedAt         TEXT NOT NULL,
+    completedAt       TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_cinema_renders_project ON cinema_renders(projectId, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_cinema_renders_status  ON cinema_renders(status, createdAt DESC);
+`);
+
 logger.info(`SQLite: ${DB_PATH} ready`);

@@ -483,3 +483,108 @@ export const patchCinemaShots = (req, res) => {
   const updated = updateCinemaProject(req.params.projectId, patch);
   return success(res, updated);
 };
+
+// ─── Cinema renders (per-attempt resumable state) ──────────────
+// The FE drives the actual multi-shot chain client-side, but each
+// render is registered here so a refresh / new tab / share-link can
+// pick the live view back up. See services/aiVideo/cinemaRenderStore.js
+// for the shape contract. Vault inherits from the parent project.
+
+import {
+  createCinemaRender, getCinemaRender, updateCinemaRender,
+  deleteCinemaRender, listCinemaRenders,
+} from '../../services/aiVideo/cinemaRenderStore.js';
+
+// POST /api/cinema/:projectId/render
+// Creates a render row tied to the project. Returns { renderId } so the
+// FE can navigate to /cinema/render/<renderId>. No actual generation
+// kicks off here — the FE orchestrator handles that.
+export const postCinemaRender = (req, res) => {
+  try {
+    const project = getCinemaProject(req.params.projectId);
+    if (!project) return error(res, 'Cinema project not found', 404);
+    if (project.vault && !req.vault) return error(res, 'Cinema project not found', 404);
+    if (!Array.isArray(project.shotPrompts) || project.shotPrompts.length === 0) {
+      return error(res, 'Project has no planned shots — plan first', 400);
+    }
+    const row = createCinemaRender({
+      projectId: project.projectId,
+      shotCount: project.shotPrompts.length,
+      vault: project.vault ? 1 : 0,
+    });
+    logger.info(`CINEMA RENDER NEW | ${row.renderId} | project=${project.projectId} | shots=${row.shotCount}`);
+    return success(res, row);
+  } catch (err) {
+    logger.error('Cinema render create failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// GET /api/cinema/render/:renderId
+// Returns the render row + the parent project (so the page has
+// shotPrompts + duration + aspect/resolution without a second call).
+// Vault rows return 404 to anonymous viewers.
+export const getCinemaRenderStatus = (req, res) => {
+  const row = getCinemaRender(req.params.renderId);
+  if (!row) return error(res, 'Cinema render not found', 404);
+  if (row.vault && !req.vault) return error(res, 'Cinema render not found', 404);
+  const project = getCinemaProject(row.projectId);
+  return success(res, { ...row, project });
+};
+
+// PATCH /api/cinema/render/:renderId
+// Called by the FE chain after each shot transition. Accepts:
+//   { status, phase, currentShotIndex, shotJobIds, combineJobId,
+//     finalDownloadHref, error }
+// Auto-stamps completedAt when status flips to completed / failed /
+// cancelled. shotJobIds is REPLACED whole (not merged) — the FE sends
+// the current array each time.
+export const patchCinemaRender = (req, res) => {
+  const row = getCinemaRender(req.params.renderId);
+  if (!row) return error(res, 'Cinema render not found', 404);
+  if (row.vault && !req.vault) return error(res, 'Cinema render not found', 404);
+  const {
+    status, phase, currentShotIndex,
+    shotJobIds, combineJobId, finalDownloadHref, error: errorMsg,
+  } = req.body || {};
+  const patch = {};
+  if (status) patch.status = status;
+  if (phase)  patch.phase  = phase;
+  if (typeof currentShotIndex === 'number') patch.currentShotIndex = currentShotIndex;
+  if (Array.isArray(shotJobIds))  patch.shotJobIds  = shotJobIds;
+  if (combineJobId != null)       patch.combineJobId = combineJobId;
+  if (finalDownloadHref)          patch.finalDownloadHref = finalDownloadHref;
+  if (errorMsg)                   patch.error = String(errorMsg).slice(0, 800);
+  const terminal = status && ['completed', 'failed', 'cancelled'].includes(status);
+  if (terminal) patch.completedAt = new Date().toISOString();
+  const updated = updateCinemaRender(req.params.renderId, patch);
+  return success(res, updated);
+};
+
+// GET /api/cinema/renders?projectId=&status=&page=&pageSize=
+// Paginated list of renders. Same contract every other library list uses.
+export const getCinemaRendersList = (req, res) => {
+  try {
+    const projectId = typeof req.query.projectId === 'string' && req.query.projectId
+      ? req.query.projectId : undefined;
+    const status = typeof req.query.status === 'string' && req.query.status && req.query.status !== 'all'
+      ? req.query.status : undefined;
+    const page     = parseInt(req.query.page, 10)     || 1;
+    const pageSize = parseInt(req.query.pageSize, 10) || parseInt(req.query.limit, 10) || 24;
+    const vault    = req.vault ? 1 : 0;
+    const result = listCinemaRenders({ projectId, status, page, pageSize, vault });
+    return success(res, result);
+  } catch (err) {
+    logger.error('Cinema renders list failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// DELETE /api/cinema/render/:renderId
+export const deleteCinemaRenderCtrl = (req, res) => {
+  const row = getCinemaRender(req.params.renderId);
+  if (!row) return error(res, 'Cinema render not found', 404);
+  if (row.vault && !req.vault) return error(res, 'Cinema render not found', 404);
+  const ok = deleteCinemaRender(req.params.renderId);
+  return success(res, { ok });
+};
