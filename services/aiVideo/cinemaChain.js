@@ -186,10 +186,15 @@ async function queueNextShot({ render, project, shotIndex, frameUrl, frameTime }
   let removedDriftWords = [];
 
   if (continuityMode) {
+    // §72 — per-shot Groq-emitted negative, scene-tuned at planning
+    // time. The director stacks it on top of the global base negative.
+    const perShotNegative = Array.isArray(project.shotNegatives)
+      ? (project.shotNegatives[shotIndex] || '')
+      : '';
     const compiled = compileContinuityPrompt({
       bible: project.continuityBible || {},
       directorState: project.directorState || {},
-      shot: { action },
+      shot: { action, negative: perShotNegative },
       previousShot,
       shotIndex,
       totalShots: project.shotCount || (Array.isArray(project.shotPrompts) ? project.shotPrompts.length : 0),

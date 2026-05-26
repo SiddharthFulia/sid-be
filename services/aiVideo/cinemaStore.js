@@ -27,7 +27,7 @@ const COLUMNS = new Set([
   'shotModels', 'shotMusic',
   'continuityBible', 'lockedSeed', 'motionStrength', 'heroImageUrl',
   'directorState', 'continuityMode', 'overlapMode', 'realismMode',
-  'stepsPerShot',
+  'stepsPerShot', 'shotNegatives',
   'outputUrl', 'error', 'durationPerShot', 'aspectRatio', 'resolution', 'vault',
   'completedAt',
 ]);
@@ -66,6 +66,12 @@ function deserialize(row) {
     shotPrompts: row.shotPrompts ? safeParse(row.shotPrompts, []) : [],
     shotJobIds:  row.shotJobIds  ? safeParse(row.shotJobIds, [])  : [],
     shotModels:  row.shotModels  ? safeParse(row.shotModels, [])  : [],
+    // Per-shot Groq-emitted negatives. Strings; length matches
+    // shotPrompts when Groq played ball. Empty/null entries are OK
+    // (chain just uses the global base negative for that shot).
+    shotNegatives: row.shotNegatives
+      ? safeParse(row.shotNegatives, []).map(v => typeof v === 'string' ? v : '')
+      : [],
     // shotMusic stored as JSON of 0/1; coerce back to booleans on read
     // so the FE never has to translate (the toggle binds to a boolean).
     shotMusic:   row.shotMusic

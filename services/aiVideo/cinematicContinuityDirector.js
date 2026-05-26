@@ -47,6 +47,63 @@ export const DRIFT_WORDS = [
   'extreme camera move', 'camera flies above',
 ];
 
+// Direction-flip drift — phrases that confuse the model into flipping
+// the WHOLE BODY when the user meant a small head movement. Separate
+// from DRIFT_WORDS because these are AUTO-REWRITTEN (not stripped);
+// the user almost always wants the action, just in a body-stays-locked
+// form. Each entry: { test: RegExp, replace: string, label: string }.
+//
+// Ordering matters — first match wins. More specific phrases listed
+// before general ones so "turns his head" gets the head-only rewrite
+// before the generic "turn" or "turns" hits a broader rule.
+export const DIRECTION_REWRITES = [
+  {
+    label: 'turn-head',
+    test:    /\bturns?\s+(his|her|its|the|their)\s+head\b[^.]*/gi,
+    replace: 'turns only the head slightly, body and walking direction unchanged',
+  },
+  {
+    label: 'head-turn',
+    test:    /\bhead\s+turns?\b[^.]*/gi,
+    replace: 'head turns slightly while torso, hips and feet keep facing the same direction',
+  },
+  {
+    label: 'looks-back',
+    test:    /\blooks?\s+(back|over\s+(his|her|its|the|their)\s+shoulder)\b[^.]*/gi,
+    replace: 'gives a brief side-glance without turning the body',
+  },
+  {
+    label: 'over-shoulder-camera',
+    test:    /\bover-?the-?shoulder\b/gi,
+    replace: 'three-quarter rear angle (body remains in its established orientation)',
+  },
+  {
+    label: 'turns-around',
+    test:    /\bturns?\s+(around|about|180)\b[^.]*/gi,
+    replace: 'pauses momentarily without turning the body',
+  },
+  {
+    label: 'walks-away',
+    test:    /\bwalks?\s+away\b[^.]*/gi,
+    replace: 'continues walking in the established screen direction',
+  },
+  {
+    label: 'walks-toward-flip',
+    test:    /\bwalks?\s+toward\s+(the\s+)?camera\b/gi,
+    replace: 'continues walking in the established direction (do NOT reverse)',
+  },
+  {
+    label: 'pivots-spins',
+    test:    /\b(pivots?|spins?|rotates?)\s+(in\s+place|around)?\b[^.]*/gi,
+    replace: 'remains in the same body orientation',
+  },
+  {
+    label: 'rear-view',
+    test:    /\b(rear\s+view|back\s+view|from\s+behind|behind\s+(him|her|it|them))\b/gi,
+    replace: 'from the established camera angle',
+  },
+];
+
 // Per-model safer defaults when continuityMode is on. The chain reads
 // `motionStrength` from here as a hard cap and `maxRecommendedShotSeconds`
 // for the risk score (longer shots on weaker models = higher risk).
@@ -90,16 +147,44 @@ const NEGATIVE_BASE = [
   'subject walking toward camera if walking away',
   'character reversing direction', 'head turn 180',
   'about-face', 'pivot in place', 'subject facing wrong direction',
+  // Subject Direction Lock — explicit body-flip negatives so the
+  // model can't mistake "head turn" for "body turn". The chain glues
+  // these to every shot's negative prompt; image-only workflows
+  // (without a negative CLIP node) ignore them harmlessly.
+  'walking away', 'back view', 'rear view', 'turned around',
+  'reverse direction', 'facing away from camera', '180 degree turn',
+  'body rotation', 'direction flip', 'screen direction flip',
+  'camera jumps behind subject', 'torso rotated 180',
+  'character spinning', 'subject pivoting', 'subject from behind',
 ];
 
 // ─── Sanitization ───────────────────────────────────────────────────
 
-// Returns { cleaned, removed } — `removed` is the list of drift phrases
-// stripped out so the chain can surface them in the log.
+// Returns { cleaned, removed, rewrites } — `removed` is the list of
+// drift phrases stripped, `rewrites` is the list of direction phrases
+// auto-rewritten to body-stays-locked variants. Both lists land in
+// the chain log so the user sees what changed.
 export function sanitizeShotAction(action, directorState = {}) {
-  if (!action || typeof action !== 'string') return { cleaned: '', removed: [] };
+  if (!action || typeof action !== 'string') return { cleaned: '', removed: [], rewrites: [] };
   let cleaned = action;
   const removed = [];
+  const rewrites = [];
+
+  // STEP 1 — direction rewrites. These run FIRST so "turns his head"
+  // is replaced with the body-stays-locked variant BEFORE the drift
+  // pass strips general drift words. The order in DIRECTION_REWRITES
+  // is most-specific-first; one match per pattern.
+  for (const { label, test, replace } of DIRECTION_REWRITES) {
+    if (test.test(cleaned)) {
+      // Reset the regex's lastIndex (it's stateful for /g flags).
+      test.lastIndex = 0;
+      cleaned = cleaned.replace(test, replace);
+      rewrites.push(label);
+    }
+    test.lastIndex = 0;
+  }
+
+  // STEP 2 — drift word removal (location resets, transforms, etc.)
   for (const phrase of DRIFT_WORDS) {
     const re = new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
     if (re.test(cleaned)) {
@@ -109,7 +194,9 @@ export function sanitizeShotAction(action, directorState = {}) {
   }
   // Drop trailing junk left by removals (e.g. "the wolf catches scent in a")
   cleaned = cleaned.replace(/\b(in|at|on|under|with|to|from)\s*$/i, '').trim();
-  return { cleaned, removed };
+  // Collapse multi-space runs left over from rewrites.
+  cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
+  return { cleaned, removed, rewrites };
 }
 
 // ─── Camera + physical continuation ─────────────────────────────────
@@ -212,6 +299,8 @@ export function compileContinuityPrompt({
   const warnings = [];
 
   // 1. Locked visual bible.
+  // Compile pulls per-shot negative from `shot.negative` (Groq-emitted
+  // at planning time) and stacks it on top of the global base negative.
   const bibleFields = ['subject', 'wardrobe', 'environment', 'lighting', 'camera', 'palette'];
   const bibleLine = bibleFields
     .map(k => (bible[k] || '').toString().trim())
@@ -230,10 +319,15 @@ export function compileContinuityPrompt({
     ? 'Establishing shot of the scene.'
     : 'Continuation of the previous shot — subjects keep moving without teleporting or changing direction.';
 
-  // 5. The shot's own action — sanitized for drift.
+  // 5. The shot's own action — sanitized for drift + direction-flip
+  // rewrites (turns head → "head turns only, body keeps walking").
   const rawAction = (typeof shot === 'string' ? shot : shot.action || '').trim();
-  const { cleaned: cleanedAction, removed: removedDrift } = sanitizeShotAction(rawAction, directorState);
+  const sanitized = sanitizeShotAction(rawAction, directorState);
+  const cleanedAction = sanitized.cleaned;
+  const removedDrift  = sanitized.removed;
+  const rewrites      = sanitized.rewrites || [];
   if (removedDrift.length) warnings.push(`drift removed: ${removedDrift.join(', ')}`);
+  if (rewrites.length)     warnings.push(`direction-locked: ${rewrites.join(', ')}`);
 
   // 6. Realism layer (toggleable).
   const realismLine = realismMode ? REALISM_LAYER : '';
@@ -250,8 +344,20 @@ export function compileContinuityPrompt({
   ].filter(Boolean);
   const positivePrompt = parts.join('. ').replace(/\.{2,}/g, '.').replace(/\s+\./g, '.').trim();
 
-  // 8. Negative prompt
-  const negativePrompt = buildContinuityNegativePrompt({ bible, directorState, shot });
+  // 8. Negative prompt. Stack the GLOBAL base negative + the
+  // SHOT-SPECIFIC negative Groq emitted at planning time. The
+  // per-shot piece is where scene-tuned warnings live (e.g. for a
+  // surfing shot: "no wave breaking backward, no surfboard going
+  // through the surfer"; for a samurai: "no body turn, no walking
+  // away"). Falls back to global-only when the planner didn't emit
+  // a per-shot negative.
+  const baseNegative = buildContinuityNegativePrompt({ bible, directorState, shot });
+  const perShotNegative = (typeof shot === 'object' && typeof shot?.negative === 'string')
+    ? shot.negative.trim()
+    : '';
+  const negativePrompt = perShotNegative
+    ? `${baseNegative}, ${perShotNegative}`
+    : baseNegative;
 
   // 9. Compact one-line log summary for job_logs.
   // Defensive — every `.length` here protected so a missing field
@@ -275,6 +381,7 @@ export function compileContinuityPrompt({
     continuityWarnings: warnings,
     sanitizedAction: cleanedAction,
     removedDrift,
+    rewrites,
   };
 }
 

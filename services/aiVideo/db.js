@@ -359,6 +359,12 @@ addColumnIfMissing('cinema_projects', 'heroImageUrl',    'TEXT');
 // across the chain instead of shot 1 (FE-default 30) being sharper
 // than shots 2+ (chain default 14).
 addColumnIfMissing('cinema_projects', 'stepsPerShot',    'INTEGER');
+// Per-shot negative prompts emitted by Groq at planning time (§72).
+// JSON array of strings, length === shotCount. The chain glues each
+// onto the GLOBAL base negative (built by the director) at submit
+// time. Groq tunes them per scene (samurai vs surfer vs spaceship
+// have very different "ways the model can mess up").
+addColumnIfMissing('cinema_projects', 'shotNegatives',   'TEXT');
 // Cinematic Continuity Director (§69). directorState is a JSON column
 // with physicalState / cameraState / emotionArc / negativeContinuityRules.
 // continuityMode / overlapMode / realismMode are user-facing toggles

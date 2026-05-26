@@ -387,10 +387,20 @@ export const postCinema = async (req, res) => {
       ? '20-35 words. ONE clear action with an optional second beat. Mention lighting (golden hour, neon, etc.). Single-axis camera move okay (dolly, pan, push).'
       : '30-50 words. Can describe TWO connected actions (intro → payoff). Lighting + camera-move detail welcome (drone, crane, tracking shot).';
 
-    // Cinematic Continuity Director planner (§69). Groq now emits a
-    // bible + a STRUCTURED directorState + an action list. The director
-    // module glues all three together at submit time per shot.
+    // Cinematic Continuity Director planner (§69 + §72). Groq emits:
+    //   • bible (locked world facts)
+    //   • directorState (physical / camera / emotion / negative rules)
+    //   • shots[] — each shot has { action, negative } where the action
+    //     is in baby-step explicit body-vs-head language AND the negative
+    //     is scene-tuned (surfer vs samurai vs spaceship vs astronaut
+    //     have different "ways the model can mess up"). The chain
+    //     stacks each shot's negative on top of a global base negative
+    //     at submit time.
     const system = `You are a cinema director planning a CONTINUITY-LOCKED multi-shot sequence for AI video. ${shotCount} shots, ${safeDuration} seconds each, ONE model running ONE locked seed across all shots. The audience should feel one camera captured one continuous moment, not N independent clips.
+
+Treat the video model like a baby. Spell out body orientation, head movement, walking direction, foreground/background separately. If you don't say "body keeps walking forward", the model will rotate the whole body when you mention a head turn. Be very explicit.
+
+For EACH shot, also emit a per-shot NEGATIVE prompt. The negative is what THIS specific shot must NOT show. Tune it to the scene — a samurai-walking-forward shot has different failure modes than a surfer-on-wave shot or a spaceship-flying shot. Think about how this exact action could go wrong on a video model, then forbid those failures explicitly.
 
 Output STRICT JSON ONLY (no markdown, no code fences, no preamble):
 {
@@ -437,7 +447,13 @@ Output STRICT JSON ONLY (no markdown, no code fences, no preamble):
       "avoid sudden composition resets"
     ]
   },
-  "actions": ["action 1", "action 2", ..., "action ${shotCount}"]
+  "shots": [
+    {
+      "action":   "the verb + camera move for this shot, written in baby-step body-vs-head language (see rules)",
+      "negative": "scene-tuned NEGATIVE prompt — what this shot must NOT show. 10-25 short phrases comma-separated."
+    }
+    // ... exactly ${shotCount} entries
+  ]
 }
 
 BIBLE rules:
@@ -451,35 +467,63 @@ DIRECTORSTATE rules:
 - emotionArc captures the feeling progression, not new world events.
 - negativeContinuityRules: 8-12 short imperative sentences forbidding world resets.
 
-ACTION rules — THIS IS WHERE FILMS DIE OR LIVE:
+SHOT-ACTION rules — THIS IS WHERE FILMS DIE OR LIVE:
 - EXACTLY ${shotCount} entries, ${durationBand}
-- Each action describes ONLY what CHANGES in that single shot — a verb + a small camera adjustment.
-- For shot 2 and later, the action MUST read as a CONTINUATION (e.g. "continues forward as the leader's nose lifts to the wind").
+- For shot 2 and later, the action MUST read as a CONTINUATION ("continues walking forward as…", "his nose lifts while still walking…").
 - NEVER re-describe subject appearance, environment, lighting, or palette. Bible carries those.
 - NEVER introduce a "new" world element, new character, new place, new time of day.
 - NEVER use "then", "and then", "after that", "later" — each clip is one continuous moment.
 - Subjects must NOT teleport, reverse direction, or pose-reset between shots.
 - Camera momentum must carry across shots (if shot 1 is forward tracking, shot 2 continues forward).
+
+CRITICAL — BODY vs HEAD vs DIRECTION (video models confuse these):
+- When you want a small head movement, ALWAYS spell out "head turns slightly while body, hips and feet keep walking in the established direction". Never just write "turns his head" — the model rotates the whole body.
+- When the subject was walking toward camera in the previous shot, NEVER use phrases like "walks away", "looks back", "turns around", "over shoulder", "from behind". Use "continues walking toward camera, growing slightly larger in frame".
+- For animals: "feet/paws maintain ground contact, no floating, no teleporting".
 - Include 1 in 3 actions with imperfect framing (foreground occlusion, off-center subject, dead space).
 - Narrative shape: setup → development → beat → resolution, compressed to ${shotCount} beats.
 
-Example for a snowy wolf-pack sequence (4 shots):
-{"bible":{"subject":"wolf pack of five, alpha at front, weather-beaten coats","wardrobe":"thick winter fur with frost crystals","environment":"narrow snowy mountain pass with cliffs either side, hidden valley ahead","lighting":"warm golden hour rim from the west","camera":"35mm anamorphic, soft halation, fine grain","palette":"amber, snow white, slate blue, charcoal"},"directorState":{"physicalState":{"screenDirection":"left_to_right","subjectMotion":"walking forward at a steady pace","windDirection":"left_to_right","snowDirection":"left_to_right","weatherIntensity":"medium","terrain":"snow-covered rocky mountain pass","timeOfDay":"golden hour"},"cameraState":{"lens":"35mm anamorphic","height":"wolf-eye level","movement":"slow forward tracking","energy":"calm tense documentary realism","stabilization":"slightly handheld with natural operator sway"},"emotionArc":{"start":"searching and alert","middle":"the leader senses something","end":"reveal and recognition"},"negativeContinuityRules":["do not change the wolf design","do not change the snowy pass","do not change golden hour","do not teleport wolves","do not reverse screen direction","do not add other animals","do not change camera style","do not make it cartoonish","avoid surreal morphing","avoid sudden framing resets"]},"actions":["wide shot, the pack continues left to right through the pass, slow forward tracking","medium shot, the alpha's nose lifts to the wind while still walking, foreground branch crosses lens","low-angle close on paws crunching fresh snow, camera continues forward at the same pace","over-shoulder reveal of the hidden valley below, slow tilt down without breaking the forward momentum"]}
+PER-SHOT NEGATIVE rules — TUNE TO THE SCENE:
+- 10-25 short comma-separated phrases per shot. No paragraphs, no sentences.
+- Think about how THIS specific scene could go wrong on a video model. Examples by scene type:
+  • Walking forward subject → "walking away from camera, back view, body turn, head turn 180, character reversing direction, subject growing smaller in frame"
+  • Surfer on wave → "wave breaking backward, surfboard going through the surfer, surfer falling off mid-shot, second surfer appearing, wave color shift, sky and water swap"
+  • Spaceship flying → "ship reversing direction, ship doubling, engine flames disappearing, second ship in frame, ship flipping upside down"
+  • Combat / action → "weapon switching hands, opponent vanishing, attack reversing mid-swing, extra limbs, blade clipping through body"
+  • Quiet emotion → "facial morph, eye color change, lip-sync glitch, asymmetric face, plastic skin"
+- Always include the universal trio: "morphing, identity change, plastic AI texture".
+- Match the negative to the action verb. A close-up doesn't need "wave breaking backward"; a wide wave shot doesn't need "plastic skin".
+
+Example 1 — snowy wolf pack (4 shots):
+{"bible":{"subject":"wolf pack of five, alpha at front, weather-beaten coats","wardrobe":"thick winter fur with frost crystals","environment":"narrow snowy mountain pass with cliffs either side, hidden valley ahead","lighting":"warm golden hour rim from the west","camera":"35mm anamorphic, soft halation, fine grain","palette":"amber, snow white, slate blue, charcoal"},"directorState":{"physicalState":{"screenDirection":"left_to_right","subjectMotion":"walking forward at a steady pace","windDirection":"left_to_right","snowDirection":"left_to_right","weatherIntensity":"medium","terrain":"snow-covered rocky mountain pass","timeOfDay":"golden hour"},"cameraState":{"lens":"35mm anamorphic","height":"wolf-eye level","movement":"slow forward tracking","energy":"calm tense documentary realism","stabilization":"slightly handheld with natural operator sway"},"emotionArc":{"start":"searching and alert","middle":"the leader senses something","end":"reveal and recognition"},"negativeContinuityRules":["do not change the wolf design","do not reverse screen direction","do not add other animals","do not make it cartoonish"]},"shots":[{"action":"wide shot, the pack continues moving left to right through the pass, slow forward camera tracking, paws crunching snow","negative":"wolves reversing direction, body turn 180, wolves walking right to left, wolves growing smaller, extra wolves appearing, plastic fur texture, floating paws, morphing, identity change"},{"action":"medium shot, the alpha's nose lifts slightly while his body, paws and legs keep walking in the same direction, foreground frost-covered branch crosses lens","negative":"body turn, alpha walking toward camera then turning around, head rotation pulling body, wolf pack regrouping facing the wrong way, plastic fur, eye color change"},{"action":"low-angle close on paws crunching fresh snow, camera continues forward at the same pace, alpha's chest visible in upper frame","negative":"paws floating, snow pristine and untouched, wolves teleporting, sudden change in scale, paws clipping through ground"},{"action":"slow tilt down reveals the hidden valley below while the camera keeps its forward momentum, pack still in same orientation","negative":"valley becomes desert, valley swaps for city, golden hour becomes night, sudden helicopter view, wolves disappearing"}]}
+
+Example 2 — surfer on big wave (4 shots):
+{"bible":{"subject":"male surfer late twenties, athletic, weather-tanned","wardrobe":"black short wetsuit, bare arms, no logo","environment":"twenty-foot blue-green wave forming under overcast morning sky, open ocean","lighting":"cool overcast morning light, low contrast","camera":"long-lens 200mm sports, slight handheld","palette":"cyan, foam white, steel grey, sand"},"directorState":{"physicalState":{"screenDirection":"right_to_left","subjectMotion":"carving down the wave face","windDirection":"right_to_left","snowDirection":"not_applicable","weatherIntensity":"medium","terrain":"open ocean swell","timeOfDay":"overcast morning"},"cameraState":{"lens":"200mm long lens","height":"sea level on a tracking boat","movement":"following pan with the surfer","energy":"tense sports cinematography","stabilization":"slight handheld telephoto wobble"},"emotionArc":{"start":"committing to the wave","middle":"deep in the pocket","end":"emerging from the tube"},"negativeContinuityRules":["do not change the surfer design","do not reverse wave direction","do not change the time of day","do not add other surfers","avoid cartoon look"]},"shots":[{"action":"wide tracking shot, surfer drops in from the lip, board cutting right to left across the face, spray trailing behind","negative":"wave breaking backward, surfer reversing direction, surfboard going through the surfer, second surfer appearing, board doubling, wave color shifting to red, sky becoming sunny, surfer floating above water"},{"action":"medium tracking shot, surfer carves deeper into the pocket, knees bent, body weight forward, same board, same wetsuit","negative":"surfboard clipping through legs, body turning to face the wave instead of the line, surfer falling off mid-frame, extra arms, plastic skin, wave dissipating"},{"action":"low-angle close shot at sea level, the lip of the wave starts curling overhead, surfer still in the same crouch and same line","negative":"surfer popping up out of the wave, wave inverting, board flying away separately, sky-water swap, surfer multiplying"},{"action":"slow telephoto pull-back reveals the tube closing as the surfer continues to ride toward camera-left, water spray catching low light","negative":"tube collapsing on the surfer instead of behind, surfer reversing back to drop-in, board snapping for no reason, second surfer materializing, end-frame morph"}]}
 `;
 
-    let shotPrompts = [];
-    let bible       = {};
+    let shotPrompts   = [];
+    let shotNegatives = [];
+    let bible         = {};
     let directorState = {};
     try {
       const groqRes = await chatGroq(masterPrompt.trim(), [], 'llama-3.3-70b', {
-        system, temperature: 0.55, maxTokens: 2000,
+        system, temperature: 0.55, maxTokens: 2800,   // bumped — shots[] is larger now
       });
       let raw = (groqRes.reply || '').trim();
       raw = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
       let parsed = null;
       try { parsed = JSON.parse(raw); } catch {}
-      if (parsed && Array.isArray(parsed.actions)) {
+      // New shape: parsed.shots = [{action, negative}, ...]
+      // Legacy: parsed.actions = [string, ...] — kept as fallback.
+      if (parsed && Array.isArray(parsed.shots)) {
+        const shots = parsed.shots.slice(0, shotCount);
+        shotPrompts   = shots.map(s => String(s?.action   || '').trim()).filter(Boolean);
+        shotNegatives = shots.map(s => String(s?.negative || '').trim().slice(0, 600));
+      } else if (parsed && Array.isArray(parsed.actions)) {
         shotPrompts = parsed.actions.map(s => String(s || '').trim()).filter(Boolean).slice(0, shotCount);
+        shotNegatives = []; // legacy planner output — chain uses global negative only
+      }
+      if (parsed && (Array.isArray(parsed.shots) || Array.isArray(parsed.actions))) {
         if (parsed.bible && typeof parsed.bible === 'object') {
           const clamp = (s) => String(s || '').trim().split(/\s+/).slice(0, 25).join(' ');
           bible = {
@@ -549,6 +593,7 @@ Example for a snowy wolf-pack sequence (4 shots):
     const updated = updateCinemaProject(project.projectId, {
       continuityBible: bible,
       directorState,
+      shotNegatives,
       lockedSeed,
       motionStrength: 0.5,           // safer default for continuity (was 0.6)
       continuityMode: true,
@@ -622,7 +667,7 @@ export const patchCinemaShots = (req, res) => {
     shotJobIds, shotPrompts, shotModels, shotMusic,
     continuityBible, lockedSeed, motionStrength, heroImageUrl,
     directorState, continuityMode, overlapMode, realismMode,
-    stepsPerShot,
+    stepsPerShot, shotNegatives,
     status, outputUrl, errorMsg,
   } = req.body || {};
   const patch = {};
@@ -702,6 +747,13 @@ export const patchCinemaShots = (req, res) => {
     patch.stepsPerShot = null;
   } else if (Number.isFinite(stepsPerShot)) {
     patch.stepsPerShot = Math.max(4, Math.min(200, Math.floor(stepsPerShot)));
+  }
+  // Per-shot Groq-emitted negatives. Whitelist to strings + cap each
+  // at 600 chars so a runaway edit can't poison the negative prompt.
+  if (Array.isArray(shotNegatives)) {
+    patch.shotNegatives = shotNegatives
+      .map(s => (typeof s === 'string' ? s.trim().slice(0, 600) : ''))
+      .slice(0, row.shotCount);
   }
   if (status) patch.status = status;
   if (outputUrl) patch.outputUrl = outputUrl;
