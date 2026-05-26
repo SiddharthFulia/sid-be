@@ -12,6 +12,7 @@ import {
   postCinemaRender, getCinemaRenderStatus, patchCinemaRender,
   getCinemaRendersList, deleteCinemaRenderCtrl, postCinemaRenderResume,
   getCinemaRenderLogs, postCinemaShotReview, postCinemaFixAction, getCinemaDiskStats,
+  postCinemaRenderCancel,
 } from '../../controllers/studio/index.js';
 
 const router = Router();
@@ -49,6 +50,7 @@ router.get(   '/cinema/render/:renderId',          maybeVault, getCinemaRenderSt
 router.get(   '/cinema/render/:renderId/logs',     maybeVault, getCinemaRenderLogs);
 router.patch( '/cinema/render/:renderId',          maybeVault, patchCinemaRender);
 router.post(  '/cinema/render/:renderId/resume',   maybeVault, postCinemaRenderResume);
+router.post(  '/cinema/render/:renderId/cancel',   maybeVault, postCinemaRenderCancel);
 router.delete('/cinema/render/:renderId',          maybeVault, deleteCinemaRenderCtrl);
 router.get(   '/cinema/renders',                   maybeVault, getCinemaRendersList);
 

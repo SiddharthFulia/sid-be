@@ -1210,6 +1210,67 @@ export const getCinemaDiskStats = (req, res) => {
   }
 };
 
+// POST /api/cinema/render/:renderId/cancel  (idempotent)
+// Marks the render as cancelled in cinema_renders + cancels every
+// in-flight shot's video job + removes them from the inflight queue.
+// The chain's findRenderForCompletedVideo filters out 'cancelled', so
+// any worker job that completes AFTER cancel is processed normally
+// (the videos table still gets the row) but the chain won't advance
+// to the next shot. Safe to call from the user's "purge" button while
+// the worker is mid-shot — the GPU finishes what it was doing, but no
+// new shots get queued.
+export const postCinemaRenderCancel = async (req, res) => {
+  try {
+    const row = getCinemaRender(req.params.renderId);
+    if (!row) return error(res, 'Cinema render not found', 404);
+    if (row.vault && !req.vault) return error(res, 'Cinema render not found', 404);
+
+    // Mark render cancelled. findRenderForCompletedVideo's SQL excludes
+    // 'cancelled' so subsequent worker-completion callbacks won't queue
+    // the next shot.
+    updateCinemaRender(row.renderId, {
+      status: 'cancelled', phase: 'cancelled',
+      error: 'Cancelled by user',
+      completedAt: new Date().toISOString(),
+    });
+
+    // Mark every active shot job as cancelled in the jobs table + drop
+    // them from the inflight queue so the worker (when it polls
+    // next-queued) doesn't pick them up. The one shot the worker is
+    // CURRENTLY processing will finish on its own — we can't kill
+    // ComfyUI mid-render from here — but it just lands as a finished
+    // video and the chain ignores it.
+    const { removeInflightJob, updateInflightJob, getInflightJob } = await import('../../services/aiVideo/storage.js');
+    const cancelled = [];
+    for (const jobId of (row.shotJobIds || [])) {
+      if (!jobId) continue;
+      try {
+        const existing = await getInflightJob(jobId);
+        if (existing && existing.status !== 'completed') {
+          await updateInflightJob(jobId, {
+            status: 'cancelled',
+            error: 'Cinema render cancelled by user',
+            completedAt: new Date().toISOString(),
+          });
+          // For queued jobs (not yet picked up), drop the inflight row
+          // so the worker's nextQueued poll skips them entirely.
+          if (existing.status === 'queued') {
+            await removeInflightJob(jobId);
+          }
+          cancelled.push(jobId);
+        }
+      } catch (e) {
+        // continue cancelling the rest even if one row blew up
+      }
+    }
+    logger.info(`CINEMA CANCEL | ${row.renderId} | cancelled ${cancelled.length} shot jobs`);
+    return success(res, { ok: true, renderId: row.renderId, cancelledShotJobs: cancelled });
+  } catch (err) {
+    logger.error('Cinema render cancel failed', err.message);
+    return error(res, err.message);
+  }
+};
+
 // DELETE /api/cinema/render/:renderId
 export const deleteCinemaRenderCtrl = (req, res) => {
   const row = getCinemaRender(req.params.renderId);
