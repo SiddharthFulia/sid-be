@@ -5,6 +5,7 @@ import { requireVault } from '../../services/auth/vault.js';
 import {
   getServerStats, getDbStats, getQueueStats, getWorkers,
   postPurgeQueue, getActivityTimeseries, getDiskStats, getMeshStats,
+  getCloudinaryUsage, getCloudinaryResources, postCloudinaryDelete,
 } from '../../controllers/admin/index.js';
 
 const router = Router();
@@ -17,5 +18,10 @@ router.get( '/admin/queues',       requireVault, getQueueStats);
 router.get( '/admin/workers',      requireVault, getWorkers);
 router.get( '/admin/activity',     requireVault, getActivityTimeseries);
 router.post('/admin/queues/purge', requireVault, postPurgeQueue);
+
+// Cloudinary management — Settings → Cloudinary tab.
+router.get( '/admin/cloudinary/usage',     requireVault, getCloudinaryUsage);
+router.get( '/admin/cloudinary/resources', requireVault, getCloudinaryResources);
+router.post('/admin/cloudinary/delete',    requireVault, postCloudinaryDelete);
 
 export default router;

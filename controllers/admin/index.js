@@ -478,3 +478,129 @@ export const postPurgeQueue = async (req, res) => {
     try { if (connection) await connection.close(); } catch {}
   }
 };
+
+
+// ─── Cloudinary management (§74) ────────────────────────────────
+// Vault-gated endpoints for the Settings → Cloudinary tab. Lets the
+// user see free-tier usage + browse + bulk-delete assets so the 25GB
+// storage / 25GB monthly bandwidth cap doesn't bite mid-render. The
+// Cloudinary admin API is RATE-LIMITED on the free tier (~500 calls/h)
+// so the FE pages aggressively (default 30/page) and we cache the
+// /usage response for 60s.
+
+import { v2 as cloudinary } from 'cloudinary';
+let _cloudinaryConfigured = false;
+function _ensureCloudinary() {
+  if (_cloudinaryConfigured) return;
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key:    process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure:     true,
+  });
+  _cloudinaryConfigured = true;
+}
+
+let _usageCache = { ts: 0, value: null };
+const USAGE_CACHE_MS = 60 * 1000;
+
+// GET /api/admin/cloudinary/usage
+// Returns plan info, storage used, bandwidth used, credits remaining.
+// Cached 60s to avoid burning admin-API quota on poll cycles.
+export const getCloudinaryUsage = async (req, res) => {
+  try {
+    _ensureCloudinary();
+    const now = Date.now();
+    if (_usageCache.value && (now - _usageCache.ts) < USAGE_CACHE_MS) {
+      return success(res, { ..._usageCache.value, cached: true, cacheAgeSec: Math.round((now - _usageCache.ts) / 1000) });
+    }
+    const u = await cloudinary.api.usage();
+    // Cloudinary returns a verbose shape. Strip to the bits we want.
+    const compact = {
+      plan: u?.plan || null,
+      lastUpdated: u?.last_updated || null,
+      objects:     u?.objects?.usage      ?? 0,
+      bandwidth:   { used: u?.bandwidth?.usage ?? 0, limit: u?.bandwidth?.limit ?? null },
+      storage:     { used: u?.storage?.usage   ?? 0, limit: u?.storage?.limit   ?? null },
+      requests:    u?.requests || 0,
+      resources:   u?.resources || 0,
+      derived:     u?.derived_resources || 0,
+      transformations: u?.transformations?.usage || 0,
+      credits:     { used: u?.credits?.usage  ?? null, limit: u?.credits?.limit ?? null },
+    };
+    _usageCache = { ts: now, value: compact };
+    return success(res, { ...compact, cached: false });
+  } catch (err) {
+    logger.error('cloudinary usage failed', err.message);
+    return error(res, err.message, 502);
+  }
+};
+
+// GET /api/admin/cloudinary/resources?type=video|image|raw&prefix=&max=&next=
+// Lists assets in the configured folder (or a prefix). Returns the
+// items + next_cursor for pagination. Free tier rate-limit-aware:
+// default max=30 per request.
+export const getCloudinaryResources = async (req, res) => {
+  try {
+    _ensureCloudinary();
+    const resource_type = (req.query.type || 'video').toLowerCase();
+    if (!['video', 'image', 'raw'].includes(resource_type)) {
+      return error(res, "type must be 'video' | 'image' | 'raw'", 400);
+    }
+    const prefix = req.query.prefix || 'ai-videos';
+    const max_results = Math.min(Math.max(parseInt(req.query.max, 10) || 30, 1), 100);
+    const next_cursor = req.query.next || undefined;
+    const r = await cloudinary.api.resources({
+      type: 'upload',
+      resource_type,
+      prefix,
+      max_results,
+      next_cursor,
+    });
+    // Compact each row — strip the verbose Cloudinary fields.
+    const items = (r?.resources || []).map(it => ({
+      publicId:  it.public_id,
+      format:    it.format,
+      type:      it.resource_type,
+      bytes:     it.bytes,
+      width:     it.width,
+      height:    it.height,
+      duration:  it.duration || null,
+      createdAt: it.created_at,
+      url:       it.secure_url,
+    }));
+    return success(res, { items, nextCursor: r?.next_cursor || null, prefix, resourceType: resource_type });
+  } catch (err) {
+    logger.error('cloudinary list failed', err.message);
+    return error(res, err.message, 502);
+  }
+};
+
+// POST /api/admin/cloudinary/delete  { publicIds: [...], resourceType: 'video' | 'image' }
+// Bulk delete. Cloudinary's delete_resources accepts up to 100 per
+// call; we cap our endpoint at 50 to keep latency reasonable.
+export const postCloudinaryDelete = async (req, res) => {
+  try {
+    _ensureCloudinary();
+    const { publicIds, resourceType = 'video' } = req.body || {};
+    if (!Array.isArray(publicIds) || publicIds.length === 0) {
+      return error(res, 'publicIds array is required', 400);
+    }
+    if (publicIds.length > 50) return error(res, 'max 50 per call', 400);
+    if (!['video', 'image', 'raw'].includes(resourceType)) {
+      return error(res, "resourceType must be 'video' | 'image' | 'raw'", 400);
+    }
+    const r = await cloudinary.api.delete_resources(publicIds, { resource_type: resourceType, type: 'upload' });
+    // Invalidate the usage cache so the next poll reflects the freed space.
+    _usageCache = { ts: 0, value: null };
+    return success(res, {
+      deleted:    r?.deleted || {},
+      notFound:   Object.entries(r?.deleted || {}).filter(([_, v]) => v === 'not_found').map(([k]) => k),
+      partial:    r?.partial || false,
+      rateLimit:  r?.rate_limit_remaining || null,
+    });
+  } catch (err) {
+    logger.error('cloudinary delete failed', err.message);
+    return error(res, err.message, 502);
+  }
+};
