@@ -192,13 +192,13 @@ async function queueNextShot({ render, project, shotIndex, frameUrl, frameTime }
       shot: { action },
       previousShot,
       shotIndex,
-      totalShots: project.shotCount || project.shotPrompts.length,
+      totalShots: project.shotCount || (Array.isArray(project.shotPrompts) ? project.shotPrompts.length : 0),
       realismMode,
     });
-    composedPrompt    = compiled.positivePrompt;
-    negativePrompt    = compiled.negativePrompt;
-    compactSummary    = compiled.compactLogSummary;
-    removedDriftWords = compiled.removedDrift;
+    composedPrompt    = compiled?.positivePrompt    || action;
+    negativePrompt    = compiled?.negativePrompt    || null;
+    compactSummary    = compiled?.compactLogSummary || '';
+    removedDriftWords = Array.isArray(compiled?.removedDrift) ? compiled.removedDrift : [];
   } else {
     // Legacy path — just bible-prefix the action. Kept so users who
     // opt out of the director still get a working render.
@@ -277,13 +277,14 @@ async function queueNextShot({ render, project, shotIndex, frameUrl, frameTime }
     `source=${isFirstShot ? (project.heroImageUrl ? 'hero_image' : 't2v') : `continuity_frame_-${(frameTime ?? 0.4).toFixed(2)}s`} · ` +
     `risk=${risk.score} ${risk.level}`,
     render.renderId);
-  if (removedDriftWords.length) {
+  if (Array.isArray(removedDriftWords) && removedDriftWords.length) {
     appendLog(job.videoId, 'video',
       `[director] drift sanitized — removed: ${removedDriftWords.join(', ')}`,
       render.renderId);
   }
-  if (risk.warnings.length) {
-    for (const w of risk.warnings.slice(0, 3)) {
+  const riskWarnings = Array.isArray(risk?.warnings) ? risk.warnings : [];
+  if (riskWarnings.length) {
+    for (const w of riskWarnings.slice(0, 3)) {
       appendLog(job.videoId, 'video', `[director] ⚠ ${w}`, render.renderId);
     }
   }
@@ -505,12 +506,16 @@ async function advanceFromShotCompletion(render, completedShotIndex, completedJo
     logger.info(`Cinema chain advanced ${render.renderId}: shot ${nextShotIndex + 1}/${render.shotCount} queued as ${nextJob.videoId}`);
   } catch (err) {
     const message = err?.message || String(err);
+    const stack   = err?.stack ? err.stack.split('\n').slice(0, 6).join('\n  ') : 'no stack';
     updateCinemaRender(render.renderId, {
       status: 'failed',
       error:  message.slice(0, 800),
       completedAt: new Date().toISOString(),
     });
-    logger.error(`Cinema chain advance failed for render ${render.renderId}: ${message}`);
+    appendLog(render.renderId, 'video',
+      `[director] advance failed: ${message}`,
+      render.renderId);
+    logger.error(`Cinema chain advance failed for render ${render.renderId}: ${message}\n  ${stack}`);
   }
 }
 

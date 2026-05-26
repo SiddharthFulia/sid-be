@@ -239,13 +239,18 @@ export function compileContinuityPrompt({
   const negativePrompt = buildContinuityNegativePrompt({ bible, directorState, shot });
 
   // 9. Compact one-line log summary for job_logs.
+  // Defensive — every `.length` here protected so a missing field
+  // (corrupt row, partial Groq output) can't poison the chain log line.
+  const _bibleFilled = bibleFields.filter(k => typeof bible?.[k] === 'string' && bible[k].trim()).length;
+  const _driftCount  = Array.isArray(removedDrift) ? removedDrift.length : 0;
+  const _negLen      = typeof negativePrompt === 'string' ? negativePrompt.length : 0;
   const compactLogSummary = (
     `shot ${shotIndex + 1}/${totalShots} · ` +
-    `bible=${bibleFields.filter(k => bible[k]).length}/6 · ` +
+    `bible=${_bibleFilled}/6 · ` +
     `continuation=${shotIndex > 0} · ` +
-    `drift_removed=${removedDrift.length} · ` +
+    `drift_removed=${_driftCount} · ` +
     `realism=${!!realismMode} · ` +
-    `negative=${!!negativePrompt.length}`
+    `negative=${_negLen > 0}`
   );
 
   return {
@@ -273,8 +278,10 @@ export function calculateContinuityRisk({
   let score = 0;
   const warnings = [];
 
-  // 1. Drift words
-  const { removedDrift } = sanitizeShotAction(action || '');
+  // 1. Drift words. sanitizeShotAction returns { cleaned, removed }
+  // — alias here for clarity AND to fix the previous typo
+  // (`removedDrift` was undefined, threw on `.length`).
+  const { removed: removedDrift = [] } = sanitizeShotAction(action || '');
   if (removedDrift.length) {
     score += 25 + (removedDrift.length - 1) * 5;
     warnings.push(`drift words detected: ${removedDrift.join(', ')}`);
@@ -315,7 +322,7 @@ export function calculateContinuityRisk({
 
   // 6. Bible completeness
   const bibleFilled = ['subject', 'wardrobe', 'environment', 'lighting', 'camera', 'palette']
-    .filter(k => bible[k] && bible[k].trim()).length;
+    .filter(k => typeof bible?.[k] === 'string' && bible[k].trim()).length;
   if (bibleFilled < 3) {
     score += 15;
     warnings.push(`bible only has ${bibleFilled}/6 fields filled — continuity weak`);
