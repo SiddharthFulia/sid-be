@@ -247,6 +247,23 @@ async function queueNextShot({ render, project, shotIndex, frameUrl, frameTime }
     shotIndex,
   });
 
+  // Step count resolution order:
+  //   1. project.stepsPerShot (user override on the planner)
+  //   2. CONTINUITY_MODEL_DEFAULTS[model].steps  (continuity-friendly
+  //      per-model default — keeps every shot in the chain on the
+  //      same step count)
+  //   3. overrides.steps  (legacy OPTIMIZED_MODES fallback)
+  // Bounded to [4, 200] so a careless override can't break the
+  // worker or make a single shot run for hours.
+  const userSteps = Number.isFinite(project.stepsPerShot) && project.stepsPerShot > 0
+    ? Math.max(4, Math.min(200, Math.floor(project.stepsPerShot)))
+    : null;
+  const effectiveSteps = userSteps != null
+    ? userSteps
+    : (provider === 'local'
+        ? (CONTINUITY_MODEL_DEFAULTS[effectiveModel]?.steps ?? overrides.steps)
+        : overrides.steps);
+
   const job = await createInflightJob({
     provider: role,
     originalProvider: provider,
@@ -255,7 +272,7 @@ async function queueNextShot({ render, project, shotIndex, frameUrl, frameTime }
     duration: project.durationPerShot || 5,
     resolution: project.resolution    || '720p',
     aspectRatio: project.aspectRatio  || '16:9',
-    steps: overrides.steps,
+    steps: effectiveSteps,
     style: 'cinematic',
     audio: true,
     imageUrl: startImageUrl,

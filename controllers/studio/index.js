@@ -622,6 +622,7 @@ export const patchCinemaShots = (req, res) => {
     shotJobIds, shotPrompts, shotModels, shotMusic,
     continuityBible, lockedSeed, motionStrength, heroImageUrl,
     directorState, continuityMode, overlapMode, realismMode,
+    stepsPerShot,
     status, outputUrl, errorMsg,
   } = req.body || {};
   const patch = {};
@@ -694,6 +695,14 @@ export const patchCinemaShots = (req, res) => {
   if (typeof continuityMode === 'boolean') patch.continuityMode = continuityMode;
   if (typeof overlapMode    === 'boolean') patch.overlapMode    = overlapMode;
   if (typeof realismMode    === 'boolean') patch.realismMode    = realismMode;
+  // Per-shot step override. NULL / 0 clears it (chain falls back to
+  // the per-model continuity default). Bounded [4, 200] to keep one
+  // overzealous edit from running for hours.
+  if (stepsPerShot === null || stepsPerShot === 0) {
+    patch.stepsPerShot = null;
+  } else if (Number.isFinite(stepsPerShot)) {
+    patch.stepsPerShot = Math.max(4, Math.min(200, Math.floor(stepsPerShot)));
+  }
   if (status) patch.status = status;
   if (outputUrl) patch.outputUrl = outputUrl;
   if (errorMsg) patch.error = errorMsg;

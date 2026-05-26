@@ -27,6 +27,7 @@ const COLUMNS = new Set([
   'shotModels', 'shotMusic',
   'continuityBible', 'lockedSeed', 'motionStrength', 'heroImageUrl',
   'directorState', 'continuityMode', 'overlapMode', 'realismMode',
+  'stepsPerShot',
   'outputUrl', 'error', 'durationPerShot', 'aspectRatio', 'resolution', 'vault',
   'completedAt',
 ]);

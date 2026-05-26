@@ -352,6 +352,13 @@ addColumnIfMissing('cinema_projects', 'continuityBible', 'TEXT');
 addColumnIfMissing('cinema_projects', 'lockedSeed',      'INTEGER');
 addColumnIfMissing('cinema_projects', 'motionStrength',  'REAL');
 addColumnIfMissing('cinema_projects', 'heroImageUrl',    'TEXT');
+// Per-project step count override (§71). NULL = chain auto-picks
+// from CONTINUITY_MODEL_DEFAULTS for the chosen beastModel
+// (Hunyuan 20, Wan 2.2 18, etc.). Set this to lock every shot to
+// the same custom step count — keeps render quality consistent
+// across the chain instead of shot 1 (FE-default 30) being sharper
+// than shots 2+ (chain default 14).
+addColumnIfMissing('cinema_projects', 'stepsPerShot',    'INTEGER');
 // Cinematic Continuity Director (§69). directorState is a JSON column
 // with physicalState / cameraState / emotionArc / negativeContinuityRules.
 // continuityMode / overlapMode / realismMode are user-facing toggles
