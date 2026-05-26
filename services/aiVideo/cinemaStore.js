@@ -26,6 +26,7 @@ const COLUMNS = new Set([
   'status', 'masterPrompt', 'shotCount', 'shotPrompts', 'shotJobIds',
   'shotModels', 'shotMusic',
   'continuityBible', 'lockedSeed', 'motionStrength', 'heroImageUrl',
+  'directorState', 'continuityMode', 'overlapMode', 'realismMode',
   'outputUrl', 'error', 'durationPerShot', 'aspectRatio', 'resolution', 'vault',
   'completedAt',
 ]);
@@ -76,6 +77,17 @@ function deserialize(row) {
     continuityBible: row.continuityBible
       ? safeParse(row.continuityBible, {})
       : {},
+    // Cinematic Continuity Director state — JSON object with
+    // physicalState / cameraState / emotionArc / negativeContinuityRules.
+    // Defaults to {} when never populated so the FE can render the
+    // editor cleanly on legacy projects.
+    directorState: row.directorState
+      ? safeParse(row.directorState, {})
+      : {},
+    // Boolean toggles persisted as 0/1; coerce to JS booleans here.
+    continuityMode: row.continuityMode == null ? true  : !!row.continuityMode,
+    overlapMode:    row.overlapMode    == null ? false : !!row.overlapMode,
+    realismMode:    row.realismMode    == null ? true  : !!row.realismMode,
   };
 }
 
@@ -96,10 +108,11 @@ export function updateCinemaProject(projectId, patch) {
   for (const c of cols) {
     let v = patch[c];
     if (Array.isArray(v)) v = JSON.stringify(v);
-    // continuityBible is a single JSON object; stringify just like
-    // the array columns. Plain primitives (strings / numbers) pass
-    // through untouched.
-    else if (c === 'continuityBible' && v && typeof v === 'object') v = JSON.stringify(v);
+    // continuityBible + directorState are JSON objects; stringify
+    // them like the array columns. Plain primitives pass through.
+    else if ((c === 'continuityBible' || c === 'directorState') && v && typeof v === 'object') v = JSON.stringify(v);
+    // Booleans → 0/1 for SQLite.
+    else if ((c === 'continuityMode' || c === 'overlapMode' || c === 'realismMode') && typeof v === 'boolean') v = v ? 1 : 0;
     params[c] = v;
   }
   const set = cols.map(c => `${c} = @${c}`).join(', ');

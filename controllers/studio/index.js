@@ -387,59 +387,100 @@ export const postCinema = async (req, res) => {
       ? '20-35 words. ONE clear action with an optional second beat. Mention lighting (golden hour, neon, etc.). Single-axis camera move okay (dolly, pan, push).'
       : '30-50 words. Can describe TWO connected actions (intro → payoff). Lighting + camera-move detail welcome (drone, crane, tracking shot).';
 
-    // Groq now emits TWO things: a continuity bible (locked world facts)
-    // and an ACTION-ONLY shot list. The chain glues the bible to the
-    // front of every shot at submit time, so each shot prompt only
-    // carries the action that changes — not the whole world. This is
-    // the single biggest fix for character/lighting drift between shots.
-    const system = `You are a cinema director breaking a one-line idea into a CONTINUITY-LOCKED multi-shot plan for AI video. ${shotCount} shots, ${safeDuration} seconds each, ONE model running ONE locked seed across all shots.
+    // Cinematic Continuity Director planner (§69). Groq now emits a
+    // bible + a STRUCTURED directorState + an action list. The director
+    // module glues all three together at submit time per shot.
+    const system = `You are a cinema director planning a CONTINUITY-LOCKED multi-shot sequence for AI video. ${shotCount} shots, ${safeDuration} seconds each, ONE model running ONE locked seed across all shots. The audience should feel one camera captured one continuous moment, not N independent clips.
 
 Output STRICT JSON ONLY (no markdown, no code fences, no preamble):
 {
   "bible": {
-    "subject":     "the main subject — name, age, body, identifying features",
-    "wardrobe":    "exact outfit / costume / props the subject carries",
-    "environment": "the place — terrain, weather, time of day, scale",
+    "subject":     "main subject — name/age/body/identifying features",
+    "wardrobe":    "exact outfit / costume / props",
+    "environment": "place — terrain, weather, time of day, scale",
     "lighting":    "single short clause — direction + colour temperature",
     "camera":      "lens + grade + film stock vibe (one phrase)",
     "palette":     "3-5 colour words for the overall grade"
   },
+  "directorState": {
+    "physicalState": {
+      "screenDirection":   "left_to_right | right_to_left | toward_camera | away_from_camera",
+      "subjectMotion":     "what the subject is physically doing (e.g. 'walking forward slowly')",
+      "windDirection":     "left_to_right | right_to_left | none",
+      "snowDirection":     "left_to_right | right_to_left | none | not_applicable",
+      "weatherIntensity":  "none | light | medium | heavy",
+      "terrain":           "what the ground is",
+      "timeOfDay":         "golden hour | blue hour | day | night | dawn | dusk"
+    },
+    "cameraState": {
+      "lens":          "e.g. 35mm anamorphic",
+      "height":        "eye level | low | high | subject-eye level",
+      "movement":      "slow forward tracking | static | slow push-in | slow pull-back",
+      "energy":        "calm | tense | documentary realism | epic",
+      "stabilization": "slightly handheld with natural operator sway"
+    },
+    "emotionArc": {
+      "start":  "the feeling shot 1 establishes",
+      "middle": "what evolves by shot ${Math.ceil(shotCount / 2)}",
+      "end":    "the feeling the last shot lands"
+    },
+    "negativeContinuityRules": [
+      "do not change the subject design",
+      "do not change the environment",
+      "do not change time of day",
+      "do not teleport subjects",
+      "do not flip screen direction",
+      "do not introduce new characters",
+      "do not change camera style",
+      "do not make it cartoonish",
+      "avoid surreal morphing",
+      "avoid sudden composition resets"
+    ]
+  },
   "actions": ["action 1", "action 2", ..., "action ${shotCount}"]
 }
 
-Bible rules:
+BIBLE rules:
 - Each field MUST be a single string, ≤ 18 words.
-- NEVER reference camera moves, time-shifts, or events in the bible — those go in actions.
-- Bible is LOCKED across all shots — describe the world that exists for the whole sequence.
+- Bible is LOCKED — describe the world that exists for the WHOLE sequence.
+- NEVER reference camera moves or events in the bible.
 
-Action rules:
-- EXACTLY ${shotCount} entries.
-- ${durationBand}
-- Each action describes ONLY what CHANGES this shot — the verb, the camera move, the beat.
-- NEVER re-describe the subject's appearance, the environment, the lighting, or the palette. The bible already carries those.
-- NEVER use "then", "and then", "after that", "later" — one continuous moment per clip.
-- Narrative arc across the ${shotCount} actions: setup → development → climax → resolution (compressed to ${shotCount} beats).
+DIRECTORSTATE rules:
+- physicalState locks how the WORLD moves (wind, snow, screen direction). It must remain identical from shot 1 to shot N.
+- cameraState locks the CAMERA's identity + movement style. The chain enforces continuation per shot; you just describe the established style.
+- emotionArc captures the feeling progression, not new world events.
+- negativeContinuityRules: 8-12 short imperative sentences forbidding world resets.
 
-Example for a sci-fi idea:
-{"bible":{"subject":"young woman astronaut, mid-twenties, athletic","wardrobe":"white damaged NASA suit with orange chest stripe, gold reflective visor","environment":"wet black alien sand beach with cyan crystal formations, twin red suns low on horizon","lighting":"warm twin-sunset rim from the right, cool cyan bounce from crystals","camera":"anamorphic 50mm, soft halation, fine grain","palette":"obsidian, cyan, amber, ember red"},"actions":["wide shot, astronaut steps onto the wet sand, slow push-in","medium shot, she scans the horizon, slight handheld sway","close-up on her gloved hand brushing a crystal","over-shoulder reveal of the crystal field, slow dolly back"]}
+ACTION rules — THIS IS WHERE FILMS DIE OR LIVE:
+- EXACTLY ${shotCount} entries, ${durationBand}
+- Each action describes ONLY what CHANGES in that single shot — a verb + a small camera adjustment.
+- For shot 2 and later, the action MUST read as a CONTINUATION (e.g. "continues forward as the leader's nose lifts to the wind").
+- NEVER re-describe subject appearance, environment, lighting, or palette. Bible carries those.
+- NEVER introduce a "new" world element, new character, new place, new time of day.
+- NEVER use "then", "and then", "after that", "later" — each clip is one continuous moment.
+- Subjects must NOT teleport, reverse direction, or pose-reset between shots.
+- Camera momentum must carry across shots (if shot 1 is forward tracking, shot 2 continues forward).
+- Include 1 in 3 actions with imperfect framing (foreground occlusion, off-center subject, dead space).
+- Narrative shape: setup → development → beat → resolution, compressed to ${shotCount} beats.
+
+Example for a snowy wolf-pack sequence (4 shots):
+{"bible":{"subject":"wolf pack of five, alpha at front, weather-beaten coats","wardrobe":"thick winter fur with frost crystals","environment":"narrow snowy mountain pass with cliffs either side, hidden valley ahead","lighting":"warm golden hour rim from the west","camera":"35mm anamorphic, soft halation, fine grain","palette":"amber, snow white, slate blue, charcoal"},"directorState":{"physicalState":{"screenDirection":"left_to_right","subjectMotion":"walking forward at a steady pace","windDirection":"left_to_right","snowDirection":"left_to_right","weatherIntensity":"medium","terrain":"snow-covered rocky mountain pass","timeOfDay":"golden hour"},"cameraState":{"lens":"35mm anamorphic","height":"wolf-eye level","movement":"slow forward tracking","energy":"calm tense documentary realism","stabilization":"slightly handheld with natural operator sway"},"emotionArc":{"start":"searching and alert","middle":"the leader senses something","end":"reveal and recognition"},"negativeContinuityRules":["do not change the wolf design","do not change the snowy pass","do not change golden hour","do not teleport wolves","do not reverse screen direction","do not add other animals","do not change camera style","do not make it cartoonish","avoid surreal morphing","avoid sudden framing resets"]},"actions":["wide shot, the pack continues left to right through the pass, slow forward tracking","medium shot, the alpha's nose lifts to the wind while still walking, foreground branch crosses lens","low-angle close on paws crunching fresh snow, camera continues forward at the same pace","over-shoulder reveal of the hidden valley below, slow tilt down without breaking the forward momentum"]}
 `;
 
     let shotPrompts = [];
     let bible       = {};
+    let directorState = {};
     try {
       const groqRes = await chatGroq(masterPrompt.trim(), [], 'llama-3.3-70b', {
-        system, temperature: 0.6, maxTokens: 1200,
+        system, temperature: 0.55, maxTokens: 2000,
       });
       let raw = (groqRes.reply || '').trim();
-      // Strip the occasional ```json fences Groq adds despite our ask.
       raw = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
       let parsed = null;
       try { parsed = JSON.parse(raw); } catch {}
       if (parsed && Array.isArray(parsed.actions)) {
         shotPrompts = parsed.actions.map(s => String(s || '').trim()).filter(Boolean).slice(0, shotCount);
         if (parsed.bible && typeof parsed.bible === 'object') {
-          // Trust the keys but clamp lengths so a model that ignores
-          // the "≤ 18 words" rule can't poison the row.
           const clamp = (s) => String(s || '').trim().split(/\s+/).slice(0, 25).join(' ');
           bible = {
             subject:     clamp(parsed.bible.subject),
@@ -450,8 +491,41 @@ Example for a sci-fi idea:
             palette:     clamp(parsed.bible.palette),
           };
         }
+        if (parsed.directorState && typeof parsed.directorState === 'object') {
+          // Whitelisted shape — accept only known keys so a hallucinated
+          // sub-object can't sneak into the JSON column.
+          const ds = parsed.directorState;
+          directorState = {
+            physicalState: ds.physicalState && typeof ds.physicalState === 'object' ? {
+              screenDirection:  String(ds.physicalState.screenDirection || '').trim(),
+              subjectMotion:    String(ds.physicalState.subjectMotion   || '').trim(),
+              windDirection:    String(ds.physicalState.windDirection   || '').trim(),
+              snowDirection:    String(ds.physicalState.snowDirection   || '').trim(),
+              weatherIntensity: String(ds.physicalState.weatherIntensity|| '').trim(),
+              terrain:          String(ds.physicalState.terrain         || '').trim(),
+              timeOfDay:        String(ds.physicalState.timeOfDay       || '').trim(),
+            } : {},
+            cameraState: ds.cameraState && typeof ds.cameraState === 'object' ? {
+              lens:          String(ds.cameraState.lens          || '').trim(),
+              height:        String(ds.cameraState.height        || '').trim(),
+              movement:      String(ds.cameraState.movement      || '').trim(),
+              energy:        String(ds.cameraState.energy        || '').trim(),
+              stabilization: String(ds.cameraState.stabilization || '').trim(),
+            } : {},
+            emotionArc: ds.emotionArc && typeof ds.emotionArc === 'object' ? {
+              start:  String(ds.emotionArc.start  || '').trim(),
+              middle: String(ds.emotionArc.middle || '').trim(),
+              end:    String(ds.emotionArc.end    || '').trim(),
+            } : {},
+            negativeContinuityRules: Array.isArray(ds.negativeContinuityRules)
+              ? ds.negativeContinuityRules
+                  .filter(s => typeof s === 'string' && s.trim())
+                  .map(s => s.trim().slice(0, 100))
+                  .slice(0, 16)
+              : [],
+          };
+        }
       } else {
-        // Legacy fallback — old plain-newlines format
         shotPrompts = raw.split('\n').map(s => s.trim()).filter(Boolean).slice(0, shotCount);
       }
       if (shotPrompts.length < shotCount) {
@@ -462,9 +536,6 @@ Example for a sci-fi idea:
       shotPrompts = Array(shotCount).fill(masterPrompt.trim());
     }
 
-    // Pre-seed a random lockedSeed at creation time so the chain has
-    // a deterministic starting point even if the user never touches
-    // the seed input. Range chosen to fit a 32-bit int comfortably.
     const lockedSeed = Math.floor(Math.random() * 1_000_000_000);
 
     const project = createCinemaProject({
@@ -475,13 +546,14 @@ Example for a sci-fi idea:
       durationPerShot: Math.round(durationPerShot),
       aspectRatio, resolution,
     });
-    // Patch the bible + lockedSeed onto the freshly-created row. Two-
-    // step because createCinemaProject's insert only covers the legacy
-    // columns; the new continuity fields ride on the UPDATE path.
     const updated = updateCinemaProject(project.projectId, {
       continuityBible: bible,
+      directorState,
       lockedSeed,
-      motionStrength: 0.6,
+      motionStrength: 0.5,           // safer default for continuity (was 0.6)
+      continuityMode: true,
+      realismMode:    true,
+      overlapMode:    false,
     }) || project;
 
     logger.info(`CINEMA CREATE | ${project.projectId} | shots=${shotCount}`);
@@ -549,6 +621,7 @@ export const patchCinemaShots = (req, res) => {
   const {
     shotJobIds, shotPrompts, shotModels, shotMusic,
     continuityBible, lockedSeed, motionStrength, heroImageUrl,
+    directorState, continuityMode, overlapMode, realismMode,
     status, outputUrl, errorMsg,
   } = req.body || {};
   const patch = {};
@@ -601,6 +674,26 @@ export const patchCinemaShots = (req, res) => {
   if (typeof heroImageUrl === 'string') {
     patch.heroImageUrl = heroImageUrl.trim() || null;
   }
+  // Director state — JSON object with the four sub-keys the chain
+  // honours. Whitelist to avoid arbitrary blobs.
+  if (directorState && typeof directorState === 'object' && !Array.isArray(directorState)) {
+    const ds = {};
+    if (directorState.physicalState && typeof directorState.physicalState === 'object') ds.physicalState = directorState.physicalState;
+    if (directorState.cameraState   && typeof directorState.cameraState   === 'object') ds.cameraState   = directorState.cameraState;
+    if (directorState.emotionArc    && typeof directorState.emotionArc    === 'object') ds.emotionArc    = directorState.emotionArc;
+    if (Array.isArray(directorState.negativeContinuityRules)) {
+      ds.negativeContinuityRules = directorState.negativeContinuityRules
+        .filter(s => typeof s === 'string' && s.trim())
+        .map(s => s.trim().slice(0, 100))
+        .slice(0, 16);
+    }
+    patch.directorState = ds;
+  }
+  // Boolean toggles — only honoured when provided explicitly so a
+  // partial PATCH from the FE doesn't accidentally flip them.
+  if (typeof continuityMode === 'boolean') patch.continuityMode = continuityMode;
+  if (typeof overlapMode    === 'boolean') patch.overlapMode    = overlapMode;
+  if (typeof realismMode    === 'boolean') patch.realismMode    = realismMode;
   if (status) patch.status = status;
   if (outputUrl) patch.outputUrl = outputUrl;
   if (errorMsg) patch.error = errorMsg;
@@ -717,6 +810,112 @@ Output STRICT JSON only (no markdown, no code fences, no preamble):
     return success(res, out);
   } catch (err) {
     logger.error('Cinema shot review failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// POST /api/cinema/:projectId/shots/:shotIndex/fix-action
+//   { engine?: 'groq' | 'gemini', model?: string }
+//
+// Rewrites a single shot's action as a TRUE CONTINUATION of the bible
+// + director state. Strips drift, anchors physical + camera state,
+// and returns a saferAction plus before/after risk scores. The FE
+// shows both side-by-side with one-click Apply (which PATCHes the
+// shotPrompts array).
+export const postCinemaFixAction = async (req, res) => {
+  try {
+    const { projectId, shotIndex: shotIndexStr } = req.params;
+    const shotIndex = parseInt(shotIndexStr, 10);
+    const row = getCinemaProject(projectId);
+    if (!row) return error(res, 'Cinema project not found', 404);
+    if (row.vault && !req.vault) return error(res, 'Cinema project not found', 404);
+    if (!Number.isFinite(shotIndex) || shotIndex < 0 || shotIndex >= row.shotCount) {
+      return error(res, `shotIndex must be 0..${row.shotCount - 1}`, 400);
+    }
+    const engine = (req.body?.engine || 'groq').toLowerCase();
+    const model  = req.body?.model;
+    const currentAction = (row.shotPrompts || [])[shotIndex] || '';
+    if (!currentAction.trim()) return error(res, 'Shot has no action to fix', 400);
+
+    // Risk score on the CURRENT action so we can show the user
+    // before vs after.
+    const { calculateContinuityRisk } = await import('../../services/aiVideo/cinematicContinuityDirector.js');
+    const riskBefore = calculateContinuityRisk({
+      bible: row.continuityBible || {},
+      directorState: row.directorState || {},
+      action: currentAction,
+      model: 'wan-2.2',
+      motionStrength: row.motionStrength || 0.5,
+      durationPerShot: row.durationPerShot || 5,
+      hasHeroImage: !!row.heroImageUrl,
+      shotIndex,
+    });
+
+    const previousAction = shotIndex > 0 ? (row.shotPrompts[shotIndex - 1] || '') : '';
+    const dur = row.durationPerShot || 5;
+    const fixSystem = `You are a continuity-locked shot rewriter for AI video. Rewrite this single shot as a TRUE CONTINUATION of the previous shot — same subject, same environment, same lighting, same camera language, same physical direction. Remove any new-world description (no new place, no new time of day, no new character, no morphing, no teleporting, no extreme camera moves). Keep the action achievable in ${dur} seconds.
+
+Bible (LOCKED — do not redescribe):
+${JSON.stringify(row.continuityBible || {}, null, 2)}
+
+Director state (LOCKED — do not contradict):
+${JSON.stringify(row.directorState || {}, null, 2)}
+
+${previousAction ? `Previous shot's action: "${previousAction}"\n` : ''}
+Current action (rewrite this):
+"${currentAction}"
+
+Output STRICT JSON:
+{
+  "saferAction": "the rewritten action, action-only, 8-16 words, continuation language",
+  "reason":      "one short sentence explaining what you fixed, max 24 words"
+}`;
+
+    let raw = '';
+    if (engine === 'gemini') {
+      const { chatGemini } = await import('../../services/gemini.js').catch(() => ({}));
+      if (typeof chatGemini !== 'function') return error(res, 'Gemini engine not configured on this BE', 503);
+      const GEMINI_ALLOWED = new Set(['gemini-flash', 'gemini-flash-lite', 'gemini-pro']);
+      const m = GEMINI_ALLOWED.has(model) ? model : 'gemini-flash';
+      try {
+        const result = await chatGemini(currentAction, [], m, { system: fixSystem, temperature: 0.3 });
+        raw = (result?.reply || '').trim();
+      } catch (e) {
+        return error(res, `Gemini fix failed: ${e.message}`, 503);
+      }
+    } else {
+      const result = await chatGroq(currentAction, [], 'llama-3.3-70b', {
+        system: fixSystem, temperature: 0.3, maxTokens: 400,
+      });
+      raw = (result?.reply || '').trim();
+    }
+
+    const stripped = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+    let parsed = null;
+    try { parsed = JSON.parse(stripped); } catch {}
+    const saferAction = String(parsed?.saferAction || '').trim();
+    const reason      = String(parsed?.reason      || '').trim();
+    if (!saferAction) {
+      return success(res, {
+        saferAction: currentAction,
+        reason: 'Model did not return a structured rewrite',
+        riskBefore, riskAfter: riskBefore, engine,
+      });
+    }
+    const riskAfter = calculateContinuityRisk({
+      bible: row.continuityBible || {},
+      directorState: row.directorState || {},
+      action: saferAction,
+      model: 'wan-2.2',
+      motionStrength: row.motionStrength || 0.5,
+      durationPerShot: row.durationPerShot || 5,
+      hasHeroImage: !!row.heroImageUrl,
+      shotIndex,
+    });
+    logger.info(`CINEMA FIX-ACTION | ${projectId} shot ${shotIndex} | risk ${riskBefore.score}→${riskAfter.score} | engine=${engine}`);
+    return success(res, { saferAction, reason, riskBefore, riskAfter, engine });
+  } catch (err) {
+    logger.error('Cinema fix-action failed', err.message);
     return error(res, err.message);
   }
 };

@@ -234,6 +234,8 @@ export function jobToRow(j) {
     musicPrompt: j.musicPrompt ?? null,
     seed: Number.isFinite(j.seed) ? Math.floor(j.seed) : null,
     motionStrength: Number.isFinite(j.motionStrength) ? Number(j.motionStrength) : null,
+    negativePrompt: j.negativePrompt ?? null,
+    continuityFrameTime: Number.isFinite(j.continuityFrameTime) ? Number(j.continuityFrameTime) : null,
   };
 }
 
@@ -271,6 +273,8 @@ export function rowToJob(r) {
     musicPrompt: r.musicPrompt,
     seed: r.seed,
     motionStrength: r.motionStrength,
+    negativePrompt: r.negativePrompt,
+    continuityFrameTime: r.continuityFrameTime,
   };
 }
 
@@ -348,6 +352,14 @@ addColumnIfMissing('cinema_projects', 'continuityBible', 'TEXT');
 addColumnIfMissing('cinema_projects', 'lockedSeed',      'INTEGER');
 addColumnIfMissing('cinema_projects', 'motionStrength',  'REAL');
 addColumnIfMissing('cinema_projects', 'heroImageUrl',    'TEXT');
+// Cinematic Continuity Director (§69). directorState is a JSON column
+// with physicalState / cameraState / emotionArc / negativeContinuityRules.
+// continuityMode / overlapMode / realismMode are user-facing toggles
+// that the chain reads at submit time.
+addColumnIfMissing('cinema_projects', 'directorState',   'TEXT');
+addColumnIfMissing('cinema_projects', 'continuityMode',  'INTEGER NOT NULL DEFAULT 1');
+addColumnIfMissing('cinema_projects', 'overlapMode',     'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('cinema_projects', 'realismMode',     'INTEGER NOT NULL DEFAULT 1');
 // cinema_renders gets the render-level Beast model so the user can
 // keep the same project but A/B "Wan 2.2 5B" vs "Wan 2.1 I2V 14B" vs
 // "Hunyuan" between attempts. Only consulted when provider='local'.
@@ -358,6 +370,11 @@ addColumnIfMissing('cinema_renders',  'beastModel',      'TEXT');
 // read them at workflow-build time.
 addColumnIfMissing('jobs', 'seed',           'INTEGER');
 addColumnIfMissing('jobs', 'motionStrength', 'REAL');
+// Cinema continuity director (§69) — the chain compiles a negative
+// prompt + a per-shot continuity-frame timestamp from the previous
+// clip. Both nullable so non-cinema jobs work unchanged.
+addColumnIfMissing('jobs', 'negativePrompt',      'TEXT');
+addColumnIfMissing('jobs', 'continuityFrameTime', 'REAL');
 // job_logs.cinemaRenderId — when a log line belongs to a shot in a
 // cinema render, this column carries the parent renderId. Lets the
 // new GET /api/cinema/render/:renderId/logs endpoint stream every

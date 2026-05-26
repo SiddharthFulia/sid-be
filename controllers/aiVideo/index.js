@@ -81,6 +81,7 @@ export const postGenerateVideo = async (req, res) => {
       silentWake = false,          // FE opt-out for the Telegram wake alert (Cinema chain sets this so N shots don't fire N notifications)
       seed,                        // optional locked seed; null = roll random per shot (Cinema sets this)
       motionStrength,              // optional 0.1..1.0 motion knob (Wan/Hunyuan honour it)
+      negativePrompt,              // Cinema sets this from the continuity director; passes through to workflows that support it
     } = req.body || {};
 
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -111,7 +112,7 @@ export const postGenerateVideo = async (req, res) => {
     // the request carries a valid Vault token — anonymous callers can't
     // sneak content into the private library.
     const opts_vault = !!bodyVault && !!req.vault;
-    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: opts_vault, silentWake: !!silentWake, seed, motionStrength };
+    let opts = { prompt: prompt.trim(), model, duration, resolution, aspectRatio, steps, style, audio, imageUrl, generateCaption, mode, withMusic, musicPrompt, vault: opts_vault, silentWake: !!silentWake, seed, motionStrength, negativePrompt };
 
     // For the 'optimized' provider, mode picks the MODEL + STEPS (the
     // actual "speed" knobs). The user's duration / resolution / aspect
@@ -295,6 +296,7 @@ async function handleAsyncWorker(req, res, opts, role, originalProvider) {
     // the workflow's built-in default.
     seed: Number.isFinite(opts.seed) ? Math.floor(opts.seed) : null,
     motionStrength: Number.isFinite(opts.motionStrength) ? Number(opts.motionStrength) : null,
+    negativePrompt: typeof opts.negativePrompt === 'string' ? opts.negativePrompt.slice(0, 2000) : null,
     vault: opts.vault ? 1 : 0,
   });
 

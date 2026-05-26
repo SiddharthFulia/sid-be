@@ -34,13 +34,19 @@ import os from 'os';
 import logger from '../../helpers/logger.js';
 import { getCinemaRender, updateCinemaRender } from './cinemaRenderStore.js';
 import { getCinemaProject, updateCinemaProject } from './cinemaStore.js';
-import { createInflightJob } from './storage.js';
+import { createInflightJob, getInflightJob } from './storage.js';
 import { getLocalVideo } from './videoStore.js';
 import { uploadSourceImage } from './cloudinaryStore.js';
 import { publishJob } from './messageQueue.js';
 import { appendLog, tagJobsToRender } from './logStore.js';
 import { db } from './db.js';
 import { createCombine, updateCombine } from '../ffmpeg/combineStore.js';
+import {
+  compileContinuityPrompt,
+  calculateContinuityRisk,
+  extractAndChooseContinuityFrame,
+  CONTINUITY_MODEL_DEFAULTS,
+} from './cinematicContinuityDirector.js';
 import { combineVideos } from '../ffmpeg/combine.js';
 
 // Per-mode model + steps + (worker-side) duration / resolution caps.
@@ -123,25 +129,26 @@ async function extractLastFrameToDataUrl(videoUrl) {
 // queueNextShot — create the inflight job + publish to RabbitMQ. Mirrors
 // what controllers/aiVideo's handleAsyncWorker does, minus the Express
 // request/response plumbing. Returns the created job row.
-// Glue a JSON continuity bible into a single prompt-friendly block.
-// Empty/missing fields are skipped so the model isn't given placeholder
-// noise. Returned as a single line so the worker's prompt-cleanup
-// regexes don't get tripped by newlines.
-function formatContinuityBible(bible) {
-  if (!bible || typeof bible !== 'object') return '';
-  const fields = ['subject', 'wardrobe', 'environment', 'lighting', 'camera', 'palette'];
-  const parts = [];
-  for (const f of fields) {
-    const v = bible[f];
-    if (typeof v === 'string' && v.trim()) parts.push(v.trim());
+async function queueNextShot({ render, project, shotIndex, frameUrl, frameTime }) {
+  // ─── Idempotency guard (§16) ─────────────────────────────────────
+  // Skip if this slot already has an active inflight job. Old behaviour
+  // would happily re-publish, leading to two workers picking up the
+  // same shot. The render row is the source of truth; if its
+  // shotJobIds[shotIndex] is set, look up that job — if it's still
+  // queued/processing, bail with a log line; if it's completed/failed
+  // we proceed (so a manual "Render again" works as a real retry).
+  const existingJobId = Array.isArray(render.shotJobIds) ? render.shotJobIds[shotIndex] : null;
+  if (existingJobId) {
+    const existing = await getInflightJob(existingJobId);
+    if (existing && (existing.status === 'queued' || existing.status === 'processing')) {
+      appendLog(existingJobId, 'video',
+        `SHOT ${String(shotIndex + 1).padStart(2, '0')} skipped duplicate enqueue: already ${existing.status}`,
+        render.renderId);
+      logger.info(`Cinema duplicate enqueue skipped renderId=${render.renderId} shot=${shotIndex} existingJobId=${existingJobId} status=${existing.status}`);
+      return existing;   // tell the caller this slot is already handled
+    }
   }
-  if (parts.length === 0) return '';
-  // "same X, same Y, …" framing — the model treats these as
-  // continuity instructions instead of new scene elements.
-  return parts.map(p => `same ${p}`).join(', ');
-}
 
-async function queueNextShot({ render, project, shotIndex, frameUrl }) {
   const provider = render.provider     || 'optimized';
   const mode     = render.optimizedMode || 'balanced';
   const overrides = OPTIMIZED_MODES[mode] || OPTIMIZED_MODES.balanced;
@@ -159,41 +166,86 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
     ? (render.beastModel && render.beastModel.trim() ? render.beastModel.trim() : 'wan-2.2')
     : overrides.model;
 
-  // Per-shot background-music toggle. Default OFF; opt-in. When on, the
-  // shot's prompt doubles as the music brief — worker's MusicGen pass
-  // derives a 5-15s clip from it.
   const perShotMusic = Array.isArray(project.shotMusic) ? !!project.shotMusic[shotIndex] : false;
+  const action       = (project.shotPrompts[shotIndex] || '').trim();
 
-  // ── Continuity-first prompt assembly ────────────────────────────
-  // Glue the project's continuity bible to the front of every shot's
-  // action prompt so the model rebuilds the same world (subject /
-  // wardrobe / lighting / camera / palette) each clip. Without this
-  // every shot is its own world and the character mutates between
-  // clips. Action verbs alone live in shotPrompts[i].
-  const bibleBlock = formatContinuityBible(project.continuityBible);
-  const action     = project.shotPrompts[shotIndex] || '';
-  const composedPrompt = bibleBlock
-    ? `${bibleBlock}. ${action}`.trim()
-    : action;
+  // ─── Compile the FULL continuity prompt via the director (§69) ───
+  // Builds bible + physical state + camera state + continuation
+  // language + action + realism layer. Also returns a sanitized
+  // action (drift words stripped), a negative prompt, and a
+  // compact log summary.
+  const previousShot = shotIndex > 0 ? {
+    action: project.shotPrompts[shotIndex - 1] || '',
+  } : null;
+  const continuityMode = project.continuityMode !== false;   // default ON
+  const realismMode    = project.realismMode    !== false;   // default ON
 
-  // Locked seed — same noise init across every shot. Random number
-  // assigned at project creation if the user didn't pick one. The
-  // worker passes this straight into the diffusion sampler.
+  let composedPrompt;
+  let negativePrompt = null;
+  let compactSummary = '';
+  let removedDriftWords = [];
+
+  if (continuityMode) {
+    const compiled = compileContinuityPrompt({
+      bible: project.continuityBible || {},
+      directorState: project.directorState || {},
+      shot: { action },
+      previousShot,
+      shotIndex,
+      totalShots: project.shotCount || project.shotPrompts.length,
+      realismMode,
+    });
+    composedPrompt    = compiled.positivePrompt;
+    negativePrompt    = compiled.negativePrompt;
+    compactSummary    = compiled.compactLogSummary;
+    removedDriftWords = compiled.removedDrift;
+  } else {
+    // Legacy path — just bible-prefix the action. Kept so users who
+    // opt out of the director still get a working render.
+    const fields = ['subject', 'wardrobe', 'environment', 'lighting', 'camera', 'palette'];
+    const bibleLine = fields
+      .map(k => (project.continuityBible?.[k] || '').trim())
+      .filter(Boolean).map(v => `same ${v}`).join(', ');
+    composedPrompt = bibleLine ? `${bibleLine}. ${action}` : action;
+  }
+
+  // Locked seed — same noise init across every shot.
   const lockedSeed = Number.isFinite(project.lockedSeed) ? project.lockedSeed : null;
 
-  // Motion strength — only Wan/Hunyuan honour it; LTX ignores. Range
-  // 0.1-1.0; default 0.6 errs on the side of identity preservation.
-  const motionStrength = Number.isFinite(project.motionStrength)
+  // Motion strength — clamped to [0.1, 1.0]. When continuityMode is on
+  // and the model has a continuity-default lower than the user's
+  // value, we soft-clamp to the safer default and emit a warning.
+  let motionStrength = Number.isFinite(project.motionStrength)
     ? Math.max(0.1, Math.min(1.0, project.motionStrength))
     : 0.6;
+  if (continuityMode) {
+    const modelDef = CONTINUITY_MODEL_DEFAULTS[effectiveModel];
+    if (modelDef && motionStrength > modelDef.motionStrength + 0.15) {
+      const orig = motionStrength;
+      motionStrength = modelDef.motionStrength;
+      appendLog(render.renderId, 'video',
+        `[director] motionStrength softened ${orig} → ${motionStrength} (${effectiveModel} default)`,
+        render.renderId);
+    }
+  }
 
-  // Hero image — when set + this is shot 1 (idx 0) + no frame was
-  // passed in (chain is just starting), use the hero as shot 1's
-  // source image. Subsequent shots use the previous shot's last
-  // frame (frameUrl supplied by advanceFromShotCompletion).
+  // Hero image for shot 0, previous-shot continuity frame for the rest.
   const isFirstShot = shotIndex === 0;
   const startImageUrl = frameUrl
     || (isFirstShot && project.heroImageUrl ? project.heroImageUrl : '');
+
+  // Pre-flight continuity risk score — landed in the logs so the user
+  // can see why a shot might drift even before it renders.
+  const risk = calculateContinuityRisk({
+    bible: project.continuityBible || {},
+    directorState: project.directorState || {},
+    action,
+    model: effectiveModel,
+    motionStrength,
+    durationPerShot: project.durationPerShot || 5,
+    hasHeroImage: !!project.heroImageUrl,
+    shotIndex,
+  });
 
   const job = await createInflightJob({
     provider: role,
@@ -212,8 +264,29 @@ async function queueNextShot({ render, project, shotIndex, frameUrl }) {
     musicPrompt: perShotMusic ? action : '',
     seed: lockedSeed,
     motionStrength,
+    negativePrompt,
+    continuityFrameTime: Number.isFinite(frameTime) ? frameTime : null,
     vault: render.vault ? 1 : 0,
   });
+
+  // Director log line. Lands in the unified-by-render stream so the
+  // user sees what the director did per shot.
+  appendLog(job.videoId, 'video',
+    `[director] ${compactSummary || `shot ${shotIndex + 1}`} · ` +
+    `model=${effectiveModel} · seed=${lockedSeed} · motion=${motionStrength} · ` +
+    `source=${isFirstShot ? (project.heroImageUrl ? 'hero_image' : 't2v') : `continuity_frame_-${(frameTime ?? 0.4).toFixed(2)}s`} · ` +
+    `risk=${risk.score} ${risk.level}`,
+    render.renderId);
+  if (removedDriftWords.length) {
+    appendLog(job.videoId, 'video',
+      `[director] drift sanitized — removed: ${removedDriftWords.join(', ')}`,
+      render.renderId);
+  }
+  if (risk.warnings.length) {
+    for (const w of risk.warnings.slice(0, 3)) {
+      appendLog(job.videoId, 'video', `[director] ⚠ ${w}`, render.renderId);
+    }
+  }
 
   publishJob({ provider, role, jobId: job.videoId, videoId: job.videoId })
     .catch((err) => logger.warn(`Cinema chain publish skipped: ${err.message}`));
@@ -364,7 +437,46 @@ async function advanceFromShotCompletion(render, completedShotIndex, completedJo
     }
 
     updateCinemaRender(render.renderId, { phase: 'extracting' });
-    const frameDataUrl = await extractLastFrameToDataUrl(completedVideo.videoUrl);
+    // ─── Multi-frame continuity extraction (§7) ──────────────────────
+    // Old behaviour grabbed the literal last frame, which is often
+    // the worst frame (model-tail mutation, motion blur). New: pull
+    // 5 candidates spread across the last 1s, pick the one nearest
+    // -0.4s (chooseContinuityFrame). Future scorer can swap in
+    // blur-detection without changing the chain.
+    let frameDataUrl;
+    let frameTime = null;
+    try {
+      // Director module accepts a local path or URL; we need a path
+      // so we download once + run ffprobe + ffmpeg against it.
+      const tmpMp4Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cinema-mp4-'));
+      const localMp4 = path.join(tmpMp4Dir, 'in.mp4');
+      try {
+        const resp = await fetch(completedVideo.videoUrl, { signal: AbortSignal.timeout(VIDEO_DOWNLOAD_TIMEOUT_MS) });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} downloading mp4 for frame extract`);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        await fs.writeFile(localMp4, buf);
+        const chosen = await extractAndChooseContinuityFrame(localMp4);
+        if (chosen?.dataUrl) {
+          frameDataUrl = chosen.dataUrl;
+          frameTime = chosen.time;
+          appendLog(completedJobId, 'video',
+            `[director] continuity frame chosen at -${(chosen.time ?? 0.4).toFixed(2)}s (of ${chosen.candidateCount} candidates)`,
+            render.renderId);
+        }
+      } finally {
+        fs.rm(tmpMp4Dir, { recursive: true, force: true }).catch(() => {});
+      }
+    } catch (extractErr) {
+      logger.warn(`Multi-frame extract failed renderId=${render.renderId}: ${extractErr.message} — falling back to legacy last-frame`);
+      appendLog(render.renderId, 'video',
+        `[director] multi-frame extract failed (${extractErr.message}); using legacy last-frame`,
+        render.renderId);
+    }
+    // Fallback: legacy single-last-frame path if the new helper
+    // returned nothing usable.
+    if (!frameDataUrl) {
+      frameDataUrl = await extractLastFrameToDataUrl(completedVideo.videoUrl);
+    }
 
     updateCinemaRender(render.renderId, { phase: 'uploading' });
     const uploadResult = await uploadSourceImage(frameDataUrl);
@@ -383,6 +495,7 @@ async function advanceFromShotCompletion(render, completedShotIndex, completedJo
       project,
       shotIndex: nextShotIndex,
       frameUrl,
+      frameTime,
     });
 
     const nextJobIds = [...render.shotJobIds];

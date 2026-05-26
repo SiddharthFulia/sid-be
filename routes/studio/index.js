@@ -11,7 +11,7 @@ import {
   postCinema, getCinemaStatus, getCinemaList, deleteCinema, patchCinemaShots, postCinemaBulkAction,
   postCinemaRender, getCinemaRenderStatus, patchCinemaRender,
   getCinemaRendersList, deleteCinemaRenderCtrl, postCinemaRenderResume,
-  getCinemaRenderLogs, postCinemaShotReview, getCinemaDiskStats,
+  getCinemaRenderLogs, postCinemaShotReview, postCinemaFixAction, getCinemaDiskStats,
 } from '../../controllers/studio/index.js';
 
 const router = Router();
@@ -36,7 +36,8 @@ router.get(   '/cinema/status/:projectId', maybeVault, getCinemaStatus);
 router.get(   '/cinema/list',              maybeVault, getCinemaList);
 router.delete('/cinema/:projectId',        maybeVault, deleteCinema);
 router.patch( '/cinema/:projectId',                       maybeVault, patchCinemaShots);
-router.post(  '/cinema/:projectId/shots/:shotIndex/review', maybeVault, postCinemaShotReview);
+router.post(  '/cinema/:projectId/shots/:shotIndex/review',     maybeVault, postCinemaShotReview);
+router.post(  '/cinema/:projectId/shots/:shotIndex/fix-action', maybeVault, postCinemaFixAction);
 router.post(  '/cinema/bulk',                             maybeVault, postCinemaBulkAction);
 
 // Cinema renders (per-attempt resumable state). Listed BEFORE the
