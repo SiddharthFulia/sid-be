@@ -83,6 +83,13 @@ const NEGATIVE_BASE = [
   'camera jump', 'perspective flip', 'inconsistent lighting',
   'inconsistent scale', 'surreal artifacts', 'melting objects',
   'frame warping', 'low realism', 'fake CGI look', 'uncanny valley',
+  // Direction-flip blockers — I2V models love to turn the subject
+  // around between shots when the continuity frame shows them close
+  // to camera. Hammer it explicitly in the negative.
+  'subject turning around', 'subject walking away from camera',
+  'subject walking toward camera if walking away',
+  'character reversing direction', 'head turn 180',
+  'about-face', 'pivot in place', 'subject facing wrong direction',
 ];
 
 // ─── Sanitization ───────────────────────────────────────────────────
@@ -141,10 +148,18 @@ export function getPhysicalContinuationInstruction(prevShot, currentShot, physic
     return parts.length ? `Establish: ${parts.join(', ')}.` : '';
   }
   // Continuation shot — explicitly forbid the model from resetting motion.
+  // The CRITICAL line is the anti-flip rule: I2V models love to have
+  // the subject "turn around and walk away" when the previous frame
+  // shows them close to camera, because that's a plausible-looking
+  // continuation. Force them to keep moving the same way instead.
   const dir = ps.screenDirection || 'in the established direction';
   const parts = [
     `Subjects continue moving ${dir} across the same terrain`,
-    'paws / feet maintain believable ground contact',
+    'subjects MUST keep facing the SAME direction as the previous shot',
+    'subjects do NOT turn around, do NOT reverse direction, do NOT walk away from camera if they were walking toward camera',
+    'subjects do NOT walk toward camera if they were walking away — strict direction continuity',
+    'no head-turn 180, no body rotation, no pivot, no about-face',
+    'feet / paws maintain believable ground contact',
     'no teleporting, no pose reset, no change in scale',
   ];
   if (ps.windDirection)   parts.push(`wind keeps blowing ${ps.windDirection}`);
