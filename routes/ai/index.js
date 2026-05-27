@@ -3,6 +3,7 @@
 // queued chat_jobs pattern; cloud lanes return inline.
 
 import { Router } from 'express';
+import { requireVault } from '../../services/auth/vault.js';
 import {
   postChat, postAI, postGroqChat, postGeminiChat, postGeminiVision, postPromptCoach,
   postChatLocal, getChatStatus, getLocalModels,
@@ -25,10 +26,11 @@ router.get( '/chat/local-models',   getLocalModels);
 // Conversation-aware multi-turn chat with persistence
 router.post(  '/chat/conversations',                          postCreateConversation);
 router.get(   '/chat/conversations',                          getListConversations);
-router.post(  '/chat/conversations/bulk',                     postConversationsBulk);
+// §75 — destructive chat ops require vault auth.
+router.post(  '/chat/conversations/bulk',                     requireVault, postConversationsBulk);
 router.get(   '/chat/conversations/:chatId',                  getOneConversation);
 router.patch( '/chat/conversations/:chatId',                  patchConversation);
-router.delete('/chat/conversations/:chatId',                  deleteOneConversation);
+router.delete('/chat/conversations/:chatId',                  requireVault, deleteOneConversation);
 router.post(  '/chat/conversations/:chatId/messages',         postSendMessage);
 router.post(  '/chat/conversations/:chatId/compact',          postCompactConversation);
 router.post(  '/chat/conversations/:chatId/compact/finalize', postCompactFinalize);

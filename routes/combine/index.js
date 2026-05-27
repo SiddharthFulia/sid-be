@@ -1,7 +1,7 @@
 // /combine/* — multi-video concatenation lane.
 
 import { Router } from 'express';
-import { maybeVault } from '../../services/auth/vault.js';
+import { maybeVault, requireVault } from '../../services/auth/vault.js';
 import {
   postCreate, getStatus, getList, streamFile, removeJob,
   postUpload, uploadMiddleware,
@@ -17,6 +17,6 @@ router.post(  '/combine/upload',      maybeVault, uploadMiddleware, postUpload);
 router.get(   '/combine/list',        maybeVault, getList);
 router.get(   '/combine/status/:id',  maybeVault, getStatus);
 router.get(   '/combine/file/:id',    maybeVault, streamFile);
-router.delete('/combine/:id',         maybeVault, removeJob);
+router.delete('/combine/:id',         requireVault, removeJob);   // §75 — vault gate
 
 export default router;

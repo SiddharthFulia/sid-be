@@ -2,6 +2,7 @@
 // live online matches.
 
 import { Router } from 'express';
+import { requireVault } from '../../services/auth/vault.js';
 import {
   postBestMove, postAnalyze, postPlay, getStatus,
   postSaveGame, getGames, getOneGame, patchGame, removeGame,
@@ -25,7 +26,7 @@ router.get(   '/chess/games/:id',     getOneGame);
 router.patch( '/chess/games/:id',     patchGame);
 router.post(  '/chess/games/bulk',    postBulkSaveGames);
 router.get(   '/chess/collections',   getCollections);
-router.delete('/chess/games/:id',     removeGame);
+router.delete('/chess/games/:id',     requireVault, removeGame);   // §75 — vault gate
 
 // Live online challenge matches
 router.post(  '/chess/matches',             postCreateMatch);
