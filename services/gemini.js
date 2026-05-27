@@ -2,6 +2,16 @@ import { GEMINI_API_KEY } from '../helpers/constants.js';
 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
+// §76 — Gemini disabled by default to save cost (user request).
+// Every export short-circuits with a clear error unless GEMINI_ENABLED=1
+// is set in the BE env. To re-enable: add `GEMINI_ENABLED=1` to .env
+// on Oracle and pm2 restart sid-be. Until then, every Gemini call
+// throws and the calling code falls back to Groq (Cinema review,
+// Cinema fix-action) or returns 503 (raw /gemini + /gemini/vision
+// endpoints) so the FE doesn't silently rack up API spend.
+const GEMINI_ENABLED = (process.env.GEMINI_ENABLED || '').trim() === '1';
+const DISABLED_ERR = 'Gemini is disabled on this BE to save cost. Set GEMINI_ENABLED=1 in .env to re-enable.';
+
 const MODELS = {
   'gemini-flash': 'gemini-2.5-flash',
   'gemini-pro': 'gemini-2.5-pro',
@@ -9,9 +19,10 @@ const MODELS = {
 };
 
 /**
- * Chat with Gemini (text only)
+ * Chat with Gemini (text only) — DISABLED unless GEMINI_ENABLED=1.
  */
 export async function chatGemini(message, history = [], model = 'gemini-flash', options = {}) {
+  if (!GEMINI_ENABLED) throw new Error(DISABLED_ERR);
   if (!GEMINI_API_KEY) throw new Error('Gemini API key not configured');
 
   const modelId = MODELS[model] || model;
@@ -68,6 +79,7 @@ export async function chatGemini(message, history = [], model = 'gemini-flash', 
  * Analyze image with Gemini (vision)
  */
 export async function analyzeImageGemini(imageBase64, prompt = 'Describe this image in detail.', model = 'gemini-flash') {
+  if (!GEMINI_ENABLED) throw new Error(DISABLED_ERR);
   if (!GEMINI_API_KEY) throw new Error('Gemini API key not configured');
 
   const modelId = MODELS[model] || model;
@@ -120,6 +132,7 @@ export async function analyzeImageGemini(imageBase64, prompt = 'Describe this im
  * 4K detail recovery, Hong Kong night film look, etc.).
  */
 export async function enhanceImageGemini(imageBase64, prompt) {
+  if (!GEMINI_ENABLED) throw new Error(DISABLED_ERR);
   if (!GEMINI_API_KEY) throw new Error('Gemini API key not configured');
 
   let base64Data = imageBase64;

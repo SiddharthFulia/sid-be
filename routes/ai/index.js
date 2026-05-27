@@ -37,8 +37,20 @@ router.post(  '/chat/conversations/:chatId/compact/finalize', postCompactFinaliz
 
 // Cloud lanes
 router.post('/groq',          postGroqChat);
-router.post('/gemini',        postGeminiChat);
-router.post('/gemini/vision', postGeminiVision);
+// §76 — Gemini disabled to save cost. Routes return 503 with a clear
+// message so the FE can fall back to Groq. To re-enable: set
+// GEMINI_ENABLED=1 in the BE .env + restore these route lines.
+router.post('/gemini',        (_req, res) => res.status(503).json({
+  status: false, message: 'Gemini is disabled on this BE (cost). Use /groq instead.',
+  code: 'GEMINI_DISABLED',
+}));
+router.post('/gemini/vision', (_req, res) => res.status(503).json({
+  status: false, message: 'Gemini Vision is disabled on this BE (cost).',
+  code: 'GEMINI_DISABLED',
+}));
+// Original handlers (kept imported but unwired) — restore if re-enabled:
+// router.post('/gemini',        postGeminiChat);
+// router.post('/gemini/vision', postGeminiVision);
 
 // Prompt coach — turns a plain-English idea into a model-tuned image prompt.
 router.post('/ai/prompt-coach', postPromptCoach);
