@@ -16,7 +16,10 @@ import {
   getRoomStatus,
   getRoomList,
 } from '../../controllers/room/index.js';
-import { getSplatSample, listSplatSamples } from '../../controllers/room/splatSamples.js';
+import {
+  getSplatSample, listSplatSamples,
+  postSplatUpload, getSplatUpload, splatUploadMiddleware,
+} from '../../controllers/room/splatSamples.js';
 
 const router = Router();
 
@@ -29,5 +32,11 @@ router.get(   '/room/list',          maybeVault, getRoomList);
 // using HF_TOKEN, caches to disk, streams with Range support.
 router.get(   '/splat-sample/list',   listSplatSamples);
 router.get(   '/splat-sample/:slug',  getSplatSample);
+
+// User-uploaded splat files. POST multipart 'splat' field → returns
+// { id, url }. GET /splat-upload/<id>.<ext> streams the file with
+// Range support. Files TTL out after 24h.
+router.post(  '/splat-upload',        splatUploadMiddleware, postSplatUpload);
+router.get(   '/splat-upload/:name',  getSplatUpload);
 
 export default router;

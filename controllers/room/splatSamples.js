@@ -16,10 +16,12 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import multer from 'multer';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import logger from '../../helpers/logger.js';
-import { error } from '../../helpers/res_helper.js';
+import { success, error } from '../../helpers/res_helper.js';
 
 const HF_TOKEN = (process.env.HF_TOKEN || process.env.HF_API_KEY || '').trim();
 
@@ -162,4 +164,100 @@ export const listSplatSamples = (_req, res) => {
     cached: fs.existsSync(cachePathFor(slug)),
   }));
   res.json({ status: true, data: { items } });
+};
+
+// ─── User uploads — Splat Viewer ─────────────────────────────────
+// Lets the FE post a user's splat file once, then loads it from
+// /api/splat-upload/:id.<ext>. Two reasons we route this through
+// the BE instead of blob URLs:
+//   1. Big captures (200-500 MB) sit in browser memory the whole
+//      session if held as a blob. A BE URL lets the library
+//      stream + GC the bytes between scene loads.
+//   2. The Range-supported BE response means the library can
+//      progress-bar the decode the same way it does for chips.
+// Files land in data/splat-uploads/. They are NOT permanent —
+// see TTL note inside the cleanup helper.
+
+const UPLOAD_DIR = path.join(ROOT, 'data', 'splat-uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const VALID_EXTS = new Set(['.ply', '.splat', '.ksplat', '.spz']);
+
+const splatStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename:    (_req, file, cb) => {
+    const id  = crypto.randomBytes(8).toString('hex');
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.ksplat';
+    if (!VALID_EXTS.has(ext)) return cb(new Error(`Unsupported extension: ${ext}`));
+    cb(null, `${id}${ext}`);
+  },
+});
+const splatUpload = multer({
+  storage: splatStorage,
+  limits: { fileSize: 600 * 1024 * 1024 },   // 600 MB hard cap — bigger splats are rare on consumer hw
+});
+export const splatUploadMiddleware = splatUpload.single('splat');
+
+// One-shot TTL sweep: anything older than 24 h gets removed on the
+// next upload. Stops the dir from growing forever without any cron.
+function sweepStaleUploads() {
+  const now = Date.now();
+  const TTL = 24 * 60 * 60 * 1000;
+  try {
+    for (const name of fs.readdirSync(UPLOAD_DIR)) {
+      const p = path.join(UPLOAD_DIR, name);
+      const stat = fs.statSync(p);
+      if (now - stat.mtimeMs > TTL) {
+        try { fs.unlinkSync(p); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+
+export const postSplatUpload = (req, res) => {
+  if (!req.file) return error(res, 'Upload a video field named "splat"', 400);
+  sweepStaleUploads();
+  const name = req.file.filename;     // e.g. <id>.ksplat
+  const id   = path.parse(name).name;
+  const url  = `/api/splat-upload/${name}`;
+  logger.info(`[splat-upload] received ${name} · ${(req.file.size / (1024 * 1024)).toFixed(1)} MB`);
+  return success(res, {
+    id,
+    url,
+    filename: name,
+    bytes: req.file.size,
+  });
+};
+
+export const getSplatUpload = (req, res) => {
+  // Filename is `<id>.<ext>` — id is the random hex we minted, ext
+  // is whatever the user uploaded. Reject anything with directory
+  // separators so a crafted path can't escape the upload dir.
+  const raw  = String(req.params.name || '');
+  if (!/^[a-f0-9]{16}\.[a-z]+$/i.test(raw)) return error(res, 'Bad upload id', 400);
+  const ext  = path.extname(raw).toLowerCase();
+  if (!VALID_EXTS.has(ext)) return error(res, 'Unsupported extension', 400);
+  const filePath = path.join(UPLOAD_DIR, raw);
+  if (!fs.existsSync(filePath)) return error(res, 'Upload not found (may have expired)', 404);
+
+  const stat = fs.statSync(filePath);
+  res.setHeader('Content-Type',  contentTypeFor(ext));
+  res.setHeader('Content-Length', stat.size);
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('Content-Disposition', `inline; filename="${raw}"`);
+
+  const range = req.headers.range;
+  if (range) {
+    const m = /bytes=(\d+)-(\d*)/.exec(range);
+    if (m) {
+      const start = parseInt(m[1], 10);
+      const end   = m[2] ? Math.min(parseInt(m[2], 10), stat.size - 1) : stat.size - 1;
+      res.status(206);
+      res.setHeader('Content-Range',  `bytes ${start}-${end}/${stat.size}`);
+      res.setHeader('Accept-Ranges',  'bytes');
+      res.setHeader('Content-Length', end - start + 1);
+      return fs.createReadStream(filePath, { start, end }).pipe(res);
+    }
+  }
+  fs.createReadStream(filePath).pipe(res);
 };
