@@ -29,6 +29,8 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { detectObjects } from '../face.js';
 import { chatGroq } from '../groq.js';
+import { appendLog as appendJobLog } from './logStore.js';
+import { updateProgress } from './roomStore.js';
 import logger from '../../helpers/logger.js';
 
 const KEYFRAME_COUNT = 6;
@@ -71,9 +73,10 @@ async function extractKeyframes(videoPath) {
 }
 
 // ── YOLOv8 detection on each keyframe ───────────────────────────
-async function detectAcrossFrames(framePaths) {
+async function detectAcrossFrames(framePaths, onFrame = () => {}) {
   const allDetections = [];
   for (let i = 0; i < framePaths.length; i++) {
+    onFrame(i + 1, framePaths.length);
     try {
       const buf = fs.readFileSync(framePaths[i]);
       const dataUrl = `data:image/jpeg;base64,${buf.toString('base64')}`;
@@ -187,15 +190,35 @@ async function groqCritique({ detected, spaceGapPct }) {
   return parsed;
 }
 
+// Internal helper — writes both to the row's progressMessage AND
+// appends a line to the shared job_logs table so the FE log strip
+// has a timestamped feed. jobId is optional: when omitted (testing)
+// the function is a no-op.
+function step(jobId, msg) {
+  if (!jobId) return;
+  try { updateProgress(jobId, msg); } catch (_) {}
+  try { appendJobLog(jobId, 'room', msg); } catch (_) {}
+}
+
 // ── Public: full analyze pipeline ───────────────────────────────
-export async function analyzeRoom(videoPath) {
+// `jobId` is optional but recommended — when provided, the pipeline
+// writes a progress line at every meaningful step so the FE log
+// strip can show what's happening during the ~10-15s wait.
+export async function analyzeRoom(videoPath, { jobId } = {}) {
   const startedAt = Date.now();
+  step(jobId, 'Extracting keyframes from the video…');
   const { tmp, frames } = await extractKeyframes(videoPath);
+  step(jobId, `Got ${frames.length} keyframes · scaling to 1024px`);
   try {
-    const rawDetections = await detectAcrossFrames(frames);
+    step(jobId, `Running object detection across ${frames.length} frames…`);
+    const rawDetections = await detectAcrossFrames(frames, (i, n) =>
+      step(jobId, `Detecting objects · frame ${i}/${n}`)
+    );
     const detected      = summarizeDetections(rawDetections, frames.length);
     const spaceGapPct   = estimateGap(rawDetections, frames.length);
+    step(jobId, `Detected ${detected.length} distinct items · ~${spaceGapPct}% unused`);
 
+    step(jobId, 'Asking Groq for a room critique…');
     let critique = await groqCritique({ detected, spaceGapPct });
 
     // Synthesize a fallback if Groq returns garbage so the user never
@@ -216,6 +239,7 @@ export async function analyzeRoom(videoPath) {
       };
     }
 
+    step(jobId, `Critique complete · ${critique.missing?.length || 0} suggestions`);
     const elapsedMs = Date.now() - startedAt;
     return {
       analysis: {
