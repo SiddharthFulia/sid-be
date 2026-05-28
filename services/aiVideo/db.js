@@ -578,6 +578,46 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_deepfake_kind_created   ON deepfake_jobs(kind, createdAt DESC);
 `);
 
+// ─── Room Designer jobs (V2 — added 2026-05-29) ───────────────────
+// Two phases per session:
+//   • 'analyze' — BE synchronously: ffmpeg keyframe extract on the
+//     uploaded video → Python face service /detect-objects on each
+//     frame → Groq critique. Output is a JSON blob stored in
+//     `analysisJson`. No worker queue involved — the whole thing
+//     runs in ~10-15s on the BE box.
+//   • 'render' — async via RabbitMQ. Picks the hero frame, runs
+//     Flux Fill to composite the chosen catalog items, LTX I2V
+//     for camera motion, ffmpeg concat, Cloudinary upload. Worker
+//     posts back `mp4Url` on completion.
+// One row owns both phases — when the user picks items and hits
+// render, we update the existing row instead of inserting a new one.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS room_jobs (
+    jobId            TEXT PRIMARY KEY,
+    status           TEXT NOT NULL,           -- 'analyzed' | 'rendering' | 'completed' | 'failed'
+    -- Input
+    sourceVideoUrl   TEXT,                    -- Cloudinary URL of the uploaded room sweep
+    sourcePublicId   TEXT,
+    -- Analysis (set by /analyze)
+    analysisJson     TEXT,                    -- full {roomType, toneNotes, detected, missing, spaceGapPct}
+    keyframeUrls     TEXT,                    -- JSON array of Cloudinary URLs for keyframes
+    -- Render (set by /render)
+    pickedItemsJson  TEXT,                    -- JSON array of selected catalog items
+    mp4Url           TEXT,                    -- Cloudinary URL of the final render
+    mp4PublicId      TEXT,
+    -- Bookkeeping
+    error            TEXT,
+    workerId         TEXT,
+    progressMessage  TEXT,
+    elapsedMs        INTEGER,
+    createdAt        TEXT NOT NULL,
+    analyzedAt       TEXT,
+    renderStartedAt  TEXT,
+    renderCompletedAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_room_status_created ON room_jobs(status, createdAt DESC);
+`);
+
 // ─── Runner game (hand-gesture Subway-Surfers-style) ─────────────
 // Lightweight player registry — name only, no auth. Lets a returning
 // visitor pick their existing name from a list instead of re-typing.

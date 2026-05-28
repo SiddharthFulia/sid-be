@@ -23,6 +23,11 @@ import { updateImage, appendImageLog } from '../../services/aiVideo/enhancedImag
 import { updateLipsyncJob, appendLipsyncLog } from '../../services/aiVideo/lipsyncStore.js';
 import { updateAudioJob, appendAudioLog } from '../../services/aiVideo/audioStore.js';
 import { appendLog as appendJobLog } from '../../services/aiVideo/logStore.js';
+import {
+  updateProgress as updateRoomProgress,
+  markRenderComplete as markRoomRenderComplete,
+  markFailed as markRoomFailed,
+} from '../../services/aiVideo/roomStore.js';
 
 function checkAuth(req) {
   if (!GPU_WORKER_TOKEN) return true;
@@ -821,4 +826,40 @@ export const postYtFailed = (req, res) => {
   if (!row) return error(res, 'YT job not found', 404);
   logger.warn(`yt-dl (home) failed jobId=${jobId}: ${errMsg}`);
   return success(res, row);
+};
+
+// ─── Room Designer V2.1 callbacks (added 2026-05-29) ────────────
+export const postRoomProgress = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, message, workerId } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  try {
+    updateRoomProgress(jobId, message || '', workerId || null);
+    if (message) appendJobLog(jobId, 'room', String(message).slice(0, 240));
+  } catch (e) { logger.warn(`[room/progress] ${e.message}`); }
+  return success(res, { ok: true });
+};
+
+export const postRoomComplete = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, mp4Url, mp4PublicId, elapsedMs } = req.body || {};
+  if (!jobId || !mp4Url) return error(res, 'jobId + mp4Url required', 400);
+  try {
+    markRoomRenderComplete(jobId, { mp4Url, mp4PublicId, elapsedMs });
+    appendJobLog(jobId, 'room', `Render completed in ${elapsedMs ?? '?'}ms → ${mp4Url}`);
+    logger.info(`Room ${jobId} render completed in ${elapsedMs ?? '?'}ms`);
+  } catch (e) { logger.warn(`[room/complete] ${e.message}`); }
+  return success(res, { ok: true });
+};
+
+export const postRoomFailed = (req, res) => {
+  if (!checkAuth(req)) return error(res, 'Invalid worker token', 401);
+  const { jobId, error: errMsg } = req.body || {};
+  if (!jobId) return error(res, 'jobId required', 400);
+  try {
+    markRoomFailed(jobId, errMsg || 'unknown worker error');
+    appendJobLog(jobId, 'room', `Render failed: ${String(errMsg).slice(0, 200)}`);
+    logger.warn(`Room ${jobId} render failed: ${errMsg}`);
+  } catch (e) { logger.warn(`[room/failed] ${e.message}`); }
+  return success(res, { ok: true });
 };

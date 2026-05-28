@@ -12,6 +12,7 @@ import {
   postMeshJob, postMeshProgress, postMeshComplete, postMeshCompleteBinary, postMeshFailed,
   postDeepfakeJob, postDeepfakeProgress, postDeepfakeComplete, postDeepfakeFailed,
   postYtJob, postYtProgress, postYtComplete, postYtFailed,
+  postRoomProgress, postRoomComplete, postRoomFailed,
 } from '../../controllers/gpuWorker/index.js';
 
 const router = Router();
@@ -63,5 +64,10 @@ router.get( '/gpu-worker/yt-job/:jobId',       postYtJob);
 router.post('/gpu-worker/yt-progress',         postYtProgress);
 router.post('/gpu-worker/yt-complete/:jobId',  postYtComplete);
 router.post('/gpu-worker/yt-failed',           postYtFailed);
+
+// Room Designer V2.1 render callbacks.
+router.post('/gpu-worker/room-progress',       postRoomProgress);
+router.post('/gpu-worker/room-complete',       postRoomComplete);
+router.post('/gpu-worker/room-failed',         postRoomFailed);
 
 export default router;

@@ -28,6 +28,7 @@ const QUEUE_CHAT    = 'chat_queue';
 export const QUEUE_MESH    = 'mesh_queue';
 export const QUEUE_DEEPFAKE = 'deepfake_queue';
 export const QUEUE_YT      = 'yt_queue';
+export const QUEUE_ROOM    = 'room_queue';
 const EXCHANGE_DLX = 'video.dlx';
 const EXCHANGE_IMAGE_DLX = 'image.dlx';
 const EXCHANGE_LIPSYNC_DLX = 'lipsync.dlx';
@@ -36,6 +37,7 @@ const EXCHANGE_CHAT_DLX    = 'chat.dlx';
 export const EXCHANGE_MESH_DLX = 'mesh.dlx';
 export const EXCHANGE_DEEPFAKE_DLX = 'deepfake.dlx';
 export const EXCHANGE_YT_DLX       = 'yt.dlx';
+export const EXCHANGE_ROOM_DLX     = 'room.dlx';
 
 let connection = null;
 let channel = null;
@@ -161,7 +163,13 @@ async function ensureChannel() {
       await channel.bindQueue('yt_failed_queue', EXCHANGE_YT_DLX, '');
       await channel.assertQueue(QUEUE_YT, { durable: true, deadLetterExchange: EXCHANGE_YT_DLX });
 
-      logger.info('RabbitMQ ready — video/image/lipsync/audio/chat/mesh/deepfake/yt queues connected');
+      // Room Designer render lane (V2.1, added 2026-05-29).
+      await channel.assertExchange(EXCHANGE_ROOM_DLX, 'fanout', { durable: true });
+      await channel.assertQueue('room_failed_queue', { durable: true });
+      await channel.bindQueue('room_failed_queue', EXCHANGE_ROOM_DLX, '');
+      await channel.assertQueue(QUEUE_ROOM, { durable: true, deadLetterExchange: EXCHANGE_ROOM_DLX });
+
+      logger.info('RabbitMQ ready — video/image/lipsync/audio/chat/mesh/deepfake/yt/room queues connected');
       return channel;
     } catch (err) {
       logger.error('RabbitMQ connect failed (workers will fall back to HTTP polling)', err.message);
@@ -327,6 +335,28 @@ export async function publishChatJob({ jobId, model }) {
     }
   }
   logger.error('RabbitMQ chat publish failed');
+  return false;
+}
+
+// Publish a Room Designer render trigger. The body carries the
+// jobId only — the worker re-fetches the full row (sourceVideoUrl,
+// pickedItems, analysis) via /api/room/status/:jobId so we can grow
+// the payload without bumping every consumer in lockstep.
+export async function publishRoomJob({ jobId, kind = 'room-render' }) {
+  if (!isConfigured()) return false;
+  const body = Buffer.from(JSON.stringify({ jobId, kind, enqueuedAt: Date.now() }));
+  for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
+    const ch = await ensureChannel();
+    if (!ch) return false;
+    try {
+      const ok = ch.sendToQueue(QUEUE_ROOM, body, { persistent: true, contentType: 'application/json' });
+      if (ok) return true;
+    } catch (err) { channel = null; }
+    if (attempt < PUBLISH_MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, PUBLISH_RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+    }
+  }
+  logger.error('RabbitMQ room publish failed');
   return false;
 }
 
