@@ -16,6 +16,7 @@ import {
   getRoomStatus,
   getRoomList,
 } from '../../controllers/room/index.js';
+import { getSplatSample, listSplatSamples } from '../../controllers/room/splatSamples.js';
 
 const router = Router();
 
@@ -23,5 +24,10 @@ router.post(  '/room/analyze',       maybeVault, roomUploadMiddleware, postAnaly
 router.post(  '/room/render',        requireVault, postRenderRoom);
 router.get(   '/room/status/:jobId', getRoomStatus);
 router.get(   '/room/list',          maybeVault, getRoomList);
+
+// Splat-viewer sample-scene cache. Lazy-downloads from Hugging Face
+// using HF_TOKEN, caches to disk, streams with Range support.
+router.get(   '/splat-sample/list',   listSplatSamples);
+router.get(   '/splat-sample/:slug',  getSplatSample);
 
 export default router;
