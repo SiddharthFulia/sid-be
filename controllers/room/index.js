@@ -54,7 +54,12 @@ export const roomUploadMiddleware = upload.single('video');
 export const postAnalyzeRoom = async (req, res) => {
   if (!req.file) return error(res, 'Upload a video field named "video"', 400);
   const localPath = req.file.path;
-  const jobId = `room_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  // FE may pre-mint a jobId so it can persist the breadcrumb BEFORE
+  // the upload finishes. Falls back to a server-side mint if not.
+  // Format check is loose — anything safe-ish under 64 chars is fine.
+  const clientJobId = String(req.body?.jobId || '').trim();
+  const isSafe      = /^room_[a-z0-9_]{4,60}$/i.test(clientJobId);
+  const jobId       = isSafe ? clientJobId : `room_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   let cloudinaryUrl = null;
   let cloudinaryPublicId = null;
 
