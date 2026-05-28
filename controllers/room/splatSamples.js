@@ -23,23 +23,33 @@ import { error } from '../../helpers/res_helper.js';
 
 const HF_TOKEN = (process.env.HF_TOKEN || process.env.HF_API_KEY || '').trim();
 
-// Curated slug → upstream URL map. Empty by default — the original
-// cakewalk/sample-splat HF repo was deleted (404) so we removed
-// those samples rather than ship broken chips.
+// Curated slug → sample-scene metadata. These files are pre-staged
+// on disk under data/splat-cache/<slug>.ksplat (extracted from
+// mkkellogg's official Gaussian-Splats-3D demo bundle at
+// projects.markkellogg.org/downloads/gaussian_splat_data.zip).
+//
+// `url` is left as a fallback — if the cached file goes missing
+// (e.g. fresh clone of the repo), the controller can re-fetch from
+// that URL. Today all three are extracted from the same 564 MB zip
+// so no individual `url` is set; the file just has to exist.
 //
 // To add a new sample:
-//   1. Find a public URL (HF, S3, your own CDN, …)
-//   2. Add an entry below. If the upstream requires auth, set
-//      HF_TOKEN in .env (already used by musicGen + STT).
-//   3. Add a matching chip to SAMPLE_SCENES in
-//      portfolio/src/pages/SplatViewer.jsx.
+//   1. Drop the file at data/splat-cache/<slug>.<ext>
+//   2. Add an entry below with the matching slug + ext + label
+//   3. Add a chip to SAMPLE_SCENES in portfolio/src/pages/SplatViewer.jsx
 const SAMPLES = {
-  // Example shape — add a working URL to enable:
-  // garden: {
-  //   url: 'https://example.com/garden.ksplat',
-  //   ext: '.ksplat',
-  //   label: 'Garden',
-  // },
+  bonsai: {
+    ext: '.ksplat',
+    label: 'Bonsai (small)',
+  },
+  truck: {
+    ext: '.ksplat',
+    label: 'Truck (medium)',
+  },
+  garden: {
+    ext: '.ksplat',
+    label: 'Garden (large)',
+  },
 };
 
 const ROOT       = process.cwd();
@@ -64,17 +74,21 @@ async function downloadToCache(slug) {
   const spec = SAMPLES[slug];
   const dest = cachePathFor(slug);
   if (!spec || !dest) throw new Error(`Unknown sample slug: ${slug}`);
+  if (!spec.url) {
+    throw new Error(
+      `Sample ${slug} expects pre-staged file at ${dest} but it doesn't exist. ` +
+      `Either drop the file there manually or set spec.url so I can fetch it.`
+    );
+  }
 
   const headers = {};
   if (HF_TOKEN) headers.Authorization = `Bearer ${HF_TOKEN}`;
 
-  logger.info(`[splat-sample] downloading ${slug} from HF …`);
+  logger.info(`[splat-sample] downloading ${slug} from ${spec.url} …`);
   const res = await fetch(spec.url, { headers });
   if (!res.ok) {
-    throw new Error(`HF returned ${res.status} ${res.statusText} for ${spec.url}`);
+    throw new Error(`Upstream returned ${res.status} ${res.statusText} for ${spec.url}`);
   }
-  // Write to a temp file first so a partial download never wins the
-  // cache race.
   const tmp = `${dest}.partial`;
   await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tmp));
   fs.renameSync(tmp, dest);
