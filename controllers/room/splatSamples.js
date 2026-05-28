@@ -23,19 +23,23 @@ import { error } from '../../helpers/res_helper.js';
 
 const HF_TOKEN = (process.env.HF_TOKEN || process.env.HF_API_KEY || '').trim();
 
-// Curated slug → HF URL map. Add new entries here; the slug is what
-// the FE sample chip uses, so keep them stable.
+// Curated slug → upstream URL map. Empty by default — the original
+// cakewalk/sample-splat HF repo was deleted (404) so we removed
+// those samples rather than ship broken chips.
+//
+// To add a new sample:
+//   1. Find a public URL (HF, S3, your own CDN, …)
+//   2. Add an entry below. If the upstream requires auth, set
+//      HF_TOKEN in .env (already used by musicGen + STT).
+//   3. Add a matching chip to SAMPLE_SCENES in
+//      portfolio/src/pages/SplatViewer.jsx.
 const SAMPLES = {
-  garden: {
-    url: 'https://huggingface.co/cakewalk/sample-splat/resolve/main/garden_high.ksplat',
-    ext: '.ksplat',
-    label: 'Garden (INRIA)',
-  },
-  truck: {
-    url: 'https://huggingface.co/cakewalk/sample-splat/resolve/main/truck_high.ksplat',
-    ext: '.ksplat',
-    label: 'Truck (TanksAndTemples)',
-  },
+  // Example shape — add a working URL to enable:
+  // garden: {
+  //   url: 'https://example.com/garden.ksplat',
+  //   ext: '.ksplat',
+  //   label: 'Garden',
+  // },
 };
 
 const ROOT       = process.cwd();
