@@ -20,6 +20,7 @@
 
 import fs from "fs";
 import path from "path";
+import os from "os";
 import crypto from "crypto";
 import { spawn } from "child_process";
 import multer from "multer";
@@ -234,4 +235,150 @@ export const postEditBulkDelete = (req, res) => {
   const ok = results.filter((r) => r.ok).length;
   logger.info(`[edit/bulk-delete] ${ok}/${results.length} removed`);
   return success(res, { results, ok, total: results.length });
+};
+
+// ─── POST /api/edit/process ───────────────────────────────────
+// Server-side ffmpeg trim + aspect-crop + optional music mix.
+// Multer accepts BOTH 'video' (required) and 'music' (optional)
+// — multer.fields() lets us multiplex one POST for the whole edit.
+const processStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    const t = path.join(os.tmpdir(), `edit_${crypto.randomBytes(6).toString("hex")}`);
+    fs.mkdirSync(t, { recursive: true });
+    cb(null, t);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || "") || (file.fieldname === "music" ? ".mp3" : ".mp4");
+    cb(null, `${file.fieldname}${ext}`);
+  },
+});
+const processUpload = multer({
+  storage: processStorage,
+  limits:  { fileSize: MAX_BYTES },
+});
+export const editProcessMiddleware = processUpload.fields([
+  { name: "video", maxCount: 1 },
+  { name: "music", maxCount: 1 },
+]);
+
+// Aspect-ratio crop. ffmpeg `crop=W:H:(in_w-W)/2:(in_h-H)/2` keeps
+// the center of the frame. For each preset we compute target W/H
+// from the source dimensions so we never upscale, only crop.
+//
+// Returns the ffmpeg `-vf` filter chain (without the `-vf` flag).
+function buildVideoFilter(aspect) {
+  if (!aspect || aspect === "source") return null;
+  const [aw, ah] = aspect.split(":").map(Number);
+  if (!aw || !ah) return null;
+  // ffmpeg expression: target = min(iw, ih*ar) × min(iw/ar, ih)
+  // Computed inline via filter expression so we don't need to read
+  // the source dimensions up-front with ffprobe.
+  const arN = `${aw}`, arD = `${ah}`;
+  return [
+    `crop='if(gt(iw/ih,${arN}/${arD}),floor(ih*${arN}/${arD}/2)*2,iw)':`
+        + `'if(gt(iw/ih,${arN}/${arD}),ih,floor(iw*${arD}/${arN}/2)*2)':`
+        + `'(in_w-out_w)/2':'(in_h-out_h)/2'`,
+    // Even resize to keep H.264 happy (must be /2 width/height).
+    `scale=trunc(iw/2)*2:trunc(ih/2)*2`,
+  ].join(",");
+}
+
+function ffmpegRun(args, label = "ffmpeg") {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    let err = "";
+    proc.stderr.on("data", (d) => { err += d.toString(); });
+    proc.on("error", (e) => reject(new Error(`${label} spawn failed: ${e.message}`)));
+    proc.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`${label} exit ${code}: ${err.slice(-400)}`));
+      resolve();
+    });
+  });
+}
+
+export const postEditProcess = async (req, res) => {
+  const videoFiles = req.files?.video || [];
+  const musicFiles = req.files?.music || [];
+  if (videoFiles.length === 0) return error(res, "Upload a 'video' field", 400);
+
+  const inVideo = videoFiles[0].path;
+  const inMusic = musicFiles[0]?.path || null;
+  const tmpDir  = path.dirname(inVideo);
+
+  // Pull edit params from the form body.
+  const trimStart   = Math.max(0, parseFloat(req.body?.trimStart) || 0);
+  const trimEndRaw  = parseFloat(req.body?.trimEnd);
+  const trimEnd     = Number.isFinite(trimEndRaw) && trimEndRaw > trimStart ? trimEndRaw : null;
+  const aspect      = String(req.body?.aspectRatio || "source");
+  const musicVolume = Math.max(0, Math.min(1, parseFloat(req.body?.musicVolume) || 0.7));
+  const title       = (req.body?.title || "Untitled edit").slice(0, 120);
+  const vault       = req.vault?.unlocked ? 1 : 0;
+
+  const id   = crypto.randomBytes(8).toString("hex");
+  const out  = path.join(LIB_DIR, `${id}.mp4`);
+
+  try {
+    // Build the ffmpeg command.
+    const args = ["-y"];
+    if (trimStart > 0) args.push("-ss", trimStart.toFixed(2));
+    args.push("-i", inVideo);
+    if (inMusic) {
+      if (trimStart > 0) args.push("-ss", trimStart.toFixed(2));
+      args.push("-i", inMusic);
+    }
+    if (trimEnd != null) args.push("-t", (trimEnd - trimStart).toFixed(2));
+
+    // Video filter (aspect crop) — applied to stream 0.
+    const vf = buildVideoFilter(aspect);
+    if (vf) args.push("-vf", vf);
+
+    if (inMusic) {
+      // Mix music with original audio. amix balances both inputs;
+      // we boost music by musicVolume and softly duck the source.
+      const amix =
+        `[0:a]volume=${(1 - musicVolume * 0.6).toFixed(2)}[va];` +
+        `[1:a]volume=${musicVolume.toFixed(2)}[ma];` +
+        `[va][ma]amix=inputs=2:duration=shortest:dropout_transition=0[aout]`;
+      args.push("-filter_complex", amix, "-map", "0:v", "-map", "[aout]");
+    }
+
+    args.push(
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "22",
+      "-pix_fmt", "yuv420p",
+      "-movflags", "+faststart",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      out
+    );
+
+    logger.info(`[edit/process] ${id} · ${title} · aspect=${aspect} trim=${trimStart}->${trimEnd} music=${!!inMusic}`);
+    await ffmpegRun(args, "edit-process");
+
+    const stat = fs.statSync(out);
+    const meta = {
+      id,
+      ext:         ".mp4",
+      title,
+      aspectRatio: aspect === "source" ? null : aspect,
+      durationSec: trimEnd != null ? trimEnd - trimStart : parseFloat(req.body?.durationSec) || null,
+      bytes:       stat.size,
+      vault,
+      createdAt:   new Date().toISOString(),
+    };
+    writeSidecar(id, meta);
+
+    return success(res, {
+      ...meta,
+      url:    `/api/edit/file/${id}.mp4`,
+      poster: `/api/edit/poster/${id}.jpg`,
+    });
+  } catch (e) {
+    logger.error(`[edit/process] failed: ${e.message}`);
+    try { fs.unlinkSync(out); } catch (_) {}
+    return error(res, e.message || "Render failed", 500);
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
 };
