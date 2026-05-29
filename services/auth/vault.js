@@ -22,9 +22,12 @@ const VAULT_PASSWORD = process.env.VAULT_PASSWORD || 'Siddharth';
 // you MUST set VAULT_JWT_SECRET to something high-entropy.
 const VAULT_JWT_SECRET = process.env.VAULT_JWT_SECRET
   || `dev-fallback-${VAULT_PASSWORD}-please-set-VAULT_JWT_SECRET-in-prod`;
-const TOKEN_TTL = '90d';   // long-lived single-user system. To extend without
-                            // re-login, hit POST /api/auth/vault-refresh while
-                            // the existing token is still valid.
+const TOKEN_TTL = '30d';   // 30-day window — short enough that a stolen
+                            // token can't sit useful forever, long enough
+                            // that a regular user only re-logs once a month.
+                            // The FE handles expiry silently: it lets every
+                            // request fly until one comes back 401, then
+                            // pops the login modal + retries the original.
 
 export function signVaultToken() {
   return jwt.sign({ scope: 'vault' }, VAULT_JWT_SECRET, { expiresIn: TOKEN_TTL });
