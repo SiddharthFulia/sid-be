@@ -68,14 +68,26 @@ const MOTION = {
 // strictly JSON so the FE can pull each section cleanly.
 const SYSTEM_PROMPT = `You are a senior AI cinematographer specialising in image-to-video
 generation with Wan, Hunyuan, LTX, and similar models. Your job is to
-take a short, plain-English prompt and rewrite it into a richly
-cinematic prompt that will trigger photographic realism instead of
-generic "AI video" output.
+take a plain-English prompt of ANY length (from one sentence to several
+thousand words) and rewrite it into a richly cinematic prompt that will
+trigger photographic realism instead of generic "AI video" output.
 
 You MUST respond with a single JSON object and nothing else:
 
 {
-  "enriched": "ONE long descriptive paragraph (180-260 words) ready to paste into a video model. Preserve the user's subject + action faithfully. Layer in lens, lighting, grain, color grade, camera motion, atmospheric detail, micro-realism cues (skin pores, natural eye reflections, motion blur, parallax, depth haze). Avoid hype words like 'cinematic', 'epic', '8K' — instead, name the specific physical thing (e.g. 'specular highlights on damp asphalt' not 'cinematic look').",
+  "enriched": "A faithful, photographically-detailed rewrite of the user's prompt.
+
+LENGTH SCALING RULES (critical):
+  - If the user's input is under 60 words, output 150-250 words.
+  - If the input is 60-300 words, output ~1.5x the input length.
+  - If the input is 300-1500 words, output a length within ±20% of the input. Never cut content. Reorganise + expand each beat into physically-described imagery.
+  - If the input is 1500+ words, preserve EVERY scene beat, character, prop, and line of action the user wrote. Add cinematic detail to each. Output can match or modestly exceed the input length.
+
+CONTENT RULES:
+  - Preserve every subject, action, location, line of dialogue, and emotional beat from the user's input. Do not summarise.
+  - Layer in lens, lighting, grain, color grade, camera motion, atmospheric detail, micro-realism cues (skin pores, natural eye reflections, motion blur, parallax, depth haze, sub-surface scattering, garment physics).
+  - Name the specific physical thing instead of buzzwords: 'specular highlights on damp asphalt' not 'cinematic look'; 'Kodak Vision3 500T halation in the highlights' not 'film grain'.
+  - For multi-scene prompts, structure the rewrite as a sequence of beats. Use line breaks between scenes.",
   "negative": "ONE comma-separated negative prompt list of artifacts to suppress: low quality, plastic skin, waxy faces, melted hands, jittery limbs, extra fingers, deformed eyes, frame interpolation artefacts, watermark, text overlays, cartoon, anime, painting, illustration, oversaturated colors.",
   "breakdown": {
     "lens":     "<one short phrase>",
@@ -117,7 +129,10 @@ function fallbackEnrich({ base, lens, lighting, grain, tone, motion }) {
 }
 
 export const postEnrichPrompt = async (req, res) => {
-  const base     = String(req.body?.base || '').slice(0, 600).trim();
+  // 5 000 chars accommodates ~700 plain-English words or a fairly
+  // detailed multi-shot brief. Anything longer almost certainly wants
+  // to be split into separate clips anyway.
+  const base = String(req.body?.base || '').slice(0, 5000).trim();
   if (!base) return error(res, 'base prompt required', 400);
   const lens     = String(req.body?.lens     || '');
   const lighting = String(req.body?.lighting || '');
@@ -135,12 +150,19 @@ export const postEnrichPrompt = async (req, res) => {
     `  motion:   ${MOTION[motion]    || '—'}\n\n` +
     `Return the JSON now.`;
 
+  // Scale Groq's output budget to the input size so long briefs come
+  // back fully expanded instead of truncated mid-paragraph. Rough
+  // ratio: 1 token ≈ 4 chars; ~2x the input chars in tokens covers
+  // the expansion target with comfortable headroom. Cap at 6 000 so
+  // we don't blow the model's per-request budget for tiny inputs.
+  const targetTokens = Math.min(6000, Math.max(800, Math.ceil(base.length * 0.7)));
+
   let parsed = null;
   try {
     const { reply } = await chatGroq(userMsg, [], 'llama-3.3-70b', {
       system:      SYSTEM_PROMPT,
       temperature: 0.55,
-      maxTokens:   900,
+      maxTokens:   targetTokens,
     });
     const cleaned = String(reply || '')
       .replace(/^```(?:json)?\s*/i, '')
