@@ -31,7 +31,7 @@ const LIB_DIR   = path.join(ROOT, "data", "edit-library");
 fs.mkdirSync(LIB_DIR, { recursive: true });
 
 const VALID_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv"]);
-const MAX_BYTES  = 600 * 1024 * 1024;   // 600 MB cap per video
+const MAX_BYTES  = 500 * 1024 * 1024;   // 500 MB cap per video — communicated to the user via the editor hint banner
 
 // ─── multer setup ─────────────────────────────────────────────
 const storage = multer.diskStorage({
