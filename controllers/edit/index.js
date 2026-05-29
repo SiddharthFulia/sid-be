@@ -257,9 +257,39 @@ const processUpload = multer({
   limits:  { fileSize: MAX_BYTES },
 });
 export const editProcessMiddleware = processUpload.fields([
-  { name: "video", maxCount: 1 },
-  { name: "music", maxCount: 1 },
+  { name: "video",  maxCount: 1  },   // legacy single-clip alias
+  { name: "clips",  maxCount: 20 },   // multi-clip path
+  { name: "music",  maxCount: 1  },
 ]);
+
+const QUALITY_MAP = {
+  fast:     { crf: 26, preset: "veryfast" },
+  balanced: { crf: 22, preset: "medium"   },
+  high:     { crf: 18, preset: "slow"     },
+  max:      { crf: 14, preset: "slow"     },
+};
+
+// Build the list of (file, in, out) windows that each clip
+// contributes to the output. trimMode='remove' splits one clip into
+// two windows so the cut-out segment disappears from the concat.
+function expandSegments(clips, segments) {
+  const out = [];
+  clips.forEach((c, i) => {
+    const seg = segments?.[i] || {};
+    const dur = Math.max(0, parseFloat(seg.duration) || 0);
+    const s   = Math.max(0, parseFloat(seg.trimStart) || 0);
+    const e   = parseFloat(seg.trimEnd);
+    const end = Number.isFinite(e) && e > s ? e : dur;
+    const mode = seg.trimMode === "remove" ? "remove" : "keep";
+    if (mode === "remove") {
+      if (s > 0)         out.push({ path: c.path, ss: 0, t: s });
+      if (end < dur)     out.push({ path: c.path, ss: end, t: dur - end });
+    } else {
+      out.push({ path: c.path, ss: s, t: Math.max(0.05, end - s) });
+    }
+  });
+  return out;
+}
 
 // Aspect-ratio crop. ffmpeg `crop=W:H:(in_w-W)/2:(in_h-H)/2` keeps
 // the center of the frame. For each preset we compute target W/H
@@ -310,61 +340,99 @@ function ffmpegRun(args, label = "ffmpeg") {
 }
 
 export const postEditProcess = async (req, res) => {
-  const videoFiles = req.files?.video || [];
-  const musicFiles = req.files?.music || [];
-  if (videoFiles.length === 0) return error(res, "Upload a 'video' field", 400);
+  // Accept both legacy single 'video' and multi 'clips' uploads.
+  const clipsIn = (req.files?.clips || []).map((f) => ({ path: f.path, name: f.originalname }));
+  const legacyOne = (req.files?.video || [])[0];
+  if (legacyOne) clipsIn.push({ path: legacyOne.path, name: legacyOne.originalname });
+  const musicIn = (req.files?.music || [])[0]?.path || null;
+  if (clipsIn.length === 0) return error(res, "Upload at least one 'clips' (or 'video') file", 400);
 
-  const inVideo = videoFiles[0].path;
-  const inMusic = musicFiles[0]?.path || null;
-  const tmpDir  = path.dirname(inVideo);
+  const tmpDir = path.dirname(clipsIn[0].path);
+  const id     = crypto.randomBytes(8).toString("hex");
+  const out    = path.join(LIB_DIR, `${id}.mp4`);
 
-  // Pull edit params from the form body.
-  const trimStart   = Math.max(0, parseFloat(req.body?.trimStart) || 0);
-  const trimEndRaw  = parseFloat(req.body?.trimEnd);
-  const trimEnd     = Number.isFinite(trimEndRaw) && trimEndRaw > trimStart ? trimEndRaw : null;
   const aspect      = String(req.body?.aspectRatio || "source");
+  const qualityKey  = String(req.body?.quality || "balanced");
+  const quality     = QUALITY_MAP[qualityKey] || QUALITY_MAP.balanced;
+  const fpsKey      = String(req.body?.fps || "source");
   const musicVolume = Math.max(0, Math.min(1, parseFloat(req.body?.musicVolume) || 0.7));
   const title       = (req.body?.title || "Untitled edit").slice(0, 120);
   const vault       = req.vault?.unlocked ? 1 : 0;
 
-  const id   = crypto.randomBytes(8).toString("hex");
-  const out  = path.join(LIB_DIR, `${id}.mp4`);
+  let segments = [];
+  try { segments = JSON.parse(req.body?.segments || "[]"); } catch (_) {}
+  if (segments.length === 0) {
+    // Legacy single-file path used trimStart/trimEnd/durationSec fields.
+    const dur = parseFloat(req.body?.durationSec) || 0;
+    segments = [{
+      trimStart: parseFloat(req.body?.trimStart) || 0,
+      trimEnd:   parseFloat(req.body?.trimEnd)   || dur,
+      duration:  dur,
+      trimMode:  "keep",
+    }];
+  }
+
+  const windows = expandSegments(clipsIn, segments);
+  if (windows.length === 0) return error(res, "Nothing to render — every segment was empty", 400);
+
+  const custom = (aspect === "custom") ? {
+    x: Math.max(0, Math.min(0.99, parseFloat(req.body?.cropX) || 0)),
+    y: Math.max(0, Math.min(0.99, parseFloat(req.body?.cropY) || 0)),
+    w: Math.max(0.02, Math.min(1, parseFloat(req.body?.cropW) || 1)),
+    h: Math.max(0.02, Math.min(1, parseFloat(req.body?.cropH) || 1)),
+  } : null;
+  const vf       = buildVideoFilter(aspect, custom);
+  const fpsFilter = (fpsKey !== "source") ? `fps=${parseFloat(fpsKey)}` : null;
 
   try {
-    // Build the ffmpeg command.
+    // Each input window becomes one -ss / -t pair pointing at the
+    // matching local file. Then a single filter_complex concats every
+    // window into one stream pair, applies crop + fps + music mix.
     const args = ["-y"];
-    if (trimStart > 0) args.push("-ss", trimStart.toFixed(2));
-    args.push("-i", inVideo);
-    if (inMusic) {
-      if (trimStart > 0) args.push("-ss", trimStart.toFixed(2));
-      args.push("-i", inMusic);
+    windows.forEach((w) => {
+      args.push("-ss", w.ss.toFixed(2));
+      args.push("-i", w.path);
+      args.push("-t", w.t.toFixed(2));
+    });
+    const musicInputIdx = windows.length;
+    if (musicIn) args.push("-i", musicIn);
+
+    // Build the per-window pre-processing chain (force size + fps
+    // so concat doesn't choke on heterogeneous inputs), then concat.
+    const wantsFps = fpsFilter ? `,${fpsFilter}` : "";
+    const prepChain = vf ? `${vf}${wantsFps}` : (wantsFps ? wantsFps.slice(1) : null);
+
+    const labels = windows.map((_, i) => `[v${i}]`);
+    const audioLabels = windows.map((_, i) => `[a${i}]`);
+    const filterParts = [];
+    windows.forEach((_, i) => {
+      const pre = prepChain ? `,${prepChain}` : "";
+      filterParts.push(`[${i}:v]format=yuv420p${pre}[v${i}]`);
+      filterParts.push(`[${i}:a]aresample=async=1[a${i}]`);
+    });
+    const concatInputs = windows.map((_, i) => `${labels[i]}${audioLabels[i]}`).join("");
+    filterParts.push(
+      `${concatInputs}concat=n=${windows.length}:v=1:a=1[outv][outa]`
+    );
+
+    let videoMap = "[outv]";
+    let audioMap = "[outa]";
+    if (musicIn) {
+      const mIdx = musicInputIdx;
+      filterParts.push(
+        `[outa]volume=${(1 - musicVolume * 0.6).toFixed(2)}[aSrc]`,
+        `[${mIdx}:a]volume=${musicVolume.toFixed(2)}[aMus]`,
+        `[aSrc][aMus]amix=inputs=2:duration=shortest:dropout_transition=0[outaMix]`
+      );
+      audioMap = "[outaMix]";
     }
-    if (trimEnd != null) args.push("-t", (trimEnd - trimStart).toFixed(2));
 
-    // Video filter (aspect or custom rectangular crop).
-    const custom = (aspect === "custom") ? {
-      x: Math.max(0, Math.min(0.99, parseFloat(req.body?.cropX) || 0)),
-      y: Math.max(0, Math.min(0.99, parseFloat(req.body?.cropY) || 0)),
-      w: Math.max(0.02, Math.min(1, parseFloat(req.body?.cropW) || 1)),
-      h: Math.max(0.02, Math.min(1, parseFloat(req.body?.cropH) || 1)),
-    } : null;
-    const vf = buildVideoFilter(aspect, custom);
-    if (vf) args.push("-vf", vf);
-
-    if (inMusic) {
-      // Mix music with original audio. amix balances both inputs;
-      // we boost music by musicVolume and softly duck the source.
-      const amix =
-        `[0:a]volume=${(1 - musicVolume * 0.6).toFixed(2)}[va];` +
-        `[1:a]volume=${musicVolume.toFixed(2)}[ma];` +
-        `[va][ma]amix=inputs=2:duration=shortest:dropout_transition=0[aout]`;
-      args.push("-filter_complex", amix, "-map", "0:v", "-map", "[aout]");
-    }
-
+    args.push("-filter_complex", filterParts.join(";"));
+    args.push("-map", videoMap, "-map", audioMap);
     args.push(
       "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-crf", "22",
+      "-preset", quality.preset,
+      "-crf", String(quality.crf),
       "-pix_fmt", "yuv420p",
       "-movflags", "+faststart",
       "-c:a", "aac",
@@ -372,16 +440,17 @@ export const postEditProcess = async (req, res) => {
       out
     );
 
-    logger.info(`[edit/process] ${id} · ${title} · aspect=${aspect} trim=${trimStart}->${trimEnd} music=${!!inMusic}`);
+    logger.info(`[edit/process] ${id} · ${title} · clips=${clipsIn.length} windows=${windows.length} aspect=${aspect} fps=${fpsKey} q=${qualityKey} music=${!!musicIn}`);
     await ffmpegRun(args, "edit-process");
 
     const stat = fs.statSync(out);
+    const totalSec = windows.reduce((acc, w) => acc + w.t, 0);
     const meta = {
       id,
       ext:         ".mp4",
       title,
       aspectRatio: aspect === "source" ? null : aspect,
-      durationSec: trimEnd != null ? trimEnd - trimStart : parseFloat(req.body?.durationSec) || null,
+      durationSec: totalSec || parseFloat(req.body?.durationSec) || null,
       bytes:       stat.size,
       vault,
       createdAt:   new Date().toISOString(),
