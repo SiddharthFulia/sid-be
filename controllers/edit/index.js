@@ -266,19 +266,32 @@ export const editProcessMiddleware = processUpload.fields([
 // from the source dimensions so we never upscale, only crop.
 //
 // Returns the ffmpeg `-vf` filter chain (without the `-vf` flag).
-function buildVideoFilter(aspect) {
+function buildVideoFilter(aspect, custom) {
   if (!aspect || aspect === "source") return null;
+
+  // Custom rectangle crop — coords are fractions 0..1 of the source
+  // video, computed live by the FE's drawing overlay. ffmpeg takes
+  // exact pixels (or `iw*…` expressions). We use the expression form
+  // so we don't need to ffprobe source dims up front, AND we floor
+  // every value to an even pixel so H.264's `yuv420p` doesn't choke
+  // on odd dimensions.
+  if (aspect === "custom" && custom) {
+    const { x, y, w, h } = custom;
+    return [
+      `crop='floor(iw*${w}/2)*2':'floor(ih*${h}/2)*2':`
+          + `'floor(iw*${x}/2)*2':'floor(ih*${y}/2)*2'`,
+      `scale=trunc(iw/2)*2:trunc(ih/2)*2`,
+    ].join(",");
+  }
+
   const [aw, ah] = aspect.split(":").map(Number);
   if (!aw || !ah) return null;
-  // ffmpeg expression: target = min(iw, ih*ar) × min(iw/ar, ih)
-  // Computed inline via filter expression so we don't need to read
-  // the source dimensions up-front with ffprobe.
+  // Preset crop: keep the center of the frame at the target aspect.
   const arN = `${aw}`, arD = `${ah}`;
   return [
     `crop='if(gt(iw/ih,${arN}/${arD}),floor(ih*${arN}/${arD}/2)*2,iw)':`
         + `'if(gt(iw/ih,${arN}/${arD}),ih,floor(iw*${arD}/${arN}/2)*2)':`
         + `'(in_w-out_w)/2':'(in_h-out_h)/2'`,
-    // Even resize to keep H.264 happy (must be /2 width/height).
     `scale=trunc(iw/2)*2:trunc(ih/2)*2`,
   ].join(",");
 }
@@ -328,8 +341,14 @@ export const postEditProcess = async (req, res) => {
     }
     if (trimEnd != null) args.push("-t", (trimEnd - trimStart).toFixed(2));
 
-    // Video filter (aspect crop) — applied to stream 0.
-    const vf = buildVideoFilter(aspect);
+    // Video filter (aspect or custom rectangular crop).
+    const custom = (aspect === "custom") ? {
+      x: Math.max(0, Math.min(0.99, parseFloat(req.body?.cropX) || 0)),
+      y: Math.max(0, Math.min(0.99, parseFloat(req.body?.cropY) || 0)),
+      w: Math.max(0.02, Math.min(1, parseFloat(req.body?.cropW) || 1)),
+      h: Math.max(0.02, Math.min(1, parseFloat(req.body?.cropH) || 1)),
+    } : null;
+    const vf = buildVideoFilter(aspect, custom);
     if (vf) args.push("-vf", vf);
 
     if (inMusic) {
