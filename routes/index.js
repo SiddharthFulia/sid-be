@@ -25,6 +25,7 @@ import nasaRoutes          from './nasa/index.js';
 import toolsRoutes         from './tools/index.js';
 import combineRoutes       from './combine/index.js';
 import roomRoutes          from './room/index.js';
+import editRoutes          from './edit/index.js';
 
 const router = Router();
 
@@ -46,5 +47,6 @@ router.use('/', nasaRoutes);
 router.use('/', toolsRoutes);
 router.use('/', combineRoutes);
 router.use('/', roomRoutes);
+router.use('/', editRoutes);
 
 export default router;
