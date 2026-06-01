@@ -7,6 +7,12 @@ import {
   postPurgeQueue, getActivityTimeseries, getDiskStats, getMeshStats,
   getCloudinaryUsage, getCloudinaryResources, postCloudinaryDelete,
 } from '../../controllers/admin/index.js';
+import {
+  getTables as getDbTables,
+  getTableRows as getDbTableRows,
+  postQuery as postDbQuery,
+  postAsk as postDbAsk,
+} from '../../controllers/admin/dbExplorer.js';
 
 const router = Router();
 
@@ -23,5 +29,13 @@ router.post('/admin/queues/purge', requireVault, postPurgeQueue);
 router.get( '/admin/cloudinary/usage',     requireVault, getCloudinaryUsage);
 router.get( '/admin/cloudinary/resources', requireVault, getCloudinaryResources);
 router.post('/admin/cloudinary/delete',    requireVault, postCloudinaryDelete);
+
+// Database Explorer — Settings → Database tab. Schema introspection +
+// safe row browser + read-only SQL + Groq natural-language → SELECT.
+// `:name` and SQL are vetted inside the service before execution.
+router.get( '/admin/db/tables',         requireVault, getDbTables);
+router.get( '/admin/db/tables/:name',   requireVault, getDbTableRows);
+router.post('/admin/db/query',          requireVault, postDbQuery);
+router.post('/admin/db/ask',            requireVault, postDbAsk);
 
 export default router;
