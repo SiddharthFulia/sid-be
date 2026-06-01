@@ -8,8 +8,9 @@ import {
   postSaveGame, getGames, getOneGame, patchGame, removeGame,
   postBulkSaveGames, getCollections,
   postCreateMatch, postJoinMatch, getMatchState, postMatchMove, postResignMatch,
+  postTakebackRequest, postTakebackAccept, postTakebackDecline,
   listLiveMatches,
-  getOpeningsList, getOpeningDetail,
+  getOpeningsList, getOpeningDetail, getOpeningExplorer, postIdentifyOpening,
 } from '../../controllers/chess/index.js';
 
 const router = Router();
@@ -31,8 +32,14 @@ router.delete('/chess/games/:id',     requireVault, removeGame);   // §75 — v
 
 // ECO opening database (lichess-org/chess-openings, CC0)
 // List is cheap (paginated, name + eco only); detail is lazy per-click.
-router.get(   '/chess/openings',        getOpeningsList);
-router.get(   '/chess/openings/:slug',  getOpeningDetail);
+// /explorer MUST sit above /:slug so the slug matcher doesn't swallow it.
+router.get(   '/chess/openings',           getOpeningsList);
+router.get(   '/chess/openings/explorer',  getOpeningExplorer);
+// Live opening identifier — POST { moves: [SAN,...] } OR GET ?moves=e4,c5,...
+// Registered ABOVE /:slug so the slug matcher doesn't swallow 'identify'.
+router.post(  '/chess/openings/identify',  postIdentifyOpening);
+router.get(   '/chess/openings/identify',  postIdentifyOpening);
+router.get(   '/chess/openings/:slug',     getOpeningDetail);
 
 // Live online challenge matches
 router.post(  '/chess/matches',             postCreateMatch);
@@ -40,6 +47,10 @@ router.post(  '/chess/matches/:id/join',    postJoinMatch);
 router.get(   '/chess/matches/:id',         getMatchState);
 router.post(  '/chess/matches/:id/move',    postMatchMove);
 router.post(  '/chess/matches/:id/resign',  postResignMatch);
+// Takeback request/accept/decline — opponent-approval flow, unlimited per match.
+router.post(  '/chess/matches/:id/takeback/request', postTakebackRequest);
+router.post(  '/chess/matches/:id/takeback/accept',  postTakebackAccept);
+router.post(  '/chess/matches/:id/takeback/decline', postTakebackDecline);
 // Lobby — deeper path than /:id so Express won't route-match it under :id.
 router.get(   '/chess/matches/lobby/live',  listLiveMatches);
 

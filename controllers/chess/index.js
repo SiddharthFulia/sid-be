@@ -359,6 +359,10 @@ export const postMatchMove = (req, res) => {
       lastMoveAt: now,
       whiteMs: whiteMsNew,
       blackMs: blackMsNew,
+      // Any pending takeback request is invalidated the moment someone
+      // moves — the position has changed underneath it. Clear it so the
+      // opponent doesn't keep seeing a stale request modal.
+      takebackRequest: null,
     };
 
     if (chess.isGameOver()) {
@@ -414,6 +418,150 @@ export const postResignMatch = (req, res) => {
   }
 };
 
+// ─── Takeback request flow ───────────────────────────────────────────
+// One player requests; opponent must approve on their own screen before
+// the move is reverted. Unlimited per match (no counter, no cap).
+//
+// State shape (stored as JSON in chess_matches.takebackRequest):
+//   { requestedBy: 'white'|'black',
+//     requestedAtPly: <int>,         -- moveCount when request fired
+//     plyToRevertTo: <int>,          -- moveCount the BE will truncate to
+//     requestedAt: ISO-string }
+//
+// On accept: BE truncates moves array (PGN SAN tokens) to plyToRevertTo,
+// replays through chess.js to recover the FEN + side-to-move, writes the
+// new state, clears the request.
+// On decline: BE just clears the request.
+// On any new move: clearing happens implicitly via postMatchMove.
+
+export const postTakebackRequest = (req, res) => {
+  try {
+    const { id } = req.params;
+    const { session, plyToRevertTo } = req.body || {};
+    if (!session || typeof session !== 'string') return error(res, 'session required', 400);
+    const row = getMatch(id);
+    if (!row) return error(res, 'match not found', 404);
+    if (row.status !== 'active') return error(res, `match is ${row.status}, cannot request takeback`, 400);
+    const side = sessionSide(row, session);
+    if (!side) return error(res, 'invalid session for this match', 403);
+    if (row.moveCount < 1) return error(res, 'no moves to take back yet', 400);
+
+    // Default: revert one move (go back one ply). Allow caller to override
+    // for multi-ply takebacks (e.g. revert opponent's move + your reply).
+    // Clamp to [0, currentPly - 1] so we always actually undo something.
+    const currentPly = row.moveCount;
+    let target = (typeof plyToRevertTo === 'number' && Number.isFinite(plyToRevertTo))
+      ? Math.floor(plyToRevertTo)
+      : currentPly - 1;
+    if (target < 0) target = 0;
+    if (target >= currentPly) target = currentPly - 1;
+
+    const request = {
+      requestedBy:    side,
+      requestedAtPly: currentPly,
+      plyToRevertTo:  target,
+      requestedAt:    new Date().toISOString(),
+    };
+    const updated = updateMatch(id, { takebackRequest: JSON.stringify(request) });
+    return success(res, publicView(updated));
+  } catch (err) {
+    logger.error('chess takeback request failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// Replays SAN tokens through chess.js to recover FEN/turn after a
+// truncation. SAN is what postMatchMove appends to row.pgn, so this
+// inverts that. Empty string → starting position.
+const TAKEBACK_STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+function replayToPly(pgnSanString, plyTarget) {
+  const tokens = pgnSanString ? pgnSanString.trim().split(/\s+/).filter(Boolean) : [];
+  const kept   = tokens.slice(0, Math.max(0, plyTarget));
+  const chess  = new Chess();
+  for (const san of kept) {
+    // chess.js throws on illegal SAN — that means our PGN got out of sync
+    // with reality, which is a server bug, not a user error. Let it bubble.
+    chess.move(san);
+  }
+  return {
+    pgn:        kept.join(' '),
+    fen:        chess.fen() || TAKEBACK_STARTING_FEN,
+    sideToMove: chess.turn(),  // 'w' | 'b'
+    moveCount:  kept.length,
+  };
+}
+
+export const postTakebackAccept = (req, res) => {
+  try {
+    const { id } = req.params;
+    const { session } = req.body || {};
+    if (!session || typeof session !== 'string') return error(res, 'session required', 400);
+    const row = getMatch(id);
+    if (!row) return error(res, 'match not found', 404);
+    if (row.status !== 'active') return error(res, `match is ${row.status}, cannot accept takeback`, 400);
+    const side = sessionSide(row, session);
+    if (!side) return error(res, 'invalid session for this match', 403);
+
+    const raw = row.takebackRequest;
+    if (!raw) return error(res, 'no pending takeback request', 400);
+    let request;
+    try { request = JSON.parse(raw); } catch { return error(res, 'takeback request is corrupted', 500); }
+    if (!request || !request.requestedBy) return error(res, 'takeback request is malformed', 500);
+    // Only the OPPONENT of the requester can accept. The requester can't
+    // self-approve.
+    if (request.requestedBy === side) return error(res, 'you cannot accept your own takeback', 400);
+
+    const target = request.plyToRevertTo;
+    let replayed;
+    try {
+      replayed = replayToPly(row.pgn || '', target);
+    } catch (e) {
+      logger.error(`chess takeback replay failed for ${id}: ${e.message}`);
+      return error(res, 'failed to replay position to that ply', 500);
+    }
+
+    const patch = {
+      fen:             replayed.fen,
+      pgn:             replayed.pgn,
+      sideToMove:      replayed.sideToMove,
+      moveCount:       replayed.moveCount,
+      // Re-anchor lastMoveAt so the clock starts ticking fresh for whoever
+      // now has to move. (We don't refund clock time — keep it simple.)
+      lastMoveAt:      new Date().toISOString(),
+      takebackRequest: null,
+    };
+    const updated = updateMatch(id, patch);
+    return success(res, publicView(updated));
+  } catch (err) {
+    logger.error('chess takeback accept failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+export const postTakebackDecline = (req, res) => {
+  try {
+    const { id } = req.params;
+    const { session } = req.body || {};
+    if (!session || typeof session !== 'string') return error(res, 'session required', 400);
+    const row = getMatch(id);
+    if (!row) return error(res, 'match not found', 404);
+    const side = sessionSide(row, session);
+    if (!side) return error(res, 'invalid session for this match', 403);
+
+    const raw = row.takebackRequest;
+    if (!raw) return error(res, 'no pending takeback request', 400);
+    // Either side can clear it (the requester might want to cancel their
+    // own request). Be lenient — just nuke it. Side is validated above so
+    // unrelated clients can't poke at it.
+    void side;
+    const updated = updateMatch(id, { takebackRequest: null });
+    return success(res, publicView(updated));
+  } catch (err) {
+    logger.error('chess takeback decline failed', err.message);
+    return error(res, err.message);
+  }
+};
+
 // ─── Opening database (lichess-org/chess-openings, CC0) ─────────────
 // Two-stage lazy lane:
 //   GET /chess/openings              — paginated cheap list (name + eco + slug)
@@ -432,6 +580,98 @@ export const getOpeningsList = (req, res) => {
   } catch (err) {
     logger.error('chess openings list failed', err.message);
     return error(res, err.message);
+  }
+};
+
+// ─── Lichess Opening Explorer proxy ──────────────────────────────────
+// Browsers hitting explorer.lichess.ovh directly get 401'd (the upstream
+// is fussy about UA/origin combos and occasionally throttles anonymous
+// browser traffic). Proxying server-side fixes it: we send a polite
+// identifying UA, cache by FEN for 10 minutes (the masters DB doesn't
+// move during a session), and pass 429/5xx straight through so the FE
+// can show a "rate-limited, retry in a moment" hint.
+//
+// GET /api/chess/openings/explorer?fen=...&moves=5
+//
+// Allowlisted query params (anything else is dropped):
+//   fen, play, moves, topGames, ratings, speeds, since, until
+
+const EXPLORER_CACHE = new Map();
+const EXPLORER_TTL = 10 * 60 * 1000; // 10 min
+const EXPLORER_MAX_ENTRIES = 500;
+const EXPLORER_UA = 'siddharthfulia-portfolio/1.0 (https://siddharthfulia.com)';
+const EXPLORER_PARAM_ALLOWLIST = ['fen', 'play', 'moves', 'topGames', 'ratings', 'speeds', 'since', 'until'];
+
+function explorerCacheGet(key) {
+  const entry = EXPLORER_CACHE.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > EXPLORER_TTL) {
+    EXPLORER_CACHE.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function explorerCacheSet(key, data) {
+  EXPLORER_CACHE.set(key, { data, ts: Date.now() });
+  // Evict oldest if we're getting heavy — Map iteration order is insertion order.
+  if (EXPLORER_CACHE.size > EXPLORER_MAX_ENTRIES) {
+    const oldest = EXPLORER_CACHE.keys().next().value;
+    EXPLORER_CACHE.delete(oldest);
+  }
+}
+
+export const getOpeningExplorer = async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    for (const k of EXPLORER_PARAM_ALLOWLIST) {
+      const v = req.query[k];
+      if (v !== undefined && v !== null && v !== '') params.set(k, String(v));
+    }
+    if (!params.has('fen')) return error(res, 'fen query param is required', 400);
+
+    // Cache key = full canonical query string. Different `moves` / `topGames`
+    // values warrant separate cache entries since the payload differs.
+    const qs = params.toString();
+    const cached = explorerCacheGet(qs);
+    if (cached) return success(res, cached);
+
+    const upstream = `https://explorer.lichess.ovh/masters?${qs}`;
+    let r;
+    try {
+      r = await fetch(upstream, {
+        headers: {
+          'User-Agent': EXPLORER_UA,
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (fetchErr) {
+      // AbortError on timeout, or network failure.
+      if (fetchErr.name === 'TimeoutError' || fetchErr.name === 'AbortError') {
+        return error(res, 'lichess explorer timed out', 504);
+      }
+      return error(res, `lichess explorer unreachable: ${fetchErr.message}`, 502);
+    }
+
+    if (r.status === 429) {
+      const retryAfter = r.headers.get('retry-after');
+      if (retryAfter) res.set('Retry-After', retryAfter);
+      return error(res, 'lichess explorer rate-limited', 429, { retryAfter: retryAfter || null });
+    }
+    if (r.status >= 500) {
+      return error(res, `lichess explorer ${r.status}`, r.status);
+    }
+    if (!r.ok) {
+      return error(res, `lichess explorer ${r.status}: ${r.statusText}`, r.status);
+    }
+
+    const data = await r.json();
+    explorerCacheSet(qs, data);
+    return success(res, data);
+  } catch (err) {
+    logger.error('chess openings explorer proxy failed', err.message);
+    return error(res, err.message, 500);
   }
 };
 

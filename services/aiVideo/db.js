@@ -734,6 +734,12 @@ db.exec(`
 // from (60s of silence). Lazy-added so older DBs migrate in place.
 addColumnIfMissing('chess_matches', 'whiteLastSeenAt', 'TEXT');
 addColumnIfMissing('chess_matches', 'blackLastSeenAt', 'TEXT');
+// Takeback request — JSON blob { requestedBy: 'white'|'black',
+// requestedAtPly: <int>, plyToRevertTo: <int>, requestedAt: ISO }.
+// NULL when there's no pending request. Cleared on accept / decline /
+// after any new move (in case both sides forgot it was pending). Allows
+// unlimited takebacks throughout a match — there's no counter.
+addColumnIfMissing('chess_matches', 'takebackRequest', 'TEXT');
 
 // `chatId` links the job back to its conversation so the BE knows where
 // to append the assistant reply on completion. Lazy-added so existing

@@ -48,6 +48,9 @@ const UPDATABLE = new Set([
   'fen', 'pgn', 'sideToMove', 'moveCount', 'result',
   'whiteMs', 'blackMs', 'lastMoveAt', 'completedAt',
   'whiteLastSeenAt', 'blackLastSeenAt',
+  // Takeback flow — stored as JSON string; set/null on
+  // request/accept/decline. Unlimited per match (no counter).
+  'takebackRequest',
 ]);
 
 export function createMatch({
@@ -94,10 +97,16 @@ export function getMatch(id) {
 }
 
 // Public view — strips session tokens so polling can't leak them.
+// Parses the takebackRequest JSON blob into an object (or null) so the
+// FE doesn't have to JSON.parse it on every poll.
 export function publicView(row) {
   if (!row) return null;
-  const { whiteSession: _w, blackSession: _b, ...rest } = row;
-  return rest;
+  const { whiteSession: _w, blackSession: _b, takebackRequest, ...rest } = row;
+  let parsedTakeback = null;
+  if (takebackRequest) {
+    try { parsedTakeback = JSON.parse(takebackRequest); } catch { parsedTakeback = null; }
+  }
+  return { ...rest, takebackRequest: parsedTakeback };
 }
 
 export function joinMatch(id, blackName = null) {
