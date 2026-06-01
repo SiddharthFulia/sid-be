@@ -55,7 +55,7 @@ db.exec(`
 // User's rating is the FLOOR. Easy is the gentle stretch; hard is the wall.
 // Lower-bound is +1 on every tier so we never serve a puzzle below the user.
 export const DIFFICULTY_BRACKETS = {
-  easy:   { min: 1,   max: 100 },
+  easy:   { min: 20,  max: 100 },
   medium: { min: 200, max: 400 },
   hard:   { min: 500, max: 800 },
 };
@@ -251,5 +251,37 @@ export function getPuzzleStats(userId) {
     solvedCount: user.solved_count,
     totalAvailable,
     lastAttempts: recent,
+  };
+}
+
+export function getGlobalPuzzleStats() {
+  const totalPuzzles = puzzlesCount();
+  const totalUsers   = db.prepare(`SELECT COUNT(*) AS c FROM chess_puzzle_users`).get().c;
+  const totalAttempts = db.prepare(`SELECT COUNT(*) AS c FROM chess_puzzle_attempts`).get().c;
+  const totalSolved   = db.prepare(`SELECT COUNT(*) AS c FROM chess_puzzle_attempts WHERE success = 1`).get().c;
+  const ratingBuckets = db.prepare(`
+    SELECT
+      SUM(CASE WHEN rating <  1200 THEN 1 ELSE 0 END) AS beginner,
+      SUM(CASE WHEN rating BETWEEN 1200 AND 1599 THEN 1 ELSE 0 END) AS club,
+      SUM(CASE WHEN rating BETWEEN 1600 AND 1999 THEN 1 ELSE 0 END) AS intermediate,
+      SUM(CASE WHEN rating BETWEEN 2000 AND 2399 THEN 1 ELSE 0 END) AS advanced,
+      SUM(CASE WHEN rating >= 2400              THEN 1 ELSE 0 END) AS master
+    FROM chess_puzzles
+  `).get();
+  const topThemes = db.prepare(`
+    SELECT theme, COUNT(*) AS n FROM (
+      SELECT TRIM(value) AS theme
+      FROM chess_puzzles, json_each('["' || REPLACE(themes, ' ', '","') || '"]')
+      WHERE themes IS NOT NULL AND themes != ''
+    )
+    GROUP BY theme ORDER BY n DESC LIMIT 8
+  `).all().map(r => ({ theme: r.theme, count: r.n }));
+  return {
+    totalPuzzles,
+    totalUsers,
+    totalAttempts,
+    totalSolved,
+    ratingBuckets,
+    topThemes,
   };
 }

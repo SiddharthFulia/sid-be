@@ -16,7 +16,7 @@ import {
   listPuzzleUsers, getPuzzleUser, getPuzzleUserByName,
   createPuzzleUser, deletePuzzleUser,
   pickNextPuzzle, getPuzzleById,
-  recordAttempt, getPuzzleStats,
+  recordAttempt, getPuzzleStats, getGlobalPuzzleStats,
   puzzlesCount,
   POINTS,
 } from '../../services/chess/puzzleStore.js';
@@ -193,6 +193,16 @@ export const getStats = (req, res) => {
     return success(res, stats);
   } catch (err) {
     logger.error('chess puzzle stats failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// ── Global stats (admin + FE banner) ──────────────────────────────
+export const getGlobalStats = (_req, res) => {
+  try {
+    return success(res, getGlobalPuzzleStats());
+  } catch (err) {
+    logger.error('chess puzzle global stats failed', err.message);
     return error(res, err.message);
   }
 };

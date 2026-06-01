@@ -15,7 +15,7 @@ import {
 } from '../../controllers/chess/index.js';
 import {
   getPuzzleUsersList, postPuzzleUser, removePuzzleUser,
-  getNextPuzzle, postAttempt, getStats,
+  getNextPuzzle, postAttempt, getStats, getGlobalStats,
 } from '../../controllers/chess/puzzles.js';
 
 const router = Router();
@@ -72,6 +72,7 @@ router.post(  '/chess/puzzles/users',         postPuzzleUser);
 router.delete('/chess/puzzles/users/:id',     requireVault, removePuzzleUser);
 router.get(   '/chess/puzzles/next',          getNextPuzzle);
 router.post(  '/chess/puzzles/attempt',       postAttempt);
+router.get(   '/chess/puzzles/stats/global',  getGlobalStats);
 router.get(   '/chess/puzzles/stats',         getStats);
 
 export default router;
