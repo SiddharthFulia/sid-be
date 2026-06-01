@@ -146,6 +146,27 @@ const PROXY_ROUTES = {
     params.set('page', query.page || '1');
     return `https://api.scryfall.com/cards/search?${params}`;
   },
+  // GitHub profile + repo list. Read-only public endpoints — no auth needed.
+  // Frontend's GitHubHeatmap (About page) used to call api.github.com directly,
+  // which leaks the upstream hostname in DevTools. Now goes through us.
+  'proxy/github-user': (query) => {
+    const user = encodeURIComponent(query.user || 'Sid-passion');
+    return `https://api.github.com/users/${user}`;
+  },
+  'proxy/github-repos': (query) => {
+    const user = encodeURIComponent(query.user || 'Sid-passion');
+    const sort = query.sort || 'updated';
+    const perPage = query.per_page || '6';
+    return `https://api.github.com/users/${user}/repos?sort=${sort}&per_page=${perPage}`;
+  },
+  // Third-party contribution-graph aggregator (no auth, public). Used by the
+  // GitHub heatmap on /about — keeps Sid-passion's contribution count visible
+  // without scraping GitHub's HTML or burning an OAuth token.
+  'proxy/github-contributions': (query) => {
+    const user = encodeURIComponent(query.user || 'Sid-passion');
+    const year = query.year || 'last';
+    return `https://github-contributions-api.jogruber.de/v4/${user}?y=${year}`;
+  },
 };
 
 export async function proxyNasa(endpoint, query = {}) {
@@ -172,7 +193,15 @@ export async function proxyNasa(endpoint, query = {}) {
       try { data = await httpGet(url); }
       catch { data = await httpGet(url); }
     } else {
-      const res = await fetch(url);
+      // GitHub's REST API requires a User-Agent; setting it for everyone is
+      // harmless and most public APIs prefer a real UA over Node's default.
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'sid-be-proxy/1.0 (+https://api.siddharthfulia.com)',
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
       if (!res.ok) throw new Error(`Upstream ${res.status}: ${res.statusText}`);
       const contentType = res.headers.get('content-type') || '';
       if (contentType.includes('text/html')) throw new Error('Upstream returned HTML — API may be down');
