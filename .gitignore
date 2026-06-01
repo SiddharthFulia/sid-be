@@ -6,6 +6,9 @@ python/__pycache__/
 python/*.dat
 *.log
 setup-vps.sh
-# Runtime metadata + generated artifacts — local + prod each maintain their own
-data/
+# Runtime metadata + generated artifacts — local + prod each maintain their own.
+# Ignore everything under data/ except the static ECO opening dataset (CC0,
+# ships with the code so /chess/openings works the moment a fresh prod box boots).
+data/*
+!data/chess_openings.json
 public/generated-videos/

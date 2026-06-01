@@ -17,6 +17,7 @@ import { createGame, getGame, updateGame, deleteGame, listGames, bulkCreateGames
 import {
   createMatch, getMatch, publicView, joinMatch, updateMatch, sessionSide,
 } from '../../services/chess/matchStore.js';
+import { listOpenings, findBySlug, findByEco, computeFen } from '../../services/chessOpenings.js';
 import { db } from '../../services/aiVideo/db.js';
 
 const FEN_MIN_TOKENS = 4;   // some PGN exports omit halfmove/fullmove
@@ -409,6 +410,57 @@ export const postResignMatch = (req, res) => {
     return success(res, publicView(updated));
   } catch (err) {
     logger.error('chess match resign failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// ─── Opening database (lichess-org/chess-openings, CC0) ─────────────
+// Two-stage lazy lane:
+//   GET /chess/openings              — paginated cheap list (name + eco + slug)
+//   GET /chess/openings/:slug        — full record incl. FEN + SAN moves
+// The detail endpoint computes the resulting FEN on the fly so the FE
+// can pipe it straight to Lichess's Opening Explorer for "master games"
+// without us bundling an opening book ourselves.
+
+export const getOpeningsList = (req, res) => {
+  try {
+    const page  = parseInt(req.query.page, 10)  || 1;
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const q     = typeof req.query.q === 'string' ? req.query.q : '';
+    const out = listOpenings({ page, limit, q });
+    return success(res, out);
+  } catch (err) {
+    logger.error('chess openings list failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+export const getOpeningDetail = (req, res) => {
+  try {
+    const key = String(req.params.slug || '').trim();
+    if (!key) return error(res, 'slug required', 400);
+    // Accept either a slug or an ECO code (e.g. /openings/B90 → Najdorf).
+    // ECO codes are 3 chars, letter A-E + two digits — easy to detect.
+    const isEco = /^[A-Ea-e]\d{2}$/.test(key);
+    const row = isEco ? findByEco(key.toUpperCase()) : findBySlug(key);
+    if (!row) return error(res, `opening not found: ${key}`, 404);
+    let fen;
+    try {
+      fen = computeFen(row.moves);
+    } catch (e) {
+      logger.error(`chess openings: FEN replay failed for ${row.slug} — ${e.message}`);
+      return error(res, `internal: could not replay opening "${row.name}"`, 500);
+    }
+    return success(res, {
+      eco:   row.eco,
+      name:  row.name,
+      slug:  row.slug,
+      pgn:   row.pgn,
+      moves: row.moves,
+      fen,
+    });
+  } catch (err) {
+    logger.error('chess openings detail failed', err.message);
     return error(res, err.message);
   }
 };

@@ -9,6 +9,7 @@ import {
   postBulkSaveGames, getCollections,
   postCreateMatch, postJoinMatch, getMatchState, postMatchMove, postResignMatch,
   listLiveMatches,
+  getOpeningsList, getOpeningDetail,
 } from '../../controllers/chess/index.js';
 
 const router = Router();
@@ -27,6 +28,11 @@ router.patch( '/chess/games/:id',     patchGame);
 router.post(  '/chess/games/bulk',    postBulkSaveGames);
 router.get(   '/chess/collections',   getCollections);
 router.delete('/chess/games/:id',     requireVault, removeGame);   // §75 — vault gate
+
+// ECO opening database (lichess-org/chess-openings, CC0)
+// List is cheap (paginated, name + eco only); detail is lazy per-click.
+router.get(   '/chess/openings',        getOpeningsList);
+router.get(   '/chess/openings/:slug',  getOpeningDetail);
 
 // Live online challenge matches
 router.post(  '/chess/matches',             postCreateMatch);
