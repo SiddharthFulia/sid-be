@@ -37,20 +37,19 @@ router.post(  '/chat/conversations/:chatId/compact/finalize', postCompactFinaliz
 
 // Cloud lanes
 router.post('/groq',          postGroqChat);
-// §76 — Gemini disabled to save cost. Routes return 503 with a clear
-// message so the FE can fall back to Groq. To re-enable: set
-// GEMINI_ENABLED=1 in the BE .env + restore these route lines.
-router.post('/gemini',        (_req, res) => res.status(503).json({
-  status: false, message: 'Gemini is disabled on this BE (cost). Use /groq instead.',
-  code: 'GEMINI_DISABLED',
-}));
-router.post('/gemini/vision', (_req, res) => res.status(503).json({
-  status: false, message: 'Gemini Vision is disabled on this BE (cost).',
-  code: 'GEMINI_DISABLED',
-}));
-// Original handlers (kept imported but unwired) — restore if re-enabled:
-// router.post('/gemini',        postGeminiChat);
-// router.post('/gemini/vision', postGeminiVision);
+// §76 follow-up — Gemini text + vision now route through Groq under the
+// hood (the controllers detect GEMINI_ENABLED and pick Groq when it's off).
+// FE keeps the same `/api/gemini` + `/api/gemini/vision` URLs and payload
+// shapes — responses are tagged `provider: 'gemini-via-groq'` so the FE
+// can tell. To re-enable native Gemini: set GEMINI_ENABLED=1 in the BE
+// .env and pm2 restart sid-be — the controllers will switch back without
+// any code change.
+//
+// Note: image-out (`enhanceImageGemini`, used by /api/image-enhance) is
+// NOT covered by this fallback — Groq has no image-output model. That
+// endpoint still requires GEMINI_ENABLED=1 to function.
+router.post('/gemini',        postGeminiChat);
+router.post('/gemini/vision', postGeminiVision);
 
 // Prompt coach — turns a plain-English idea into a model-tuned image prompt.
 router.post('/ai/prompt-coach', postPromptCoach);

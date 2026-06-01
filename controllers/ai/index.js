@@ -1,7 +1,12 @@
 import { success, error } from '../../helpers/res_helper.js';
 import { chat as ollamaChat, rawQuery } from '../../services/ollama.js';
-import { chatGroq } from '../../services/groq.js';
+import { chatGroq, chatGroqAsGemini, analyzeImageGroqAsGemini } from '../../services/groq.js';
 import { chatGemini, analyzeImageGemini } from '../../services/gemini.js';
+
+// §76 follow-up — Gemini text/vision lanes silently fall back to Groq
+// when native Gemini is gated off. Flip GEMINI_ENABLED=1 in .env to use
+// real Gemini again — no code change required.
+const GEMINI_NATIVE_ENABLED = (process.env.GEMINI_ENABLED || '').trim() === '1';
 import logger from '../../helpers/logger.js';
 import { createChatJob, getChatJob } from '../../services/aiVideo/chatStore.js';
 import { publishChatJob } from '../../services/aiVideo/messageQueue.js';
@@ -75,11 +80,14 @@ export const postGeminiChat = async (req, res) => {
     if (!message) return error(res, 'Message is required', 400);
 
     const start = Date.now();
-    logger.info(`GEMINI REQ | model=${model} | msg="${message.slice(0, 60)}..."`);
+    const useNative = GEMINI_NATIVE_ENABLED;
+    logger.info(`GEMINI REQ | model=${model} | backend=${useNative ? 'gemini' : 'groq'} | msg="${message.slice(0, 60)}..."`);
 
-    const result = await chatGemini(message, history, model, { system, maxTokens, temperature });
+    const result = useNative
+      ? await chatGemini(message, history, model, { system, maxTokens, temperature })
+      : await chatGroqAsGemini(message, history, model, { system, maxTokens, temperature });
 
-    logger.info(`GEMINI RES | ${Date.now() - start}ms | model=${result.model} | tokens=${result.tokens}`);
+    logger.info(`GEMINI RES | ${Date.now() - start}ms | model=${result.model} | provider=${result.provider} | tokens=${result.tokens}`);
     success(res, result);
   } catch (err) {
     logger.error('Gemini chat failed', err.message);
@@ -249,9 +257,12 @@ export const postGeminiVision = async (req, res) => {
     if (!image) return error(res, 'Image is required', 400);
 
     const start = Date.now();
-    const result = await analyzeImageGemini(image, prompt || 'Describe this image in detail.', model);
+    const useNative = GEMINI_NATIVE_ENABLED;
+    const result = useNative
+      ? await analyzeImageGemini(image, prompt || 'Describe this image in detail.', model)
+      : await analyzeImageGroqAsGemini(image, prompt || 'Describe this image in detail.', model);
 
-    logger.info(`GEMINI VISION | ${Date.now() - start}ms | tokens=${result.tokens}`);
+    logger.info(`GEMINI VISION | ${Date.now() - start}ms | backend=${useNative ? 'gemini' : 'groq'} | provider=${result.provider} | tokens=${result.tokens}`);
     success(res, result);
   } catch (err) {
     logger.error('Gemini vision failed', err.message);
@@ -477,6 +488,9 @@ export const postCompactConversation = async (req, res) => {
     }
 
     // ── Cloud fallback (Groq → Gemini) ──
+    // When GEMINI_ENABLED=0 (default) the secondary fallback also routes
+    // through Groq via chatGroqAsGemini — different model alias keeps a
+    // "second try" path while we wait for cost re-approval on Gemini.
     let summary = '';
     try {
       const r = await chatGroq(COMPACT_USER_PROMPT(transcript), [], 'llama-3.1-8b', {
@@ -484,9 +498,10 @@ export const postCompactConversation = async (req, res) => {
       });
       summary = (r.reply || r.message || '').trim();
     } catch (groqErr) {
-      logger.warn(`Compact Groq failed, falling back to Gemini: ${groqErr.message}`);
+      logger.warn(`Compact Groq failed, falling back to Gemini lane: ${groqErr.message}`);
       try {
-        const r = await chatGemini(COMPACT_USER_PROMPT(transcript), [], 'gemini-flash', {
+        const geminiLane = GEMINI_NATIVE_ENABLED ? chatGemini : chatGroqAsGemini;
+        const r = await geminiLane(COMPACT_USER_PROMPT(transcript), [], 'gemini-pro', {
           system: COMPACT_SYSTEM_PROMPT, maxTokens: 1500, temperature: 0.2,
         });
         summary = (r.reply || r.message || '').trim();
@@ -744,7 +759,11 @@ export const postSendMessage = async (req, res) => {
         const r = await chatGroq(fullContent, historyForCloud, model, opts);
         reply = r.reply || r.message || '';
       } else if (provider === 'cloud-gemini') {
-        const r = await chatGemini(fullContent, historyForCloud, model, opts);
+        // §76 follow-up — when native Gemini is gated, this provider lane
+        // silently routes through Groq so existing cloud-gemini chats
+        // keep working without the FE having to switch providers.
+        const geminiLane = GEMINI_NATIVE_ENABLED ? chatGemini : chatGroqAsGemini;
+        const r = await geminiLane(fullContent, historyForCloud, model, opts);
         reply = r.reply || r.message || '';
       } else if (provider === 'oracle-ollama') {
         // ollamaChat's 4th arg is a `context` string, not an options

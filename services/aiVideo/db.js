@@ -288,6 +288,12 @@ migrateLegacyJson();
 // SQLite doesn't support `IF NOT EXISTS` on ADD COLUMN, so we probe + try.
 function addColumnIfMissing(table, column, definition) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  // Empty array → table doesn't exist yet. Skip silently: it'll be
+  // created by a later `db.exec(CREATE TABLE IF NOT EXISTS ${table})`
+  // pass in this same file, with the column already baked in. Without
+  // this guard the boot crashes on dev DBs that haven't seen every
+  // table yet (e.g. fresh clones, stale local snapshots).
+  if (!cols.length) return;
   if (cols.some(c => c.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   logger.info(`SQLite: added column ${table}.${column}`);

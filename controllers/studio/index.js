@@ -813,11 +813,17 @@ Output STRICT JSON only (no markdown, no code fences, no preamble):
 
     let raw = '';
     if (engine === 'gemini') {
-      // Lazy-import so we don't pull Gemini deps when Groq is the only path.
-      // Path is `services/gemini.js`, not the older `ai/geminiService.js` —
-      // earlier wiring pointed at the wrong file and always 503'd.
-      const { chatGemini } = await import('../../services/gemini.js').catch(() => ({}));
-      if (typeof chatGemini !== 'function') {
+      // §76 follow-up — Gemini engine for review now routes through Groq
+      // under the hood (chatGroqAsGemini accepts the same gemini-* aliases
+      // and returns a parallel envelope). Flip GEMINI_ENABLED=1 in .env
+      // to use the native Gemini path again.
+      const geminiEnabled = (process.env.GEMINI_ENABLED || '').trim() === '1';
+      const { chatGemini } = geminiEnabled
+        ? await import('../../services/gemini.js').catch(() => ({}))
+        : { chatGemini: null };
+      const { chatGroqAsGemini } = await import('../../services/groq.js').catch(() => ({}));
+      const geminiFn = geminiEnabled ? chatGemini : chatGroqAsGemini;
+      if (typeof geminiFn !== 'function') {
         return error(res, 'Gemini engine not configured on this BE', 503);
       }
       // Whitelist the same three Gemini aliases AI Chat exposes so the
@@ -826,7 +832,7 @@ Output STRICT JSON only (no markdown, no code fences, no preamble):
       const GEMINI_ALLOWED = new Set(['gemini-flash', 'gemini-flash-lite', 'gemini-pro']);
       const geminiModel = GEMINI_ALLOWED.has(modelOverride) ? modelOverride : 'gemini-flash';
       try {
-        const result = await chatGemini(prompt, [], geminiModel, { system: reviewSystem, temperature: 0.3 });
+        const result = await geminiFn(prompt, [], geminiModel, { system: reviewSystem, temperature: 0.3 });
         raw = (result?.reply || '').trim();
       } catch (geminiErr) {
         // Most common cause: GEMINI_API_KEY missing in env. Return a
@@ -934,12 +940,18 @@ Output STRICT JSON:
 
     let raw = '';
     if (engine === 'gemini') {
-      const { chatGemini } = await import('../../services/gemini.js').catch(() => ({}));
-      if (typeof chatGemini !== 'function') return error(res, 'Gemini engine not configured on this BE', 503);
+      // §76 follow-up — same Groq fallback pattern as postCinemaShotReview.
+      const geminiEnabled = (process.env.GEMINI_ENABLED || '').trim() === '1';
+      const { chatGemini } = geminiEnabled
+        ? await import('../../services/gemini.js').catch(() => ({}))
+        : { chatGemini: null };
+      const { chatGroqAsGemini } = await import('../../services/groq.js').catch(() => ({}));
+      const geminiFn = geminiEnabled ? chatGemini : chatGroqAsGemini;
+      if (typeof geminiFn !== 'function') return error(res, 'Gemini engine not configured on this BE', 503);
       const GEMINI_ALLOWED = new Set(['gemini-flash', 'gemini-flash-lite', 'gemini-pro']);
       const m = GEMINI_ALLOWED.has(model) ? model : 'gemini-flash';
       try {
-        const result = await chatGemini(currentAction, [], m, { system: fixSystem, temperature: 0.3 });
+        const result = await geminiFn(currentAction, [], m, { system: fixSystem, temperature: 0.3 });
         raw = (result?.reply || '').trim();
       } catch (e) {
         return error(res, `Gemini fix failed: ${e.message}`, 503);
