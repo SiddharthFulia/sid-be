@@ -17,7 +17,7 @@ import { createGame, getGame, updateGame, deleteGame, listGames, bulkCreateGames
 import {
   createMatch, getMatch, publicView, joinMatch, updateMatch, sessionSide,
 } from '../../services/chess/matchStore.js';
-import { listOpenings, findBySlug, findByEco, computeFen } from '../../services/chessOpenings.js';
+import { listOpenings, findBySlug, findByEco, computeFen, identifyOpening } from '../../services/chessOpenings.js';
 import { db } from '../../services/aiVideo/db.js';
 
 const FEN_MIN_TOKENS = 4;   // some PGN exports omit halfmove/fullmove
@@ -701,6 +701,43 @@ export const getOpeningDetail = (req, res) => {
     });
   } catch (err) {
     logger.error('chess openings detail failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// ─── Live opening identification ─────────────────────────────────────
+// POST /api/chess/openings/identify { moves: [SAN, ...] }
+// GET  /api/chess/openings/identify?moves=e4,c5,Nf3,d6,d4   (lenient)
+//
+// Returns the most-specific known opening whose move list is a prefix
+// of the input. Pure read — nothing persisted; the FE calls this after
+// each ply to live-update the opening heading above the move list.
+// When the game leaves book entirely (no prefix matches at any depth)
+// the response carries { eco: null, name: null } so the FE can show
+// the last-known name with an "(out of book)" tag.
+export const postIdentifyOpening = (req, res) => {
+  try {
+    // Body wins over query when both are present. Both shapes are
+    // tolerated to keep cURL / quick-test ergonomics open.
+    let moves = null;
+    const body = req.body || {};
+    if (Array.isArray(body.moves)) {
+      moves = body.moves;
+    } else if (typeof req.query.moves === 'string' && req.query.moves.trim()) {
+      moves = req.query.moves.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (!Array.isArray(moves)) return error(res, 'moves must be an array of SAN strings', 400);
+    // Cap the input — pathological 200-ply payloads aren't useful for
+    // opening identification and we don't want to allocate a huge key.
+    if (moves.length > 60) moves = moves.slice(0, 60);
+
+    const hit = identifyOpening(moves);
+    if (!hit) {
+      return success(res, { eco: null, name: null, slug: null, matchedPly: 0 });
+    }
+    return success(res, hit);
+  } catch (err) {
+    logger.error('chess identifyOpening failed', err.message);
     return error(res, err.message);
   }
 };
