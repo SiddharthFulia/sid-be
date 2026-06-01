@@ -72,6 +72,51 @@ export const postPlay = async (req, res) => {
 
 export const getStatus = (_req, res) => success(res, engineStatus());
 
+// ─── Variants lane (Chess960 / King-of-the-Hill / Three-Check) ──────
+// One endpoint for all three playable variants. The FE owns rules logic
+// (chess.js + custom win checks for KoTH / 3-Check); the BE just hands
+// back a Stockfish move for the given FEN. For Chess960 we flip the
+// engine's UCI_Chess960 flag so castling rights with rook-file letters
+// (X-FEN) parse correctly; for the other two Stockfish runs vanilla.
+//   POST /api/chess/variant/play
+//   body: { variant, fen, moveHistory?, options? }
+//     options.elo     — clamped to [1320, 3190] by the engine layer (default 1500)
+//     options.thinkMs — engine time budget (default 500)
+//     options.depth   — optional depth cap
+//   → { bestmove, eval: { type, value } | null, variant, eloUsed }
+const SUPPORTED_VARIANTS = new Set(['chess960', 'koth', 'threeCheck']);
+
+export const postVariantPlay = async (req, res) => {
+  try {
+    const { variant, fen, options = {} } = req.body || {};
+    if (!variant || !SUPPORTED_VARIANTS.has(variant)) {
+      return error(res, `unsupported variant: ${variant}. Allowed: ${[...SUPPORTED_VARIANTS].join(', ')}`, 400);
+    }
+    const verr = validateFen(fen);
+    if (verr) return error(res, verr, 400);
+
+    // For 960, Stockfish must be told the position is shuffled — otherwise
+    // X-FEN castling tokens (e.g. "AHah") are rejected and castles play
+    // illegally. KoTH / 3-Check share standard Stockfish; the variant
+    // rules live FE-side.
+    const elo     = options.elo     ?? 1500;
+    const thinkMs = options.thinkMs ?? 500;
+    const depth   = options.depth;
+    const uciChess960 = variant === 'chess960';
+
+    const out = await play({ fen, elo, thinkMs, uciChess960, depth });
+    return success(res, {
+      bestmove: out.bestmove || null,
+      eval:     out.score || null,
+      variant,
+      eloUsed:  out.eloUsed,
+    });
+  } catch (err) {
+    logger.error('chess variant play failed', err.message);
+    return error(res, err.message, 503);
+  }
+};
+
 // ─── Saved games library (Lichess-style) ─────────────────────────────
 // POST /api/chess/games — create
 // GET  /api/chess/games — list

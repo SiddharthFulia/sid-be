@@ -11,7 +11,12 @@ import {
   postTakebackRequest, postTakebackAccept, postTakebackDecline,
   listLiveMatches,
   getOpeningsList, getOpeningDetail, getOpeningExplorer, postIdentifyOpening,
+  postVariantPlay,
 } from '../../controllers/chess/index.js';
+import {
+  getPuzzleUsersList, postPuzzleUser, removePuzzleUser,
+  getNextPuzzle, postAttempt, getStats,
+} from '../../controllers/chess/puzzles.js';
 
 const router = Router();
 
@@ -20,6 +25,11 @@ router.post('/chess/best-move', postBestMove);
 router.post('/chess/analyze',   postAnalyze);
 router.post('/chess/play',      postPlay);
 router.get( '/chess/status',    getStatus);
+
+// Variants lane — Chess960 / King-of-the-Hill / Three-Check.
+// Sits ABOVE any `/chess/:id` style routes so the `variant` literal
+// doesn't get swallowed by a slug matcher.
+router.post('/chess/variant/play', postVariantPlay);
 
 // Saved-games library
 router.post(  '/chess/games',         postSaveGame);
@@ -53,5 +63,15 @@ router.post(  '/chess/matches/:id/takeback/accept',  postTakebackAccept);
 router.post(  '/chess/matches/:id/takeback/decline', postTakebackDecline);
 // Lobby — deeper path than /:id so Express won't route-match it under :id.
 router.get(   '/chess/matches/lobby/live',  listLiveMatches);
+
+// ── Puzzles lane (lichess-imported puzzle trainer) ─────────────────
+// Open routes for anyone to play; DELETE-user sits behind the vault so
+// random visitors can't nuke other people's progress.
+router.get(   '/chess/puzzles/users',         getPuzzleUsersList);
+router.post(  '/chess/puzzles/users',         postPuzzleUser);
+router.delete('/chess/puzzles/users/:id',     requireVault, removePuzzleUser);
+router.get(   '/chess/puzzles/next',          getNextPuzzle);
+router.post(  '/chess/puzzles/attempt',       postAttempt);
+router.get(   '/chess/puzzles/stats',         getStats);
 
 export default router;

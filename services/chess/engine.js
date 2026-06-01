@@ -144,21 +144,33 @@ export async function analyze({ fen, multiPv = 3, depth = 12, thinkMs = DEFAULT_
  * mangling the eval).
  *   { fen, elo = 1500, thinkMs = 400 }
  */
-export async function play({ fen, elo = 1500, thinkMs = 400 } = {}) {
+export async function play({ fen, elo = 1500, thinkMs = 400, uciChess960 = false, depth } = {}) {
   // Stockfish's Elo range is 1320..3190 in modern builds; clamp to that.
   const e = Math.min(Math.max(parseInt(elo, 10) || 1500, 1320), 3190);
   const t = Math.min(Math.max(parseInt(thinkMs, 10) || 400, 50), MAX_THINK_MS);
+  const whiteToMove = fenSideToMoveIsWhite(fen);
 
   return withEngine(async (engine) => {
     await engine.setoption('UCI_LimitStrength', 'true');
     await engine.setoption('UCI_Elo', String(e));
     await engine.setoption('MultiPV', '1');
+    // Chess960 flag — only flipped for variant/play with variant='chess960'.
+    // Without this, Stockfish rejects X-FEN castling tokens (AHah style)
+    // and castles silently illegally on shuffled starting positions.
+    if (uciChess960) await engine.setoption('UCI_Chess960', 'true');
     await engine.position(fen);
-    const result = await engine.go({ movetime: t });
+    const goOpts = { movetime: t };
+    if (depth) goOpts.depth = Math.min(Math.max(parseInt(depth, 10) || 0, 1), MAX_DEPTH);
+    const result = await engine.go(goOpts);
+    // Pull eval from the deepest info line so the FE eval bar can update
+    // during variant play (existing /chess/play doesn't expose score; we
+    // surface it here so the variants UI shows an eval too).
+    const lastInfo = (result.info || []).filter(i => i.score).pop();
     return {
       bestmove: result.bestmove || null,
       eloUsed: e,
       thinkMs: t,
+      score: lastInfo ? normalizeScore(lastInfo.score, whiteToMove) : null,
     };
   });
 }
