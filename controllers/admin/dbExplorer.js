@@ -99,6 +99,7 @@ export const postAsk = async (req, res) => {
       return error(res, `Generated SQL was rejected: ${vet.reason}`, 400, {
         generatedSql: gen.sql,
         explanation:  gen.explanation,
+        chart:        gen.chart || null,
         reason:       vet.reason,
         model:        gen.model,
       });
@@ -114,14 +115,23 @@ export const postAsk = async (req, res) => {
       return error(res, e.message || 'SQL execution failed', 400, {
         generatedSql: vet.sql,
         explanation:  gen.explanation,
+        chart:        gen.chart || null,
         model:        gen.model,
       });
     }
+
+    // Final sanity check on the chart spec: drop it if it references
+    // columns the executed SELECT didn't actually return (Groq sometimes
+    // hallucinates aliases). FE then falls back to the table view.
+    const finalChart = chartReferencesColumns(gen.chart, runResult.columns)
+      ? gen.chart
+      : null;
 
     return success(res, {
       question,
       generatedSql: vet.sql,
       explanation:  gen.explanation,
+      chart:        finalChart,
       model:        gen.model,
       rows:         runResult.rows,
       columns:      runResult.columns,
@@ -133,3 +143,16 @@ export const postAsk = async (req, res) => {
     return error(res, err.message, 500);
   }
 };
+
+// Guard against Groq returning chart keys that don't actually exist in the
+// result set (alias mismatches, hallucinated column names). Returns true if
+// the chart spec's xKey and every yKey appear in the executed columns.
+function chartReferencesColumns(chart, columns) {
+  if (!chart || !Array.isArray(columns) || columns.length === 0) return false;
+  const cols = new Set(columns.map(c => String(c)));
+  if (!cols.has(String(chart.xKey))) return false;
+  for (const y of chart.yKeys || []) {
+    if (!cols.has(String(y))) return false;
+  }
+  return true;
+}

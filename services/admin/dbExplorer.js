@@ -291,8 +291,30 @@ export async function askGroqForSql(question) {
   return {
     sql:         String(parsed.sql || '').trim(),
     explanation: String(parsed.explanation || '').trim(),
+    chart:       sanitizeChartSpec(parsed.chart),
     model:       out?.model || 'llama-3.3-70b-versatile',
   };
+}
+
+// Normalise / validate Groq's chart suggestion. Returns null for anything
+// that isn't a real chartable spec — the FE will then fall back to the
+// table view. Keeps the FE strictly typed: { type, xKey, yKeys[], title }.
+const VALID_CHART_TYPES = new Set(['bar', 'line', 'pie', 'area', 'scatter']);
+export function sanitizeChartSpec(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const type = String(raw.type || '').toLowerCase().trim();
+  if (!VALID_CHART_TYPES.has(type)) return null;
+  const xKey = String(raw.xKey || '').trim();
+  if (!xKey) return null;
+  let yKeys = [];
+  if (Array.isArray(raw.yKeys)) {
+    yKeys = raw.yKeys.map(k => String(k || '').trim()).filter(Boolean);
+  } else if (raw.yKey) {
+    yKeys = [String(raw.yKey).trim()].filter(Boolean);
+  }
+  if (yKeys.length === 0) return null;
+  const title = String(raw.title || '').trim().slice(0, 120);
+  return { type, xKey, yKeys, title };
 }
 
 // ── Prompt builder ──────────────────────────────────────────────
@@ -319,8 +341,18 @@ function buildGroqSystemPrompt(tables) {
   }
   lines.push('');
   lines.push('After choosing the SQL, also write a 1-2 sentence plain-English explanation of what the query does and what the user will learn from the result.');
+  lines.push('');
+  lines.push('ALSO suggest a chart if (and only if) the result is naturally chartable. Pick the chart type from the question + the expected result shape:');
+  lines.push('- "how many <X> per <category>" / counts grouped by category → "bar", xKey=category column, yKeys=[count column]');
+  lines.push('- "<X> over time" / time series → "line" (or "area" for cumulative / stacked) with xKey=date or time-bucket column, yKeys=metric column(s)');
+  lines.push('- "share of total <X> by <category>" / parts-of-whole with ≤10 slices → "pie", xKey=category, yKeys=[value]');
+  lines.push('- "<X> vs <Y>" / two numeric columns with no natural ordering → "scatter", xKey=numeric column, yKeys=[other numeric column]');
+  lines.push('- Single-scalar result, very few rows of mostly non-numeric data, or wide tables without numeric aggregates → chart: null');
+  lines.push('- xKey MUST be a column name returned by your SELECT. Each yKey MUST be a column name returned by your SELECT, and should be numeric.');
+  lines.push('- Keep title ≤ 60 chars, sentence case.');
+  lines.push('');
   lines.push('Return ONLY a JSON object — no markdown, no prose around it — with the shape:');
-  lines.push('{"sql": "<query>", "explanation": "<text>"}');
+  lines.push('{"sql": "<query>", "explanation": "<text>", "chart": null OR {"type": "bar"|"line"|"pie"|"area"|"scatter", "xKey": "<column>", "yKeys": ["<column>", ...], "title": "<short heading>"}}');
   return lines.join('\n');
 }
 
