@@ -8,10 +8,12 @@ import { db } from '../aiVideo/db.js';
 
 const insertStmt = db.prepare(`INSERT INTO chess_games (
   name, pgn, fen, side, mode, engineName, engineType, engineStrength,
-  timeControl, result, moveCount, collection, createdAt, updatedAt
+  timeControl, result, moveCount, collection, variant, startFen, movesUci,
+  createdAt, updatedAt
 ) VALUES (
   @name, @pgn, @fen, @side, @mode, @engineName, @engineType, @engineStrength,
-  @timeControl, @result, @moveCount, @collection, @createdAt, @updatedAt
+  @timeControl, @result, @moveCount, @collection, @variant, @startFen, @movesUci,
+  @createdAt, @updatedAt
 )`);
 
 const selectStmt = db.prepare('SELECT * FROM chess_games WHERE id = ?');
@@ -19,7 +21,8 @@ const deleteStmt = db.prepare('DELETE FROM chess_games WHERE id = ?');
 
 const UPDATABLE_COLS = new Set([
   'name', 'pgn', 'fen', 'side', 'mode', 'engineName', 'engineType',
-  'engineStrength', 'timeControl', 'result', 'moveCount', 'collection', 'updatedAt',
+  'engineStrength', 'timeControl', 'result', 'moveCount', 'collection',
+  'variant', 'startFen', 'movesUci', 'updatedAt',
 ]);
 
 export function createGame(data) {
@@ -37,6 +40,9 @@ export function createGame(data) {
     result: data.result || '*',
     moveCount: data.moveCount || 0,
     collection: data.collection || null,
+    variant: data.variant || 'standard',
+    startFen: data.startFen || null,
+    movesUci: data.movesUci || null,
     createdAt: now,
     updatedAt: now,
   };
@@ -66,16 +72,20 @@ export function deleteGame(id) {
   return deleteStmt.run(id).changes > 0;
 }
 
-export function listGames({ limit = 50, result } = {}) {
+export function listGames({ limit = 50, result, variant } = {}) {
   const safe = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+  const where = [];
+  const params = [];
   if (result && ['1-0', '0-1', '1/2-1/2', '*'].includes(result)) {
-    return db.prepare(
-      `SELECT * FROM chess_games WHERE result = ? ORDER BY updatedAt DESC LIMIT ?`
-    ).all(result, safe);
+    where.push('result = ?'); params.push(result);
   }
+  if (variant && typeof variant === 'string' && variant.length <= 24) {
+    where.push('variant = ?'); params.push(variant);
+  }
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
   return db.prepare(
-    `SELECT * FROM chess_games ORDER BY updatedAt DESC LIMIT ?`
-  ).all(safe);
+    `SELECT * FROM chess_games ${clause} ORDER BY updatedAt DESC LIMIT ?`
+  ).all(...params, safe);
 }
 
 // ─── Collections ─────────────────────────────────────────────────────
@@ -114,6 +124,9 @@ export function bulkCreateGames(rows, collection) {
         result: g.result || '*',
         moveCount: g.moveCount || 0,
         collection: collection || null,
+        variant: g.variant || 'standard',
+        startFen: g.startFen || null,
+        movesUci: g.movesUci || null,
         createdAt: now,
         updatedAt: now,
       };

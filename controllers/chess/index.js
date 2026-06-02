@@ -128,13 +128,21 @@ const NAME_MAX = 80;
 
 export const postSaveGame = (req, res) => {
   try {
-    const { name, pgn, fen, side, mode, engineName, engineType, engineStrength, timeControl, result, moveCount } = req.body || {};
+    const {
+      name, pgn, fen, side, mode, engineName, engineType, engineStrength,
+      timeControl, result, moveCount,
+      // Variant support — variant id, custom starting FEN (for 960 or any
+      // non-standard position), and the UCI move list (covers drops like
+      // 'P@e4' that PGN can't natively express).
+      variant, startFen, movesUci,
+    } = req.body || {};
     if (typeof pgn !== 'string') return error(res, 'pgn is required', 400);
     if (typeof fen !== 'string' || !fen.trim()) return error(res, 'fen is required', 400);
     if (name && String(name).length > NAME_MAX) return error(res, `name too long (max ${NAME_MAX} chars)`, 400);
     const row = createGame({
       name: name ? String(name).trim() : undefined,
       pgn, fen, side, mode, engineName, engineType, engineStrength, timeControl, result, moveCount,
+      variant, startFen, movesUci,
     });
     return success(res, row);
   } catch (err) {
@@ -147,7 +155,8 @@ export const getGames = (req, res) => {
   try {
     const limit = parseInt(req.query.limit, 10) || 50;
     const result = typeof req.query.result === 'string' ? req.query.result : undefined;
-    const items = listGames({ limit, result });
+    const variant = typeof req.query.variant === 'string' ? req.query.variant : undefined;
+    const items = listGames({ limit, result, variant });
     return success(res, { items, total: items.length });
   } catch (err) {
     logger.error('chess getGames failed', err.message);

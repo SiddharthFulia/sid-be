@@ -684,6 +684,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_chess_games_result  ON chess_games(result, updatedAt DESC);
 `);
 addColumnIfMissing('chess_games', 'collection', 'TEXT');
+// Variant support — added 2026-06. Standard PGN doesn't capture 960's
+// random starting position or Crazyhouse's drop moves, so we store:
+//   variant  — mode id ('standard' | 'chess960' | 'koth' | ... | 'crazyhouse')
+//   startFen — the actual starting position (null = standard initial)
+//   movesUci — space-separated UCI sequence (incl. drops like 'P@e4' for
+//              Crazyhouse) so we can replay variants that PGN can't express
+addColumnIfMissing('chess_games', 'variant',  "TEXT NOT NULL DEFAULT 'standard'");
+addColumnIfMissing('chess_games', 'startFen', 'TEXT');
+addColumnIfMissing('chess_games', 'movesUci', 'TEXT');
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_chess_games_variant ON chess_games(variant, updatedAt DESC)'); } catch {}
 
 // ─── Chess online matches (live 1v1 via link share) ──────────────
 // Lightweight live matchmaking — no auth, no accounts. Creator POSTs
