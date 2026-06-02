@@ -87,11 +87,11 @@ function buildSchema() {
       logger.warn(`dbExplorer count ${name} failed: ${e.message}`);
     }
     try {
-      // Top 3 rows for the LLM prompt only. Truncate any column value
-      // longer than 200 chars so a BLOB/JSON column can't blow the
-      // token budget. We DON'T expose these via the /tables endpoint —
-      // they live only inside buildGroqSystemPrompt().
-      sample = ro.prepare(`SELECT * FROM ${quoteIdent(name)} LIMIT 3`).all().map(truncateRowForPrompt);
+      // ONE sample row for the LLM prompt — enough to hint at value
+      // shapes without bloating tokens. Each cell truncated to 50 chars
+      // (was 200, was 3 rows — together that overflowed Groq's 12k TPM
+      // budget on llama-3.3-70b for a ~30-table sid.db).
+      sample = ro.prepare(`SELECT * FROM ${quoteIdent(name)} LIMIT 1`).all().map(truncateRowForPrompt);
     } catch (e) {
       // Some tables (e.g. virtual FTS shadow tables) can't be SELECTed
       // generically; skip silently.
@@ -331,13 +331,33 @@ function buildGroqSystemPrompt(tables) {
   lines.push('- Use JSON helpers (json_each, json_extract) when columns contain JSON.');
   lines.push('');
   lines.push('Schema:');
+  // Token budget — Groq llama-3.3-70b is on a 12k TPM cap. We aim for
+  // ≤8k system-prompt tokens (~32k chars) so the question + completion
+  // fit. If the schema dump would exceed that, drop sample rows and
+  // keep only column metadata.
+  const MAX_PROMPT_CHARS = 32000;
+  let header = lines.join('\n').length;
+  const tableLines = [];
   for (const t of tables) {
     const cols = t.columns.map(c => `${c.name} ${c.type}${c.pk ? ' PK' : ''}${c.notnull ? ' NOT NULL' : ''}`).join(', ');
-    lines.push(`TABLE ${t.name} (${cols})  -- ~${t.rowCount} rows`);
+    tableLines.push(`TABLE ${t.name} (${cols})  -- ~${t.rowCount} rows`);
     if (t.sample && t.sample.length) {
       const safe = t.sample.map(r => JSON.stringify(r));
-      lines.push(`  sample: ${safe.join(' | ')}`);
+      tableLines.push(`  sample: ${safe.join(' | ')}`);
     }
+  }
+  const dumpWithSamples = tableLines.join('\n');
+  if (header + dumpWithSamples.length <= MAX_PROMPT_CHARS) {
+    lines.push(dumpWithSamples);
+  } else {
+    // Schema-only fallback: drop the sample rows entirely.
+    const slim = tables.map(t => {
+      const cols = t.columns.map(c => `${c.name} ${c.type}${c.pk ? ' PK' : ''}`).join(', ');
+      return `TABLE ${t.name} (${cols})  -- ~${t.rowCount} rows`;
+    }).join('\n');
+    lines.push(slim);
+    lines.push('');
+    lines.push('(Sample rows omitted to fit the token budget — infer value shapes from column types.)');
   }
   lines.push('');
   lines.push('After choosing the SQL, also write a 1-2 sentence plain-English explanation of what the query does and what the user will learn from the result.');
@@ -369,8 +389,8 @@ function truncateRowForPrompt(row) {
   const out = {};
   for (const [k, v] of Object.entries(row || {})) {
     if (v == null) { out[k] = null; continue; }
-    if (typeof v === 'string' && v.length > 200) {
-      out[k] = v.slice(0, 200) + '…';
+    if (typeof v === 'string' && v.length > 50) {
+      out[k] = v.slice(0, 50) + '…';
     } else if (Buffer.isBuffer(v)) {
       out[k] = `<blob ${v.length}b>`;
     } else if (typeof v === 'object') {
