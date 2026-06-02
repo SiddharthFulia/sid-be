@@ -691,13 +691,20 @@ export const getOpeningExplorer = async (req, res) => {
     if (cached) return success(res, cached);
 
     const upstream = `https://explorer.lichess.ovh/masters?${qs}`;
+    // Lichess started 401-ing anonymous traffic on the explorer (early
+    // 2026). A scope-less personal API token in LICHESS_API_TOKEN gets
+    // us back in — no permissions granted, just proof we have an account.
+    const headers = {
+      'User-Agent': EXPLORER_UA,
+      'Accept': 'application/json',
+    };
+    if (process.env.LICHESS_API_TOKEN) {
+      headers.Authorization = `Bearer ${process.env.LICHESS_API_TOKEN}`;
+    }
     let r;
     try {
       r = await fetch(upstream, {
-        headers: {
-          'User-Agent': EXPLORER_UA,
-          'Accept': 'application/json',
-        },
+        headers,
         signal: AbortSignal.timeout(10000),
       });
     } catch (fetchErr) {
