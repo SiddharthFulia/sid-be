@@ -25,6 +25,7 @@ import path from 'path';
 import { db } from '../aiVideo/db.js';
 import { chatGroq } from '../groq.js';
 import logger from '../../helpers/logger.js';
+import { getTableContext } from './dbContextConstants.js';
 
 // ── Read-only connection ────────────────────────────────────────
 // Opened once on module load, reused for every /query and /ask call.
@@ -255,9 +256,9 @@ export function runSelect(sql) {
 // per table), asks llama-3.3-70b for JSON { sql, explanation }, parses
 // the response, and returns the raw extracted strings. Caller is
 // responsible for vetting the SQL before running it.
-export async function askGroqForSql(question) {
+export async function askGroqForSql(question, { focusTable = null } = {}) {
   const tables = getSchema();
-  const system = buildGroqSystemPrompt(tables);
+  const system = buildGroqSystemPrompt(tables, focusTable);
 
   // chatGroq exists in services/groq.js. We pass model='llama-3.3-70b'
   // (the alias is mapped to llama-3.3-70b-versatile inside chatGroq).
@@ -318,7 +319,48 @@ export function sanitizeChartSpec(raw) {
 }
 
 // ── Prompt builder ──────────────────────────────────────────────
-function buildGroqSystemPrompt(tables) {
+// If `focusTable` is provided AND matches a table name, the prompt
+// shrinks to ONLY that table's schema + its curated context (from
+// dbContextConstants.js). Massive token savings vs dumping all ~30
+// tables, and the model gets richer semantic guidance for the question.
+function buildGroqSystemPrompt(tables, focusTable = null) {
+  let focus = null;
+  if (focusTable) {
+    focus = tables.find(t => t.name === focusTable) || null;
+  }
+  if (focus) {
+    return buildFocusedPrompt(focus);
+  }
+  return buildFullPrompt(tables);
+}
+
+function buildFocusedPrompt(t) {
+  const ctx = getTableContext(t.name);
+  // Ultra-terse prompt — minimize tokens. The model already knows SQLite;
+  // we don't need to spell out the syntax. Just give it the table shape +
+  // the curated context (if any) and a strict output contract.
+  const cols = t.columns
+    .map(c => `${c.name}:${c.type || '?'}${c.pk ? '*' : ''}`)
+    .join(',');
+  const lines = [];
+  lines.push('Read-only SQLite assistant. Output JSON only.');
+  lines.push('Rules: SELECT only · no comments · one statement · LIMIT 200 if open-ended.');
+  lines.push('');
+  lines.push(`Table ${t.name} (~${t.rowCount} rows)`);
+  lines.push(`Cols: ${cols}    (* = PK)`);
+  if (ctx) {
+    lines.push(`Purpose: ${ctx.purpose}`);
+    if (Array.isArray(ctx.notes)) {
+      for (const n of ctx.notes) lines.push(`· ${n}`);
+    }
+  }
+  lines.push('');
+  lines.push('Chart spec: pick {bar,line,area,pie,scatter} when natural; xKey + yKeys MUST be columns your SELECT returns. Else null.');
+  lines.push('Output exactly: {"sql":"...","explanation":"...","chart":null|{"type":"...","xKey":"...","yKeys":[...],"title":"..."}}');
+  return lines.join('\n');
+}
+
+function buildFullPrompt(tables) {
   const lines = [];
   lines.push('You are a SQLite read-only query assistant for the sid-be admin dashboard.');
   lines.push('Given a user question, produce ONE syntactically-valid SQLite SELECT statement that answers it. The schema is below.');

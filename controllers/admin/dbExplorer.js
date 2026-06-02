@@ -83,10 +83,15 @@ export const postAsk = async (req, res) => {
     if (!question) {
       return error(res, 'question (string) is required', 400);
     }
+    // Optional: scope the Groq prompt to ONE table for massive token
+    // savings. The FE sends `table` when the user has a table picked in
+    // the explorer; without it, the prompt falls back to the full schema.
+    const focusTable = typeof req.body?.table === 'string' && req.body.table.trim()
+      ? req.body.table.trim() : null;
     const t0 = Date.now();
     let gen;
     try {
-      gen = await askGroqForSql(question);
+      gen = await askGroqForSql(question, { focusTable });
     } catch (e) {
       logger.error('admin db ask Groq failed', e.message);
       return error(res, e.message || 'Groq query generation failed', e.status || 502);
