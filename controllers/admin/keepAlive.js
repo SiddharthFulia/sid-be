@@ -26,6 +26,6 @@ export async function postTriggerKeepAlive(req, res) {
   });
 }
 
-export function getKeepAliveStatusHandler(req, res) {
-  return res.json(getKeepAliveStatus());
+export async function getKeepAliveStatusHandler(req, res) {
+  return res.json(await getKeepAliveStatus());
 }
