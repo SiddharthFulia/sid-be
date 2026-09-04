@@ -57,7 +57,10 @@ jobs:
 
             npm install --omit=dev --no-audit --no-fund
 
-            pm2 restart all --update-env
+            # startOrRestart picks up new apps from ecosystem.config.js
+            # (consumers) and restarts existing ones. face-service is
+            # managed independently — not in this file — so it's untouched.
+            pm2 startOrRestart ecosystem.config.js --update-env
             pm2 save
 
       - name: Summary
