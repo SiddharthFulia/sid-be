@@ -200,7 +200,14 @@ export async function getChannel() {
   return ensureChannel();
 }
 
+/** Called by server.js from the SIGTERM/SIGINT handler. Idempotent. */
 export async function disconnect() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   try {
     if (channel) {
       await channel.close();
@@ -217,25 +224,14 @@ export async function disconnect() {
   } catch (err) {
     logger.warn(`RabbitMQ connection close error (ignoring): ${err.message}`);
   }
+  logger.info('RabbitMQ disconnected cleanly');
 }
 
-// Register shutdown hooks once at module load. Two SIGINT/SIGTERM during
-// the same shutdown should not double-close (idempotent — `connection`
-// and `channel` are nulled out by disconnect()).
-async function gracefulShutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  logger.info(`${signal} received — closing RabbitMQ connection`);
-  await disconnect();
-  // Don't call process.exit — let other Express shutdown logic run first.
-}
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
-process.on('beforeExit', () => gracefulShutdown('beforeExit'));
+// Shutdown handlers live in server.js now — HTTP server needs to close
+// FIRST (stop accepting new requests) before we tear down the RMQ channel
+// (so in-flight publishes still land). server.js calls disconnect() in the
+// right order. Setting shuttingDown here disables the reconnect loop when
+// the owner asks for it — exposed via markShuttingDown().
 
 // ── Eager connect on module load ──────────────────────────────────────
 // `ensureChannel()` is normally lazy — first publish opens the connection.
