@@ -13,6 +13,10 @@ import {
   postQuery as postDbQuery,
   postAsk as postDbAsk,
 } from '../../controllers/admin/dbExplorer.js';
+import {
+  postTriggerKeepAlive,
+  getKeepAliveStatusHandler,
+} from '../../controllers/admin/keepAlive.js';
 
 const router = Router();
 
@@ -37,5 +41,10 @@ router.get( '/admin/db/tables',         requireVault, getDbTables);
 router.get( '/admin/db/tables/:name',   requireVault, getDbTableRows);
 router.post('/admin/db/query',          requireVault, postDbQuery);
 router.post('/admin/db/ask',            requireVault, postDbAsk);
+
+// Keep-alive queue — nightly cron + manual trigger. Vault-gated so anon
+// visitors can't spam publishes.
+router.post('/admin/keep-alive/trigger', requireVault, postTriggerKeepAlive);
+router.get( '/admin/keep-alive/status',  requireVault, getKeepAliveStatusHandler);
 
 export default router;

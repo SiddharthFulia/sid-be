@@ -27,6 +27,8 @@ import combineRoutes       from './combine/index.js';
 import roomRoutes          from './room/index.js';
 import editRoutes          from './edit/index.js';
 import realismRoutes       from './realism/index.js';
+import agentsRoutes        from './agents/index.js';
+import eventsRoutes        from './events/index.js';
 
 const router = Router();
 
@@ -50,5 +52,7 @@ router.use('/', combineRoutes);
 router.use('/', roomRoutes);
 router.use('/', editRoutes);
 router.use('/', realismRoutes);
+router.use('/', agentsRoutes);
+router.use('/', eventsRoutes);
 
 export default router;

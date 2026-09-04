@@ -188,6 +188,18 @@ async function ensureChannel() {
  * registered below so PM2 restarts don't leak connections (CloudAMQP free
  * tier caps at 40 connections — leaks would lock us out within a day).
  */
+/**
+ * Return the currently-open channel (or null if the broker isn't wired up).
+ * Callers that want to assert their own queues + publish/consume without
+ * needing to duplicate the connection state machine live here.
+ *
+ * The returned channel is the single per-process channel — do NOT close it
+ * from the caller side; disconnect() owns lifecycle.
+ */
+export async function getChannel() {
+  return ensureChannel();
+}
+
 export async function disconnect() {
   try {
     if (channel) {

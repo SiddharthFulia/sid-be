@@ -28,6 +28,7 @@ import {
   markRenderComplete as markRoomRenderComplete,
   markFailed as markRoomFailed,
 } from '../../services/aiVideo/roomStore.js';
+import { broadcastJobEvent } from '../../services/events/sseHub.js';
 
 function checkAuth(req) {
   if (!GPU_WORKER_TOKEN) return true;
@@ -157,6 +158,13 @@ export const postJobComplete = async (req, res) => {
   await removeInflightJob(jobId);
   logger.info(`Job ${jobId} completed by worker → ${videoUrl}${caption ? ' (with caption)' : ''}`);
 
+  broadcastJobEvent(jobId, 'complete', {
+    status: 'completed',
+    videoId: jobId,
+    videoUrl,
+    caption,
+  });
+
   // Cinema chain hook: if this videoId belongs to an active cinema_render,
   // advance the chain (extract last frame → upload → queue next shot,
   // or trigger combine on the last shot). Fire-and-forget — the BE
@@ -203,6 +211,14 @@ export const postJobFailed = async (req, res) => {
   }
 
   logger.warn(`Job ${jobId} failed (attempt ${attemptCount + 1}/3): ${errMsg}. ${shouldRequeue ? 'Requeued.' : 'Final.'}`);
+
+  broadcastJobEvent(jobId, shouldRequeue ? 'requeued' : 'failed', {
+    status: job.status,
+    error: errMsg || 'unknown error',
+    attemptCount: (attemptCount || 0) + 1,
+    finalized: !shouldRequeue,
+  });
+
   return success(res, job);
 };
 
@@ -243,6 +259,14 @@ export const postJobProgress = async (req, res) => {
 
   const job = await updateInflightJob(jobId, updates);
   if (!job) return error(res, 'Job not found', 404);
+  broadcastJobEvent(jobId, 'progress', {
+    status: job.status,
+    progressMessage: job.progressMessage,
+    progressStep: job.progressStep,
+    progressTotal: job.progressTotal,
+    estimatedSeconds: job.estimatedSeconds,
+    logLine: logLine || null,
+  });
   return success(res, job);
 };
 

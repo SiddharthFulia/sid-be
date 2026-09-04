@@ -1,0 +1,72 @@
+name: Deploy to Oracle
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-sid-be
+  cancel-in-progress: false
+
+jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.ORACLE_SSH_KEY }}
+
+      - name: Pin host key (with retries)
+        env:
+          DEPLOY_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          for i in 1 2 3; do
+            if ssh-keyscan -T 10 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
+              echo "Got host key on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "Failed to pin host key after 3 attempts" >&2
+          exit 1
+
+      - name: Deploy to Oracle
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            set -e
+
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+
+            cd /home/ubuntu/sid-be
+
+            git fetch origin
+            git reset --hard origin/${{ github.ref_name }}
+
+            npm install --omit=dev --no-audit --no-fund
+
+            pm2 restart all --update-env
+            pm2 save
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy sid-be to Oracle"
+            echo "- Branch: \`${{ github.ref_name }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Author: ${{ github.actor }}"
+            echo "- Status: ${{ job.status }}"
+          } >> $GITHUB_STEP_SUMMARY
