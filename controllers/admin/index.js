@@ -22,6 +22,7 @@ import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import { db } from '../../services/aiVideo/db.js';
 import { getAllWorkerStatuses, isWorkerOnline } from '../../services/aiVideo/jobStore.js';
+import { listAllQueues, invalidateCache as invalidateQueueCache } from '../../services/rabbitmq/managementApi.js';
 
 const KNOWN_TABLES = [
   'jobs',
@@ -41,6 +42,9 @@ const KNOWN_TABLES = [
   'chat_jobs',
 ];
 
+// Whitelist of purgeable queues. Discovery for /admin/queues is dynamic
+// via the management API — this list only bounds the /queues/purge action
+// so a vault-holder can't nuke arbitrary broker queues by typing a name.
 const KNOWN_QUEUES = [
   'video_fast_queue',
   'video_quality_queue',
@@ -120,42 +124,62 @@ export const getDbStats = async (_req, res) => {
 };
 
 // ─── Queue stats (RabbitMQ) ─────────────────────────────────────
-// Opens a fresh connection/channel, runs checkQueue for each known queue
-// (404s on missing queues are ignored), then closes cleanly. We don't
-// reuse messageQueue.js's persistent channel because a checkQueue against
-// a non-existent queue puts the channel in an errored state — fine for a
-// throwaway channel, fatal for the publisher's.
-export const getQueueStats = async (_req, res) => {
-  const url = process.env.RABBITMQ_URL || '';
-  if (!url) return success(res, { configured: false, queues: [] });
-
-  let connection = null;
-  try {
-    connection = await amqplib.connect(url, { heartbeat: 15 });
-    const queues = [];
-    for (const name of KNOWN_QUEUES) {
-      // One channel per queue — a checkQueue against a missing queue 404s
-      // and kills the channel, so we get a clean one for every probe.
-      let ch = null;
-      try {
-        ch = await connection.createChannel();
-        ch.on('error', () => {});
-        const info = await ch.checkQueue(name);
-        queues.push({ name, messageCount: info.messageCount, consumerCount: info.consumerCount });
-      } catch {
-        // Queue doesn't exist — skip.
-      } finally {
-        try { if (ch) await ch.close(); } catch {}
-      }
-    }
-    return success(res, { configured: true, queues });
-  } catch (err) {
-    logger.error('admin getQueueStats failed', err.message);
-    return error(res, err.message, 503);
-  } finally {
-    try { if (connection) await connection.close(); } catch {}
+// Discovers every queue via the CloudAMQP management HTTP API instead of
+// walking a hardcoded whitelist. Faster (one HTTPS call vs N checkQueue
+// round-trips), and new queues (keep_alive, room_queue, yt_queue, …) show
+// up automatically the moment they're asserted on the broker.
+//
+// Query params:
+//   ?page=1              1-based page number (default 1)
+//   ?pageSize=20         items per page (default 20, max 100)
+//   ?q=video             substring filter on queue name (case-insensitive)
+//   ?sort=messages|name  sort key (default: messages desc, then name asc)
+//
+// Response: { configured, total, page, pageSize, queues: [ … ] }
+//
+// The management API result is cached 5s so the FE poll loop doesn't
+// hammer CloudAMQP.
+export const getQueueStats = async (req, res) => {
+  const result = await listAllQueues();
+  if (result.configured === false) {
+    return success(res, { configured: false, total: 0, page: 1, pageSize: 20, queues: [] });
   }
+
+  const q = String(req.query?.q || '').trim().toLowerCase();
+  const sort = String(req.query?.sort || 'messages');
+  const pageSize = clamp(Number(req.query?.pageSize) || 20, 1, 100);
+  const page     = Math.max(1, Number(req.query?.page) || 1);
+
+  let queues = result.queues || [];
+  if (q) queues = queues.filter(row => row.name.toLowerCase().includes(q));
+
+  // Sort. "messages" (default) puts busy queues first — you're usually
+  // looking at the dashboard because something's backed up. "name" is the
+  // stable-alphabetical fallback.
+  queues = [...queues].sort((a, b) => {
+    if (sort === 'name') return a.name.localeCompare(b.name);
+    if (b.messageCount !== a.messageCount) return b.messageCount - a.messageCount;
+    return a.name.localeCompare(b.name);
+  });
+
+  const total = queues.length;
+  const start = (page - 1) * pageSize;
+  const paged = queues.slice(start, start + pageSize);
+
+  return success(res, {
+    configured: true,
+    total,
+    page,
+    pageSize,
+    queues: paged,
+    error: result.error || null,
+  });
 };
+
+function clamp(n, min, max) {
+  if (!Number.isFinite(n)) return min;
+  return Math.min(Math.max(n, min), max);
+}
 
 // ─── Worker heartbeats ──────────────────────────────────────────
 // Worker heartbeats live in data/gpu-worker-status.json (written by
