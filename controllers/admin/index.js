@@ -52,6 +52,10 @@ const KNOWN_QUEUES = [
   'chat_queue',
   'mesh_queue',
   'deepfake_queue',
+  'yt_queue',
+  'room_queue',
+  'keep_alive',
+  'keep_alive_failed_queue',
 ];
 
 // ─── Server stats ───────────────────────────────────────────────
