@@ -32,6 +32,7 @@
 //   /hackernews/:type                        — HN top/new/best IDs
 
 import logger from '../../helpers/logger.js';
+import { tools, manifest } from '../../services/osint/index.js';
 
 // ─── Cache ─────────────────────────────────────────────────────
 // One Map keyed by cache key → { expiresAt, payload }. Every helper below
@@ -473,5 +474,61 @@ export const getHackernews = async (req, res) => {
     return res.json(data);
   } catch (err) {
     return sendUpstreamError(res, err, 'hackernews');
+  }
+};
+
+// ─── Generic tool dispatcher ────────────────────────────────────
+// Every tool file in services/osint/*.js is registered in that folder's
+// index. The FE talks to two endpoints only:
+//   GET /osint/tools           → manifest of all tools + their paramSchemas
+//   GET /osint/tool/:name/...  → invokes tool `name` with the remaining
+//                                path / query params.
+// Path params after the tool name are captured under `req.params[0]` (the
+// wildcard). We split them into positional slots and merge with the schema.
+
+// GET /osint/tools  — auto-generated list, used by the FE hub to render cards.
+export const getToolsManifest = async (_req, res) => {
+  try {
+    return res.json({ ok: true, count: Object.keys(tools).length, tools: manifest() });
+  } catch (err) {
+    logger.error('OSINT manifest FAIL', err?.message || err);
+    return res.status(500).json({ error: 'manifest_failed' });
+  }
+};
+
+// GET /osint/tool/:name/:a?/:b?/:c?  — dispatch to a registered tool.
+// The tool's paramSchema declares which keys are path vs query — we thread
+// path segments into path-source keys in order, and pass req.query as-is.
+export const runTool = async (req, res) => {
+  const start = Date.now();
+  const name = String(req.params.name || '').trim();
+  const tool = tools[name];
+  if (!tool) {
+    return res.status(404).json({ error: 'unknown_tool', tool: name });
+  }
+
+  // Assemble path params. The route mounts /osint/tool/:name/:a?/:b?/:c?/:d?
+  // so up to 4 positional slots. Map them to path-source schema keys in order.
+  const pathValues = [req.params.a, req.params.b, req.params.c, req.params.d].filter((v) => v !== undefined);
+  const pathKeys = (tool.paramSchema || []).filter((s) => s.source === 'path').map((s) => s.key);
+  const pathParams = {};
+  for (let i = 0; i < pathKeys.length && i < pathValues.length; i++) {
+    pathParams[pathKeys[i]] = decodeURIComponent(pathValues[i]);
+  }
+
+  try {
+    const data = await tool.run(pathParams, req.query || {});
+    logDone(`tool:${name}`, start);
+    return res.json({ ok: true, tool: name, data });
+  } catch (err) {
+    const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 ? err.status : 502;
+    logger.error(`OSINT tool:${name} FAIL | ${status}`, err?.message || err);
+    return res.status(status).json({
+      ok: false,
+      tool: name,
+      error: err?.message || 'tool_failure',
+      status,
+      detail: err?.body ?? null,
+    });
   }
 };

@@ -26,6 +26,8 @@ import {
   getExchange,
   getDns,
   getHackernews,
+  getToolsManifest,
+  runTool,
 } from '../../controllers/osint/index.js';
 
 const router = Router();
@@ -61,5 +63,16 @@ router.get('/osint/exchange/:base', getExchange);
 
 // News
 router.get('/osint/hackernews/:type', getHackernews);
+
+// ─── Generic tool dispatcher ───────────────────────────────────
+// Serves the auto-generated tool registry under services/osint/*.js. The FE
+// hits `/osint/tools` for the manifest, then `/osint/tool/:name/:a?/:b?/:c?/:d?`
+// to invoke a specific tool with up to 4 positional path params.
+router.get('/osint/tools',                              getToolsManifest);
+router.get('/osint/tool/:name',                         runTool);
+router.get('/osint/tool/:name/:a',                      runTool);
+router.get('/osint/tool/:name/:a/:b',                   runTool);
+router.get('/osint/tool/:name/:a/:b/:c',                runTool);
+router.get('/osint/tool/:name/:a/:b/:c/:d',             runTool);
 
 export default router;
