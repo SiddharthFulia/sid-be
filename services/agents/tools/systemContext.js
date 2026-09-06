@@ -179,7 +179,7 @@ async function collectTables() {
     });
     return { tables, count: tables.length };
   } catch (err) {
-    return { tables: [], error: err.message };
+    return { tables: [], count: 0, error: err.message };
   }
 }
 
@@ -199,7 +199,7 @@ async function collectQueues() {
     }));
     return { queues, count: queues.length, configured: true, error: res.error || null };
   } catch (err) {
-    return { queues: [], error: err.message };
+    return { queues: [], count: 0, error: err.message };
   }
 }
 
@@ -217,10 +217,10 @@ async function collectPm2Processes() {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return { processes: [], error: 'pm2 jlist output was not JSON' };
+      return { processes: [], count: 0, error: 'pm2 jlist output was not JSON' };
     }
     if (!Array.isArray(parsed)) {
-      return { processes: [], error: 'pm2 jlist did not return an array' };
+      return { processes: [], count: 0, error: 'pm2 jlist did not return an array' };
     }
     const processes = parsed.map(p => ({
       name:         p.name,
@@ -235,7 +235,7 @@ async function collectPm2Processes() {
     }));
     return { processes, count: processes.length };
   } catch (err) {
-    return { processes: [], error: err.message };
+    return { processes: [], count: 0, error: err.message };
   }
 }
 
@@ -246,7 +246,7 @@ function collectCrons() {
     const jobs = getRegisteredCrons();
     return { jobs, count: jobs.length };
   } catch (err) {
-    return { jobs: [], error: err.message };
+    return { jobs: [], count: 0, error: err.message };
   }
 }
 
@@ -291,7 +291,7 @@ async function collectRoutes() {
     unique.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
     return { routes: unique, count: unique.length };
   } catch (err) {
-    return { routes: [], error: err.message };
+    return { routes: [], count: 0, error: err.message };
   }
 }
 
@@ -302,7 +302,7 @@ function collectEnvVarNames() {
     const names = Object.keys(process.env || {}).sort();
     return { names, count: names.length };
   } catch (err) {
-    return { names: [], error: err.message };
+    return { names: [], count: 0, error: err.message };
   }
 }
 
