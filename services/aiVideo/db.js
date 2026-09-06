@@ -695,6 +695,35 @@ addColumnIfMissing('chess_games', 'startFen', 'TEXT');
 addColumnIfMissing('chess_games', 'movesUci', 'TEXT');
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_chess_games_variant ON chess_games(variant, updatedAt DESC)'); } catch {}
 
+// ─── QR Compiler saves (public shareable QR library) ────────────
+// Each row is one saved QR from the /qr studio. The owner_key is a
+// SHA-256 hex the FE builds from a canvas fingerprint + language +
+// timezone — good enough as a lightweight "who owns this" without a
+// full account system. Public rows are readable at /qr/s/:id by anyone;
+// private rows return 404 unless the requester sends a matching
+// X-QR-Owner header.
+//
+// png_data_url is the baked preview (data:image/png;base64,…) capped
+// at 500 KB on the FE before submit — lets the /qr/s/:id share page
+// render the QR without re-computing the config in the browser.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS qr_saves (
+    id TEXT PRIMARY KEY,
+    owner_key TEXT NOT NULL,
+    title TEXT,
+    payload TEXT NOT NULL,
+    payload_kind TEXT NOT NULL,
+    style_config TEXT NOT NULL,
+    png_data_url TEXT,
+    public INTEGER NOT NULL DEFAULT 1,
+    views INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_qr_saves_owner  ON qr_saves(owner_key, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_qr_saves_public ON qr_saves(public, created_at DESC);
+`);
+
 // ─── Chess online matches (live 1v1 via link share) ──────────────
 // Lightweight live matchmaking — no auth, no accounts. Creator POSTs
 // /chess/matches → gets a short matchId + a whiteSession token. Sends

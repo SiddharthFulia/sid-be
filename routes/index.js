@@ -33,6 +33,7 @@ import osintRoutes         from './osint/index.js';
 import physicsRoutes       from './physics/index.js';
 import chernobylRoutes     from './chernobyl/index.js';
 import cityGraphsRoutes    from './cityGraphs/index.js';
+import qrSavesRoutes       from './qrSaves/index.js';
 
 const router = Router();
 
@@ -62,5 +63,6 @@ router.use('/', osintRoutes);
 router.use('/', physicsRoutes);
 router.use('/', chernobylRoutes);
 router.use('/', cityGraphsRoutes);
+router.use('/', qrSavesRoutes);
 
 export default router;
