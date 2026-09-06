@@ -85,6 +85,22 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_city_places_slug_name ON city_places(city_slug, name_lc);
 `);
 
+// ── Auxiliary indexes ──────────────────────────────────────────────
+// Idempotent (IF NOT EXISTS). Added to support the monthly re-fetch cron
+// and admin dashboards:
+//   • updated_at / fetched_at on city_graphs — "which cities are stalest?"
+//     range scans for the admin table + the cron's freshness report.
+//   • kind on city_places — cheap filter for the FE map overlay when we
+//     want to show only landmarks vs suburbs.
+//   • (lat, lng) on city_places — enables spatial bbox queries without a
+//     full table scan when we later render clusters.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_city_graphs_updated_at ON city_graphs(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_city_graphs_fetched_at ON city_graphs(fetched_at);
+  CREATE INDEX IF NOT EXISTS idx_city_places_kind      ON city_places(kind);
+  CREATE INDEX IF NOT EXISTS idx_city_places_lat_lng   ON city_places(lat, lng);
+`);
+
 // ── Seed catalogue ─────────────────────────────────────────────────
 // The 10 metros we preseed via scripts/seedCityGraphs.js. Every entry
 // here is also what surfaces from the metadata list endpoint even

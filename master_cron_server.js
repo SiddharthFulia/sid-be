@@ -22,9 +22,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 const CRONS_DIR  = path.join(__dirname, 'crons');
 
+// Module-scope registry snapshot. Populated by startCrons() at boot and read
+// back by getRegisteredCrons() so the System Oracle agent (and any future
+// introspection endpoint) can list what's actually scheduled without needing
+// to re-scan disk or reason about node-cron internals.
+let _registered = [];
+
 export async function startCrons() {
   if (!fs.existsSync(CRONS_DIR)) {
     logger.info('No crons/ directory — skipping cron registration.');
+    _registered = [];
     return [];
   }
 
@@ -45,14 +52,36 @@ export async function startCrons() {
         logger.warn(`crons/${f}: invalid schedule "${job.schedule}"`);
         continue;
       }
-      cron.schedule(job.schedule, job.handler, { timezone: CRON_TZ });
-      registered.push({ name: job.name, schedule: job.schedule });
-      logger.info(`cron registered: ${job.name} @ "${job.schedule}" (${CRON_TZ})`);
+      // Per-job timezone override — a job can opt into a different TZ (e.g.
+      // 'UTC' or 'America/Los_Angeles') by exporting `timezone` alongside
+      // `schedule`. Falls back to the process-wide CRON_TZ when omitted so
+      // existing jobs keep their historical Asia/Kolkata behaviour.
+      const tz = job.timezone || CRON_TZ;
+      cron.schedule(job.schedule, job.handler, { timezone: tz });
+      registered.push({
+        name:     job.name,
+        schedule: job.schedule,
+        timezone: tz,
+        file:     f,
+      });
+      logger.info(`cron registered: ${job.name} @ "${job.schedule}" (${tz})`);
     } catch (err) {
       logger.error(`failed to load crons/${f}: ${err.message}`);
     }
   }
 
+  _registered = registered;
   logger.info(`crons online: ${registered.length}`);
   return registered;
+}
+
+/**
+ * Introspection helper — returns the list of crons registered by the last
+ * successful startCrons() call. Empty array before boot completes. Used by
+ * the System Oracle agent to answer "which cron jobs are scheduled?".
+ *
+ * @returns {Array<{name: string, schedule: string, timezone: string, file: string}>}
+ */
+export function getRegisteredCrons() {
+  return _registered.map(j => ({ ...j }));   // defensive copy — callers can't mutate the registry
 }

@@ -17,6 +17,7 @@ import {
   postTriggerKeepAlive,
   getKeepAliveStatusHandler,
 } from '../../controllers/admin/keepAlive.js';
+import { postTriggerCityGraphsCron } from '../../controllers/admin/cityGraphsCron.js';
 
 const router = Router();
 
@@ -46,5 +47,10 @@ router.post('/admin/db/ask',            requireVault, postDbAsk);
 // visitors can't spam publishes.
 router.post('/admin/keep-alive/trigger', requireVault, postTriggerKeepAlive);
 router.get( '/admin/keep-alive/status',  requireVault, getKeepAliveStatusHandler);
+
+// City-graphs monthly re-fetch — cron runs on the 1st of every month at
+// 03:15 UTC; this endpoint fires the exact same routine on demand so we
+// don't have to wait. Vault-gated so anon visitors can't spam Overpass.
+router.post('/admin/city-graphs/cron/trigger', requireVault, postTriggerCityGraphsCron);
 
 export default router;

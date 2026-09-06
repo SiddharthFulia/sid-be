@@ -1,11 +1,13 @@
 // Agent registry. Each concrete agent registers here so the routes layer
 // doesn't need to know about individual files.
 
-import * as dbQuery from './dbQueryAgent.js';
+import * as dbQuery      from './dbQueryAgent.js';
+import * as systemOracle from './systemOracle.js';
 import { assertAgentShape } from './baseAgent.js';
 
 const MODULES = [
-  ['dbQueryAgent.js', dbQuery],
+  ['dbQueryAgent.js',   dbQuery],
+  ['systemOracle.js',   systemOracle],
 ];
 
 const REGISTRY = new Map();
