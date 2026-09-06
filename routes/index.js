@@ -30,6 +30,7 @@ import realismRoutes       from './realism/index.js';
 import agentsRoutes        from './agents/index.js';
 import eventsRoutes        from './events/index.js';
 import osintRoutes         from './osint/index.js';
+import physicsRoutes       from './physics/index.js';
 
 const router = Router();
 
@@ -56,5 +57,6 @@ router.use('/', realismRoutes);
 router.use('/', agentsRoutes);
 router.use('/', eventsRoutes);
 router.use('/', osintRoutes);
+router.use('/', physicsRoutes);
 
 export default router;
