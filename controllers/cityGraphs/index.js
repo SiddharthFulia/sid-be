@@ -106,7 +106,16 @@ export const CITY_CATALOG = [
 const CATALOG_BY_SLUG = new Map(CITY_CATALOG.map((c) => [c.slug, c]));
 
 // ── Overpass ───────────────────────────────────────────────────────
-const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+// Multiple mirrors — try each in order on 5xx / timeout / truncation.
+// Main instance overloads fastest; kumi + private.coffee are the community
+// mirrors and are usually quieter. `z.overpass-api.de` is a shard of the
+// main pool that occasionally has spare capacity when the primary is red.
+const OVERPASS_MIRRORS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://z.overpass-api.de/api/interpreter',
+];
 
 // Auto-refresh cadence for /:slug GETs — anything older than 30 days
 // triggers a background re-fetch on the next request. First responder
@@ -206,26 +215,75 @@ function parsePlaces(json) {
   return out;
 }
 
-// Hit Overpass. We POST the QL body form-urlencoded — same shape the FE
-// used before we moved this call server-side. Node 18+ has native fetch.
+// Hit Overpass with mirror-fallback + retry. We POST the QL body
+// form-urlencoded — same shape the FE used before we moved this call
+// server-side. Node 18+ has native fetch.
+//
+// Failure modes we've seen in prod:
+//   • 504 / 429 — mirror is overloaded. Retry a different mirror.
+//   • JSON parse error — response stream got truncated mid-payload
+//     (upstream closed the socket early). Also worth retrying on a
+//     different mirror because the successful one might have full
+//     capacity while the flaky one is streaming corrupted bytes.
+//   • 400 with "runtime error: Query timed out" body — the query
+//     itself is too big for the mirror's per-slot budget. Retry.
+//
+// We read the body as text before JSON.parse so we can distinguish
+// "network truncation" from "endpoint returned HTML error page".
 async function overpassPost(qlBody) {
   const body = new URLSearchParams({ data: qlBody }).toString();
-  const res = await fetch(OVERPASS_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      // Overpass rejects unidentified UAs with 406. Give it a real name +
-      // contact so the OSM ops team can reach us if we cause trouble.
-      'User-Agent': 'sid-be city-graphs cache (+https://siddharthfulia.com)',
-      Accept: 'application/json',
-    },
-    body,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Overpass HTTP ${res.status}${text ? `: ${text.slice(0, 120)}` : ''}`);
+  const errors = [];
+
+  for (let attempt = 0; attempt < OVERPASS_MIRRORS.length; attempt++) {
+    const url = OVERPASS_MIRRORS[attempt];
+    try {
+      const controller = new AbortController();
+      // Match the QL's own `timeout:60` + a bit of slack for the stream.
+      const timer = setTimeout(() => controller.abort(), 120_000);
+      let res;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'sid-be city-graphs cache (+https://siddharthfulia.com)',
+            Accept: 'application/json',
+          },
+          body,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 120)}` : ''}`);
+      }
+      const text = await res.text();
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch (e) {
+        // Truncated payload — text ends mid-object.
+        throw new Error(`truncated JSON at ${text.length} bytes (${e.message.slice(0, 80)})`);
+      }
+      if (!json || !Array.isArray(json.elements)) {
+        throw new Error(`unexpected shape (no elements[])`);
+      }
+      if (attempt > 0) {
+        // Note which mirror actually served us so we can spot rotation trends.
+        logger.warn(`overpass: succeeded on mirror #${attempt + 1} after ${attempt} failure(s)`);
+      }
+      return json;
+    } catch (err) {
+      errors.push(`${url.split('/')[2]}: ${err.message}`);
+      // Small back-off between mirrors so we don't hammer the pool.
+      if (attempt < OVERPASS_MIRRORS.length - 1) {
+        await new Promise((r) => setTimeout(r, 3000 + attempt * 2000));
+      }
+    }
   }
-  return res.json();
+  throw new Error(`Overpass — all mirrors failed. ${errors.join(' | ')}`);
 }
 
 async function fetchFromOverpass(bbox) {
