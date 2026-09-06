@@ -29,6 +29,7 @@ import editRoutes          from './edit/index.js';
 import realismRoutes       from './realism/index.js';
 import agentsRoutes        from './agents/index.js';
 import eventsRoutes        from './events/index.js';
+import osintRoutes         from './osint/index.js';
 
 const router = Router();
 
@@ -54,5 +55,6 @@ router.use('/', editRoutes);
 router.use('/', realismRoutes);
 router.use('/', agentsRoutes);
 router.use('/', eventsRoutes);
+router.use('/', osintRoutes);
 
 export default router;
