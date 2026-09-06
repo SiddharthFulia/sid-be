@@ -32,6 +32,7 @@ import eventsRoutes        from './events/index.js';
 import osintRoutes         from './osint/index.js';
 import physicsRoutes       from './physics/index.js';
 import chernobylRoutes     from './chernobyl/index.js';
+import cityGraphsRoutes    from './cityGraphs/index.js';
 
 const router = Router();
 
@@ -60,5 +61,6 @@ router.use('/', eventsRoutes);
 router.use('/', osintRoutes);
 router.use('/', physicsRoutes);
 router.use('/', chernobylRoutes);
+router.use('/', cityGraphsRoutes);
 
 export default router;
