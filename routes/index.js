@@ -31,6 +31,7 @@ import agentsRoutes        from './agents/index.js';
 import eventsRoutes        from './events/index.js';
 import osintRoutes         from './osint/index.js';
 import physicsRoutes       from './physics/index.js';
+import chernobylRoutes     from './chernobyl/index.js';
 
 const router = Router();
 
@@ -58,5 +59,6 @@ router.use('/', agentsRoutes);
 router.use('/', eventsRoutes);
 router.use('/', osintRoutes);
 router.use('/', physicsRoutes);
+router.use('/', chernobylRoutes);
 
 export default router;
