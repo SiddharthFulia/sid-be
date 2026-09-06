@@ -7,14 +7,16 @@
 import { Router } from 'express';
 import { requireVault } from '../../services/auth/vault.js';
 import {
-  listCities, getCity, refreshCity, searchPlaces,
+  listCities, getCity, refreshCity, searchPlaces, searchPlacesAll,
 } from '../../controllers/cityGraphs/index.js';
 
 const router = Router();
 
 router.get( '/city-graphs',                  listCities);
-// NOTE — /places must come BEFORE the bare /:slug route or Express will
-// swallow the "/places" segment into the :slug param.
+// NOTE — order matters. Fixed segments (/places, /:slug/places) must
+// come BEFORE the bare /:slug route or Express will swallow the
+// "/places" segment into the :slug param.
+router.get( '/city-graphs/places',           searchPlacesAll);
 router.get( '/city-graphs/:slug/places',     searchPlaces);
 router.get( '/city-graphs/:slug',            getCity);
 router.post('/city-graphs/:slug/refresh',    requireVault, refreshCity);

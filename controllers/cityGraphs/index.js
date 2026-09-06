@@ -14,8 +14,13 @@
 //                                          (fetches from Overpass if missing;
 //                                          also silently refreshes if the row
 //                                          is > 30 days old — see AUTO_REFRESH_MS)
-//   GET  /api/city-graphs/:slug/places   — public, prefix search for area
-//                                          names (Trie-backed, lazy per city)
+//   GET  /api/city-graphs/:slug/places   — public, fuzzy search for area names
+//                                          (Trie + trigram + substring, lazy
+//                                          per city). Returns {name, kind,
+//                                          lat, lng, score, matchType}.
+//   GET  /api/city-graphs/places         — public, cross-city fuzzy search
+//                                          (fallback for the "search all"
+//                                          mode). Adds city_slug/city_name.
 //   POST /api/city-graphs/:slug/refresh  — vault-gated, forces re-fetch
 //
 // Overpass rate-limit is polite:
@@ -27,6 +32,7 @@ import { gzip as gzipCb, gunzip as gunzipCb } from 'node:zlib';
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import { db } from '../../services/aiVideo/db.js';
+import { tokenize, trigrams, overlap, phraseTrigrams } from '../../services/search/trigram.js';
 
 const gzip   = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
@@ -99,6 +105,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_city_graphs_fetched_at ON city_graphs(fetched_at);
   CREATE INDEX IF NOT EXISTS idx_city_places_kind      ON city_places(kind);
   CREATE INDEX IF NOT EXISTS idx_city_places_lat_lng   ON city_places(lat, lng);
+  -- Bare column index — complements the composite (city_slug, name_lc)
+  -- above and speeds the cross-city fuzzy search (no city_slug filter,
+  -- but we still need name_lc lookups to short-circuit the scan).
+  CREATE INDEX IF NOT EXISTS idx_city_places_name_lc   ON city_places(name_lc);
 `);
 
 // ── Seed catalogue ─────────────────────────────────────────────────
@@ -479,18 +489,112 @@ class Trie {
   }
 }
 
-// Slug -> Trie. Built lazily on first search per city; invalidated when
-// places for that city are re-seeded.
+// Slug -> { trie, trigrams, rows, rowTrigrams }. Built lazily on first
+// search per city; invalidated when places for that city are re-seeded.
+//
+// Shape:
+//   trie         — prefix walker (existing)
+//   rows         — the raw place rows for this city, indexable by idx
+//   rowTrigrams  — parallel array of Set<string> — the trigram bag for
+//                  each row's full name (used for scoring)
+//   trigrams     — inverted index Map<3gram, Set<idx>> — quick "which
+//                  rows share ANY trigram with my query token" lookup
+//                  so we don't scan the full row list on every query
 const trieCache = new Map();
 
-function getTrieFor(slug) {
+function buildIndexRows(rows) {
+  const rowTrigrams = new Array(rows.length);
+  const invIndex = new Map(); // 3gram -> Set<idx>
+  for (let i = 0; i < rows.length; i++) {
+    const bag = phraseTrigrams(rows[i].name);
+    rowTrigrams[i] = bag;
+    for (const g of bag) {
+      let set = invIndex.get(g);
+      if (!set) { set = new Set(); invIndex.set(g, set); }
+      set.add(i);
+    }
+  }
+  return { rowTrigrams, trigrams: invIndex };
+}
+
+function getIndexFor(slug) {
   if (trieCache.has(slug)) return trieCache.get(slug);
   const rows = selectPlacesStmt.all(slug);
   const trie = new Trie();
   trie.places = rows;
   for (let i = 0; i < rows.length; i++) trie.insert(rows[i], i);
-  trieCache.set(slug, trie);
-  return trie;
+  const { rowTrigrams, trigrams: invIndex } = buildIndexRows(rows);
+  const entry = { trie, rows, rowTrigrams, trigrams: invIndex };
+  trieCache.set(slug, entry);
+  return entry;
+}
+
+// ── Fuzzy ranking ──────────────────────────────────────────────────
+// Google-Maps style: prefix and substring hits beat pure trigram hits;
+// exact match trumps everything. Scores capped so a heavy substring hit
+// never outranks a genuine exact match.
+//
+//   exact match on the full name (case-insensitive)     → 100
+//   any tokenised prefix hit (Trie)                     →  90
+//   substring hit anywhere in name                      →  70
+//   pure trigram overlap (Dice)                         →  60 * dice
+//
+// The output is a Map<idx, {score, matchType}> so caller can dedupe by
+// idx and re-rank on the strongest signal per row.
+function scoreQueryAgainstIndex(entry, q) {
+  const scored = new Map(); // idx -> { score, matchType }
+  const bump = (idx, score, matchType) => {
+    const prev = scored.get(idx);
+    if (!prev || score > prev.score) scored.set(idx, { score, matchType });
+  };
+
+  const qTrim = q.trim();
+  if (!qTrim) return scored;
+  const qLc = qTrim.toLowerCase();
+  const tokens = tokenize(qTrim);
+
+  // 1) Exact match on full lowercased name.
+  for (let i = 0; i < entry.rows.length; i++) {
+    if (entry.rows[i].name_lc === qLc) bump(i, 100, 'exact');
+  }
+
+  // 2) Prefix hits — walk the Trie per token. Trie.search already
+  //    handles multi-token names (each token was inserted separately).
+  for (const tok of tokens) {
+    const idxs = entry.trie.search(tok, 500);
+    for (const i of idxs) bump(i, 90, 'prefix');
+  }
+
+  // 3) Substring hits — cheap pass through all rows. Row count per
+  //    city is small (< a few hundred) so this is O(n·q) and fine.
+  for (let i = 0; i < entry.rows.length; i++) {
+    const nlc = entry.rows[i].name_lc;
+    if (nlc.includes(qLc)) { bump(i, 70, 'substring'); continue; }
+    // Also try individual tokens so "cubbon park" query hits a row
+    // whose name is just "Cubbon Park (Bandstand)" without needing
+    // the exact ordering.
+    for (const tok of tokens) {
+      if (tok.length >= 3 && nlc.includes(tok)) { bump(i, 70, 'substring'); break; }
+    }
+  }
+
+  // 4) Trigram overlap — narrows to a candidate set via the inverted
+  //    index (rows that share ANY 3gram with the query), then Dice-
+  //    scores each candidate against the query's full trigram bag.
+  const qBag = phraseTrigrams(qTrim);
+  if (qBag.size) {
+    const candidates = new Set();
+    for (const g of qBag) {
+      const hit = entry.trigrams.get(g);
+      if (hit) for (const i of hit) candidates.add(i);
+    }
+    for (const i of candidates) {
+      const dice = overlap(qBag, entry.rowTrigrams[i]);
+      if (dice > 0) bump(i, Math.round(60 * dice), 'trigram');
+    }
+  }
+
+  return scored;
 }
 
 // ── Handlers ───────────────────────────────────────────────────────
@@ -618,15 +722,78 @@ export const searchPlaces = async (req, res) => {
       });
     }
 
-    const trie = getTrieFor(slug);
-    const idxs = trie.search(q, limit);
-    const items = idxs.map((i) => {
-      const p = trie.places[i];
-      return { name: p.name, kind: p.kind, lat: p.lat, lng: p.lng };
+    // Fuzzy pipeline: exact → prefix (Trie) → substring → trigram.
+    // Winner-per-row scoring, then top-N by score.
+    const entry = getIndexFor(slug);
+    const scored = scoreQueryAgainstIndex(entry, q);
+    const ranked = [...scored.entries()]
+      .sort((a, b) => b[1].score - a[1].score)
+      .slice(0, limit);
+    const items = ranked.map(([idx, meta]) => {
+      const p = entry.rows[idx];
+      return {
+        name: p.name,
+        kind: p.kind,
+        lat: p.lat,
+        lng: p.lng,
+        score: meta.score,
+        matchType: meta.matchType,
+      };
     });
     return success(res, { items });
   } catch (err) {
     logger.error(`city-graphs places search failed: ${err.message}`);
+    return error(res, err.message);
+  }
+};
+
+// GET /api/city-graphs/places?q=…&limit=20
+// Cross-city fallback — searches every city's places table when the user
+// hasn't picked a city yet. Same ranking as the per-city search, but the
+// per-city top-N is unioned then re-ranked globally. `city_slug` is
+// stitched onto every result so the FE can auto-switch cities on select.
+//
+// Rows-per-city are small (<a few hundred), and we only search cities
+// that have already been seeded — no on-demand Overpass hits from this
+// path. If a city's places table is empty it's silently skipped.
+export const searchPlacesAll = async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+
+    if (!q) return success(res, { items: [] });
+
+    const all = [];
+    for (const spec of CITY_CATALOG) {
+      const { n } = countPlacesStmt.get(spec.slug);
+      if (n < 1) continue;
+      const entry = getIndexFor(spec.slug);
+      const scored = scoreQueryAgainstIndex(entry, q);
+      // Take this city's top-N by score, then merge across all cities
+      // and re-rank. Capping per-city keeps the merge budget bounded
+      // when many cities happen to match a common substring.
+      const cityTop = [...scored.entries()]
+        .sort((a, b) => b[1].score - a[1].score)
+        .slice(0, limit);
+      for (const [idx, meta] of cityTop) {
+        const p = entry.rows[idx];
+        all.push({
+          name: p.name,
+          kind: p.kind,
+          lat: p.lat,
+          lng: p.lng,
+          city_slug: spec.slug,
+          city_name: spec.name,
+          score: meta.score,
+          matchType: meta.matchType,
+        });
+      }
+    }
+
+    all.sort((a, b) => b.score - a.score);
+    return success(res, { items: all.slice(0, limit) });
+  } catch (err) {
+    logger.error(`city-graphs cross-city places search failed: ${err.message}`);
     return error(res, err.message);
   }
 };
