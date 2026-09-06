@@ -14,10 +14,16 @@ import logger from '../../helpers/logger.js';
 const MAX_TITLE = 120;
 const MAX_PAYLOAD = 4_000;                            // well over QR v40 capacity
 const MAX_STYLE_CONFIG_JSON = 32_000;                 // ~32 KB of style knobs
+const MAX_SOURCE_META_JSON = 16_000;                  // Gemini analysis JSON — bounded
 const MAX_PNG_DATA_URL = 500 * 1024;                  // 500 KB cap on baked preview
 const OWNER_KEY_RE = /^[a-f0-9]{16,128}$/i;           // SHA-256 hex or similar
 const VALID_KINDS = new Set([
   'url', 'text', 'wifi', 'vcard', 'sms', 'email', 'geo', 'upi', 'kofi',
+]);
+// Provenance whitelist. 'manual' is the default; the others correspond to
+// creator-lane features on the FE (Tattoo Studio, Pathfinding QR export, …).
+const VALID_SOURCE_KINDS = new Set([
+  'manual', 'tattoo', 'pathfinding',
 ]);
 
 function readOwnerKey(req) {
@@ -34,7 +40,10 @@ export const postCreate = (req, res) => {
     const ownerKey = readOwnerKey(req);
     if (!ownerKey) return error(res, 'X-QR-Owner header is required', 400);
 
-    const { title, payload, payload_kind, style_config, png_data_url, public: isPublic } = req.body || {};
+    const {
+      title, payload, payload_kind, style_config, png_data_url,
+      public: isPublic, source_kind, source_meta,
+    } = req.body || {};
 
     if (typeof payload !== 'string' || !payload.trim()) {
       return error(res, 'payload is required', 400);
@@ -77,6 +86,32 @@ export const postCreate = (req, res) => {
       png = png_data_url;
     }
 
+    // Provenance — validated + serialised. Defaults to 'manual' so pre-
+    // existing FE callers keep working unchanged. Tattoo Studio passes
+    // 'tattoo' + the analysis JSON so the library card can render the
+    // subject / motifs / palette instead of a plain "Untitled" row.
+    let normalisedKind = 'manual';
+    if (source_kind !== undefined && source_kind !== null && source_kind !== '') {
+      const k = String(source_kind).toLowerCase();
+      if (!VALID_SOURCE_KINDS.has(k)) {
+        return error(res, `source_kind must be one of: ${[...VALID_SOURCE_KINDS].join(', ')}`, 400);
+      }
+      normalisedKind = k;
+    }
+    let sourceMetaJson = null;
+    if (source_meta !== undefined && source_meta !== null && source_meta !== '') {
+      try {
+        sourceMetaJson = typeof source_meta === 'string'
+          ? source_meta
+          : JSON.stringify(source_meta);
+      } catch {
+        return error(res, 'source_meta is not JSON-serializable', 400);
+      }
+      if (sourceMetaJson.length > MAX_SOURCE_META_JSON) {
+        return error(res, `source_meta too large (max ${MAX_SOURCE_META_JSON} chars)`, 400);
+      }
+    }
+
     const { id } = createSave({
       ownerKey,
       title: title ? String(title).trim() : null,
@@ -85,6 +120,8 @@ export const postCreate = (req, res) => {
       styleConfig: styleJson,
       pngDataUrl: png,
       isPublic: isPublic === undefined ? true : !!isPublic,
+      sourceKind: normalisedKind,
+      sourceMeta: sourceMetaJson,
     });
 
     return success(res, { id, url: `/qr/s/${id}` }, 'Saved');
@@ -102,8 +139,11 @@ export const getList = (req, res) => {
 
     const limit = parseInt(req.query.limit, 10) || 30;
     const offset = parseInt(req.query.offset, 10) || 0;
+    // ?source_kind=tattoo lets the FE gallery filter to just tattoo-QRs.
+    const rawKind = String(req.query.source_kind || '').toLowerCase().trim();
+    const sourceKind = VALID_SOURCE_KINDS.has(rawKind) ? rawKind : null;
 
-    const result = listByOwner({ ownerKey, limit, offset });
+    const result = listByOwner({ ownerKey, limit, offset, sourceKind });
     return success(res, result);
   } catch (err) {
     logger.error('qr-saves getList failed', err.message);

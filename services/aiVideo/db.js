@@ -723,6 +723,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_qr_saves_owner  ON qr_saves(owner_key, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_qr_saves_public ON qr_saves(public, created_at DESC);
 `);
+// source_kind + source_meta — added for the Tattoo → AI-styled QR feature.
+// source_kind: 'manual' (default) | 'tattoo' | 'pathfinding' | future kinds.
+// source_meta: JSON blob (e.g. the tattoo analysis) so the FE can render a
+// richer library card. Null on legacy rows; the FE treats null as 'manual'.
+addColumnIfMissing('qr_saves', 'source_kind', "TEXT NOT NULL DEFAULT 'manual'");
+addColumnIfMissing('qr_saves', 'source_meta', 'TEXT');
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_qr_saves_owner_kind ON qr_saves(owner_key, source_kind, created_at DESC)'); } catch {}
 
 // ─── Chess online matches (live 1v1 via link share) ──────────────
 // Lightweight live matchmaking — no auth, no accounts. Creator POSTs

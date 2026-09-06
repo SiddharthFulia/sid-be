@@ -24,9 +24,9 @@ function makeSlug(len = 8) {
 // ─── Prepared statements ─────────────────────────────────────────
 const insertStmt = db.prepare(`
   INSERT INTO qr_saves
-    (id, owner_key, title, payload, payload_kind, style_config, png_data_url, public, views, created_at, updated_at)
+    (id, owner_key, title, payload, payload_kind, style_config, png_data_url, public, views, created_at, updated_at, source_kind, source_meta)
   VALUES
-    (@id, @owner_key, @title, @payload, @payload_kind, @style_config, @png_data_url, @public, 0, @created_at, @updated_at)
+    (@id, @owner_key, @title, @payload, @payload_kind, @style_config, @png_data_url, @public, 0, @created_at, @updated_at, @source_kind, @source_meta)
 `);
 const selectByIdStmt = db.prepare('SELECT * FROM qr_saves WHERE id = ?');
 const selectByOwnerStmt = db.prepare(`
@@ -35,7 +35,14 @@ const selectByOwnerStmt = db.prepare(`
   ORDER BY created_at DESC
   LIMIT ? OFFSET ?
 `);
+const selectByOwnerKindStmt = db.prepare(`
+  SELECT * FROM qr_saves
+  WHERE owner_key = ? AND source_kind = ?
+  ORDER BY created_at DESC
+  LIMIT ? OFFSET ?
+`);
 const countByOwnerStmt = db.prepare('SELECT COUNT(*) AS n FROM qr_saves WHERE owner_key = ?');
+const countByOwnerKindStmt = db.prepare('SELECT COUNT(*) AS n FROM qr_saves WHERE owner_key = ? AND source_kind = ?');
 const incrementViewsStmt = db.prepare('UPDATE qr_saves SET views = views + 1 WHERE id = ?');
 const deleteStmt = db.prepare('DELETE FROM qr_saves WHERE id = ? AND owner_key = ?');
 const patchStmt = db.prepare(`
@@ -54,6 +61,10 @@ function rowToItem(r, { includePng = false } = {}) {
   if (!r) return null;
   let styleConfig = {};
   try { styleConfig = JSON.parse(r.style_config || '{}'); } catch {}
+  let sourceMeta = null;
+  if (r.source_meta) {
+    try { sourceMeta = JSON.parse(r.source_meta); } catch {}
+  }
   return {
     id: r.id,
     title: r.title || '',
@@ -68,12 +79,18 @@ function rowToItem(r, { includePng = false } = {}) {
     views: r.views || 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    // Provenance — where this save originated. 'manual' is the legacy default
+    // (added retroactively via column DEFAULT). 'tattoo' rows carry the full
+    // Gemini analysis in sourceMeta.
+    sourceKind: r.source_kind || 'manual',
+    sourceMeta,
   };
 }
 
 // ─── Public API ──────────────────────────────────────────────────
 export function createSave({
   ownerKey, title, payload, payloadKind, styleConfig, pngDataUrl, isPublic = true,
+  sourceKind = 'manual', sourceMeta = null,
 }) {
   const now = Date.now();
   // Retry a handful of times if we happen to hit a slug collision.
@@ -91,6 +108,10 @@ export function createSave({
         public: isPublic ? 1 : 0,
         created_at: now,
         updated_at: now,
+        source_kind: sourceKind || 'manual',
+        source_meta: sourceMeta
+          ? (typeof sourceMeta === 'string' ? sourceMeta : JSON.stringify(sourceMeta))
+          : null,
       });
       return { id, createdAt: now };
     } catch (err) {
@@ -113,11 +134,17 @@ export function bumpViews(id) {
   incrementViewsStmt.run(id);
 }
 
-export function listByOwner({ ownerKey, limit = 30, offset = 0 }) {
+export function listByOwner({ ownerKey, limit = 30, offset = 0, sourceKind = null }) {
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 100);
   const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
-  const rows = selectByOwnerStmt.all(ownerKey, safeLimit, safeOffset);
-  const total = countByOwnerStmt.get(ownerKey)?.n || 0;
+  let rows, total;
+  if (sourceKind) {
+    rows = selectByOwnerKindStmt.all(ownerKey, sourceKind, safeLimit, safeOffset);
+    total = countByOwnerKindStmt.get(ownerKey, sourceKind)?.n || 0;
+  } else {
+    rows = selectByOwnerStmt.all(ownerKey, safeLimit, safeOffset);
+    total = countByOwnerStmt.get(ownerKey)?.n || 0;
+  }
   return {
     items: rows.map((r) => rowToItem(r, { includePng: true })),
     total,

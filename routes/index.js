@@ -34,6 +34,7 @@ import physicsRoutes       from './physics/index.js';
 import chernobylRoutes     from './chernobyl/index.js';
 import cityGraphsRoutes    from './cityGraphs/index.js';
 import qrSavesRoutes       from './qrSaves/index.js';
+import tattooRoutes        from './tattoo/index.js';
 
 const router = Router();
 
@@ -64,5 +65,6 @@ router.use('/', physicsRoutes);
 router.use('/', chernobylRoutes);
 router.use('/', cityGraphsRoutes);
 router.use('/', qrSavesRoutes);
+router.use('/', tattooRoutes);
 
 export default router;
