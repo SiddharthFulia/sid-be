@@ -30,6 +30,8 @@ import fs from 'fs';
 import { listTables } from '../../admin/dbExplorer.js';
 import { listAllQueues } from '../../rabbitmq/managementApi.js';
 import { getRegisteredCrons } from '../../../master_cron_server.js';
+import { API_CATALOG, countByCategory } from '../../apiCatalog/index.js';
+import { summarizeEndpoints, totalsForWindow } from '../../metrics/apiMetrics.js';
 
 // Groq model catalog — hardcoded because it's part of the Oracle's answers,
 // not a live discovery. Update alongside services/groq.js when Groq rotates
@@ -54,7 +56,8 @@ const ROUTES_DIR = path.join(REPO_ROOT, 'routes');
  * @param {boolean} [opts.includeSampleRows=false]  reserved — currently ignored
  * @returns {Promise<object>}
  */
-export async function buildSystemContext(_opts = {}) {
+export async function buildSystemContext(opts = {}) {
+  const _opts = opts;
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
 
@@ -80,9 +83,15 @@ export async function buildSystemContext(_opts = {}) {
     queues:        settled(queuesRes,  { queues: [], error: 'collector crashed' }),
     pm2Processes:  settled(pm2Res,     { processes: [], error: 'collector crashed' }),
     crons:         collectCrons(),
+    // The routes collector duplicates data we now surface via apiCatalog
+    // (with richer metadata). We still expose the raw routes list for
+    // debugging via GET /api/agents/system/context, just not to the
+    // Oracle prompt — the FE can drop it with a query param if it wants.
     routes:        settled(routesRes,  { routes: [], error: 'collector crashed' }),
     envVarNames:   collectEnvVarNames(),
     groqModels:    GROQ_MODEL_CATALOG,
+    apiCatalog:    collectApiCatalog(),
+    apiMetrics:    collectApiMetrics(),
   };
 
   bundle.assembleMs = Date.now() - t0;
@@ -273,7 +282,7 @@ async function collectRoutes() {
           let p = m[2];
           if (!p.startsWith('/')) p = '/' + p;
           const fullPath = '/api' + p;
-          routes.push({ method, path: fullPath, file: path.relative(REPO_ROOT, file).replace(/\\/g, '/') });
+          routes.push({ method, path: fullPath });
         }
       } catch {
         // Unreadable file — skip.
@@ -292,6 +301,67 @@ async function collectRoutes() {
     return { routes: unique, count: unique.length };
   } catch (err) {
     return { routes: [], count: 0, error: err.message };
+  }
+}
+
+// API catalog — canonical list of every endpoint with upstream + rate
+// limit + cache TTL. Fed to the Oracle so it can answer "what's behind
+// /osint/wikipedia" without guessing.
+//
+// SIZE BUDGET: the full catalog (321 entries × ~400B each) blows
+// Groq's free-tier 8k TPM input cap. We ship a COMPACT variant:
+//   • drop internal / worker callback entries (auth_required==='worker-token')
+//     — users never ask about those.
+//   • drop bulky/empty fields per row (subcategory when null, upstream when
+//     null, etc.). Keep only the fields the Oracle needs to answer:
+//     endpoint, method, category, upstream/upstream_name, auth, rate_limit,
+//     cache_ttl_sec, tool_name.
+// The full-detail form (with params + tags + example_url + description)
+// is still available via GET /api/api-catalog.
+function collectApiCatalog() {
+  try {
+    const filtered = API_CATALOG.filter(e => e.auth_required !== 'worker-token');
+    const compact = filtered.map(e => {
+      const row = {
+        endpoint: e.endpoint,
+        method:   e.method,
+        category: e.category,
+      };
+      if (e.subcategory)                              row.subcategory   = e.subcategory;
+      if (e.upstream)                                 row.upstream      = e.upstream;
+      if (e.upstream_name)                            row.upstream_name = e.upstream_name;
+      if (e.auth_required && e.auth_required !== false) row.auth_required = e.auth_required;
+      if (e.rate_limit)                               row.rate_limit    = e.rate_limit;
+      if (Number.isFinite(e.cache_ttl_sec) && e.cache_ttl_sec > 0) row.cache_ttl_sec = e.cache_ttl_sec;
+      if (e.tool_name)                                row.tool_name     = e.tool_name;
+      return row;
+    });
+    return {
+      entries:         compact,
+      count:           compact.length,
+      countByCategory: countByCategory(),
+      note: 'Compact form. Full catalog with params + tags at GET /api/api-catalog.',
+    };
+  } catch (err) {
+    return { entries: [], count: 0, error: err.message };
+  }
+}
+
+// Aggregated 24h metrics from api_metrics (populated by the middleware
+// in services/metrics/apiMetrics.js). Top-25 endpoints by call count so
+// the JSON fits inside Groq's free-tier context ceiling — the FE
+// dashboard uses `/api/admin/api-usage` directly for the full list.
+function collectApiMetrics() {
+  try {
+    const endpoints = summarizeEndpoints({ hours24: 24, hours7d: 24 * 7 }).slice(0, 25);
+    return {
+      window_hours: 24,
+      totals:       totalsForWindow(24),
+      endpoints,
+      count:        endpoints.length,
+    };
+  } catch (err) {
+    return { totals: {}, endpoints: [], count: 0, error: err.message };
   }
 }
 
@@ -368,6 +438,100 @@ export function contextBytes(bundle) {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Return a slimmed copy of the bundle for the Groq prompt.
+ *
+ * The FE debug view (`GET /api/agents/system/context`) still gets the
+ * full bundle; only the LLM-facing prompt uses this trimmed variant.
+ * Trims:
+ *   • `routes` — duplicated by `apiCatalog` in richer form
+ *   • `envVarNames` — noise; if the Oracle needs env awareness we surface
+ *     it as `envVarNamesCount`
+ *   • `apiCatalog.entries` — the full compact catalog is ~45KB (~15k Groq
+ *     tokens). If a `question` is provided we filter the entries to
+ *     those whose endpoint / category / subcategory / upstream / tool_name
+ *     match any word in the question (case-insensitive, ≥3 chars). When
+ *     no keywords match, we still ship the countByCategory summary so
+ *     the Oracle can steer the user toward the right area even without
+ *     details. Also caps at 60 entries as a hard budget guard.
+ */
+export function trimForPrompt(bundle, opts = {}) {
+  if (!bundle || typeof bundle !== 'object') return bundle;
+  const question = String(opts.question || '').toLowerCase();
+  const clone = { ...bundle };
+  if (clone.routes) delete clone.routes;
+  if (clone.envVarNames) {
+    clone.envVarNamesCount = clone.envVarNames.count ?? 0;
+    delete clone.envVarNames;
+  }
+
+  // Subsystem relevance — drop what the question clearly isn't asking
+  // about. Groq free tier's 8k input-TPM cap forces us to be picky.
+  // Keyword lists are intentionally broad (matches "table" and "tables"
+  // and "row" and "rows"). Each dropped block is replaced with a stub
+  // `{ available: true }` so the Oracle knows the data exists without
+  // paying the token cost.
+  const KEYWORDS = {
+    tables:       ['table', 'row', 'schema', 'sqlite', 'column', 'database', 'db '],
+    queues:       ['queue', 'rabbit', 'amqp', 'lavin', 'consumer'],
+    pm2Processes: ['pm2', 'process', 'restart', 'worker', 'daemon'],
+    crons:        ['cron', 'schedule', 'nightly', 'monthly'],
+    hostSystem:   ['host', 'cpu', 'memory', 'load', 'uptime', 'system', 'ram', 'disk'],
+    groqModels:   ['groq', 'model', 'llama', 'gpt'],
+    apiMetrics:   ['metric', 'traffic', 'latency', 'error rate', 'p95', 'usage', 'hits', 'call', 'busiest', 'popular', 'most', 'peak'],
+  };
+  for (const [field, hits] of Object.entries(KEYWORDS)) {
+    if (!(field in clone)) continue;
+    const wanted = hits.some(w => question.includes(w));
+    if (!wanted) {
+      // Preserve counts so the Oracle can still cite "X tables exist".
+      const stub = { pruned: true };
+      if (typeof clone[field]?.count === 'number') stub.count = clone[field].count;
+      clone[field] = stub;
+    }
+  }
+
+  // Tables: even when kept, trim the per-row payload down to essentials.
+  if (!clone.tables?.pruned && clone.tables?.tables?.length) {
+    clone.tables = {
+      ...clone.tables,
+      tables: clone.tables.tables.map(t => ({
+        name:         t.name,
+        rowCount:     t.rowCount,
+        columnCount:  t.columnCount,
+        lastActivity: t.lastActivity,
+      })),
+    };
+  }
+  if (clone.apiCatalog?.entries?.length) {
+    const question = String(opts.question || '').toLowerCase();
+    const words = Array.from(new Set(
+      question.split(/[^a-z0-9\-_]+/i).filter(w => w.length >= 3)
+    ));
+    const MAX_ENTRIES = 60;
+    let entries = clone.apiCatalog.entries;
+    if (words.length) {
+      const matches = entries.filter(e => {
+        const hay = [e.endpoint, e.category, e.subcategory, e.upstream, e.upstream_name, e.tool_name]
+          .filter(Boolean).join(' ').toLowerCase();
+        return words.some(w => hay.includes(w));
+      });
+      // If the filter produced anything, use it — else fall back to a
+      // small sample so the Oracle still has some catalog visibility.
+      if (matches.length) entries = matches;
+    }
+    if (entries.length > MAX_ENTRIES) entries = entries.slice(0, MAX_ENTRIES);
+    clone.apiCatalog = {
+      ...clone.apiCatalog,
+      entries,
+      filteredFor: words.length ? words : null,
+      truncatedAt: MAX_ENTRIES,
+      note: 'Filtered to endpoints matching question keywords. Full catalog at GET /api/api-catalog.',
+    };
+  }
+  return clone;
 }
 
 export { GROQ_MODEL_CATALOG };

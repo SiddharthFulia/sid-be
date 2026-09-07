@@ -4,6 +4,7 @@ import compression from 'compression';
 import path from 'path';
 import routes from './routes/index.js';
 import { NODE_ENV, FRONTEND_URL } from './helpers/constants.js';
+import { apiMetricsMiddleware } from './services/metrics/apiMetrics.js';
 
 const app = express();
 
@@ -43,6 +44,12 @@ app.use('/generated-videos', express.static(path.join(process.cwd(), 'public', '
     res.setHeader('Access-Control-Allow-Origin', '*');
   },
 }));
+
+// Per-endpoint API usage metrics — sits AFTER body parsers (so parse
+// latency is included in the measurement) and BEFORE the route mount so
+// every /api/* response fires the finish listener. Recording failures
+// are swallowed inside the middleware; the request path is untouched.
+app.use(apiMetricsMiddleware);
 
 // Routes
 app.use('/api', routes);

@@ -18,6 +18,7 @@ import {
   getKeepAliveStatusHandler,
 } from '../../controllers/admin/keepAlive.js';
 import { postTriggerCityGraphsCron } from '../../controllers/admin/cityGraphsCron.js';
+import { getApiUsage } from '../../controllers/admin/apiUsage.js';
 
 const router = Router();
 
@@ -52,5 +53,9 @@ router.get( '/admin/keep-alive/status',  requireVault, getKeepAliveStatusHandler
 // 03:15 UTC; this endpoint fires the exact same routine on demand so we
 // don't have to wait. Vault-gated so anon visitors can't spam Overpass.
 router.post('/admin/city-graphs/cron/trigger', requireVault, postTriggerCityGraphsCron);
+
+// Per-endpoint API metrics — aggregated hourly buckets from api_metrics.
+// Populated by the apiMetrics middleware wired in app.js.
+router.get('/admin/api-usage', requireVault, getApiUsage);
 
 export default router;

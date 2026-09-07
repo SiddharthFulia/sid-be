@@ -15,6 +15,16 @@ const UA = 'siddharthfulia.com (eng@getpassionfruit.com)';
 const CACHE = new Map();
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 
+// Per-request context propagated via AsyncLocalStorage. The tool
+// dispatcher wraps each `tool.run()` call inside `withRequest(res, fn)`
+// so any downstream `cached()` call can look up the current response and
+// stamp `X-Cache-Hit: 1` when its lookup was a hit. Safe under concurrent
+// requests because each request runs inside its own async context.
+import { AsyncLocalStorage } from 'async_hooks';
+const REQ_STORE = new AsyncLocalStorage();
+export function withRequest(res, fn) { return REQ_STORE.run({ res }, fn); }
+function currentRes() { return REQ_STORE.getStore()?.res || null; }
+
 export async function fetchJson(url, opts = {}) {
   const res = await fetch(url, {
     ...opts,
@@ -40,7 +50,11 @@ export async function fetchJson(url, opts = {}) {
 export async function cached(key, ttlMs, loader) {
   const now = Date.now();
   const hit = CACHE.get(key);
-  if (hit && hit.expiresAt > now) return hit.payload;
+  if (hit && hit.expiresAt > now) {
+    // Best-effort — set the metrics header if we're inside a request context.
+    try { currentRes()?.setHeader?.('X-Cache-Hit', '1'); } catch {}
+    return hit.payload;
+  }
   const payload = await loader();
   CACHE.set(key, { expiresAt: now + (ttlMs ?? DEFAULT_TTL_MS), payload });
   return payload;

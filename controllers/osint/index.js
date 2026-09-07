@@ -33,6 +33,7 @@
 
 import logger from '../../helpers/logger.js';
 import { tools, manifest } from '../../services/osint/index.js';
+import { withRequest } from '../../services/osint/_common.js';
 
 // ─── Cache ─────────────────────────────────────────────────────
 // One Map keyed by cache key → { expiresAt, payload }. Every helper below
@@ -45,10 +46,18 @@ const EARTHQUAKE_TTL_MS = 60 * 1000;    // 1 minute
 const SATELLITES_TTL_MS = 2 * 60 * 60 * 1000;   // 2 hours
 const COUNTRIES_TTL_MS  = 24 * 60 * 60 * 1000;  // 24 hours
 
-async function cachedFetch(key, ttlMs, loader) {
+// Optional `res` param — when passed, cache hits set the `X-Cache-Hit: 1`
+// response header. The metrics middleware inspects that header to
+// distinguish served-from-cache calls from upstream round-trips. Legacy
+// call sites that omit `res` continue to work — the header just isn't
+// set, so the request counts as a normal (non-cache) hit in metrics.
+async function cachedFetch(key, ttlMs, loader, res = null) {
   const now = Date.now();
   const hit = CACHE.get(key);
-  if (hit && hit.expiresAt > now) return hit.payload;
+  if (hit && hit.expiresAt > now) {
+    try { res?.setHeader?.('X-Cache-Hit', '1'); } catch {}
+    return hit.payload;
+  }
   const payload = await loader();
   CACHE.set(key, { expiresAt: now + ttlMs, payload });
   return payload;
@@ -517,7 +526,12 @@ export const runTool = async (req, res) => {
   }
 
   try {
-    const data = await tool.run(pathParams, req.query || {});
+    // Wrap in an AsyncLocalStorage context so the shared `cached()` helper
+    // inside services/osint/_common.js can find `res` and stamp
+    // `X-Cache-Hit: 1` when the lookup is served from cache. The metrics
+    // middleware in services/metrics/apiMetrics.js reads that header on
+    // response finish to increment `cache_hits` in `api_metrics`.
+    const data = await withRequest(res, () => tool.run(pathParams, req.query || {}));
     logDone(`tool:${name}`, start);
     return res.json({ ok: true, tool: name, data });
   } catch (err) {

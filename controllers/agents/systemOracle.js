@@ -16,7 +16,7 @@
 // All three are vault-gated at the route layer.
 
 import { randomUUID } from 'crypto';
-import { buildSystemContext, contextBytes } from '../../services/agents/tools/systemContext.js';
+import { buildSystemContext, contextBytes, trimForPrompt } from '../../services/agents/tools/systemContext.js';
 import { getAgent } from '../../services/agents/index.js';
 import { validateInput } from '../../services/agents/baseAgent.js';
 import { buildOraclePrompt, resolveModel } from '../../services/agents/systemOracle.js';
@@ -129,7 +129,7 @@ export async function postSystemOracleStream(req, res) {
   let upstream = null;
   try {
     bundle = await buildSystemContext();
-    const system = buildOraclePrompt(bundle);
+    const system = buildOraclePrompt(trimForPrompt(bundle, { question }));
 
     send('meta', {
       requestId,

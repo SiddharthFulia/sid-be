@@ -17,7 +17,7 @@
 //     hit this; the FE settings dashboard is the intended caller.
 
 import { chatGroq } from '../groq.js';
-import { buildSystemContext, contextBytes } from './tools/systemContext.js';
+import { buildSystemContext, contextBytes, trimForPrompt } from './tools/systemContext.js';
 
 // Default to gpt-oss-120b — this is a reasoning-heavy Q&A workload where
 // the extra tokens are worth it. Caller can override via input.model.
@@ -70,6 +70,12 @@ export function buildOraclePrompt(bundle) {
     '- Table row contents are intentionally omitted. Only aggregate counts + column names are available. Suggest the caller use the DB Explorer if they need actual rows.',
     '- Be concise. Skip preamble. Answer directly.',
     '',
+    'API catalog + metrics:',
+    '- The `apiCatalog.entries` field lists every endpoint we own with its upstream URL, rate limit, cache TTL, and auth requirement.',
+    '- When asked about specific endpoints, rate limits, upstreams, or usage, cite from `apiCatalog.entries[]` and `apiMetrics.endpoints[]` VERBATIM. Never fabricate an upstream URL or rate limit.',
+    '- `apiMetrics.endpoints[]` holds per-endpoint 24h aggregates (calls_24h, error_rate, cache_hit_rate, avg_latency_ms). Use these when asked "what\'s getting traffic", "which endpoints have high error rate", or "what\'s the p95 latency on X".',
+    '- If a specific endpoint the user asks about is missing from `apiCatalog.entries`, say so plainly — don\'t invent it.',
+    '',
     'Live server snapshot (JSON):',
     '```json',
     JSON.stringify(bundle, null, 2),
@@ -105,7 +111,7 @@ export async function run(input, _ctx = {}) {
 
   const model = resolveModel(input);
   const bundle = await buildSystemContext();
-  const system = buildOraclePrompt(bundle);
+  const system = buildOraclePrompt(trimForPrompt(bundle, { question }));
 
   // chatGroq accepts either a short alias ('llama-3.3-70b') or a full model
   // id. Our whitelist matches Groq's actual ids so we pass through directly.
