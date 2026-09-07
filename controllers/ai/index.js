@@ -28,7 +28,7 @@ export const postChat = async (req, res) => {
     const start = Date.now();
     logger.info(`CHAT REQ | model=${model || 'default'} | context=${context} | msg="${message.slice(0, 60)}..."`);
 
-    const result = await chat(message, history, model, context);
+    const result = await ollamaChat(message, history, model, context);
 
     logger.info(`CHAT RES | ${Date.now() - start}ms | reply="${result.reply?.slice(0, 60)}..."`);
     success(res, result);

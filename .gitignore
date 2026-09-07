@@ -12,3 +12,5 @@ setup-vps.sh
 data/*
 !data/chess_openings.json
 public/generated-videos/
+# Smoke-test output — regenerated on every `npm run test:endpoints` run.
+test-endpoints-results.json
