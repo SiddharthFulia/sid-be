@@ -112,21 +112,115 @@ db.exec(`
 `);
 
 // ── Seed catalogue ─────────────────────────────────────────────────
-// The 10 metros we preseed via scripts/seedCityGraphs.js. Every entry
-// here is also what surfaces from the metadata list endpoint even
-// before the row is populated — so the FE can render the picker with
-// disabled states for "not fetched yet" cities.
+// The all-India catalogue — every state + notable metro + all UTs. Each
+// entry surfaces from the metadata list endpoint even before the row is
+// populated, so the FE can render the picker with disabled states for
+// "not fetched yet" cities.
+//
+// bbox width heuristic:
+//   • ~0.25° - 0.30° for tier-1 metros (Mumbai, Delhi, Bangalore …)
+//   • ~0.15° - 0.20° for tier-2 state capitals (Bhopal, Jaipur …)
+//   • ~0.08° - 0.12° for smaller cities (Panaji, Kohima, Kavaratti …)
+// Smaller bboxes keep Overpass responses light for cities that don't
+// need a big canvas footprint anyway. Small island / hill towns
+// (Kavaratti, Port Blair, Leh) use ~0.08° square boxes — the road
+// network is sparse and a big bbox would just harvest empty ocean /
+// mountain squares.
+//
+// `state` field groups entries in the FE picker. Union Territories that
+// have their own capital-scale city are called out under `Chandigarh`,
+// `Puducherry`, `J&K`, `Ladakh`, `Andaman & Nicobar`, `Lakshadweep`,
+// `Dadra & Nagar Haveli & Daman & Diu`. Delhi is its own UT-state entry.
 export const CITY_CATALOG = [
-  { slug: 'bangalore', name: 'Bangalore', bbox: '12.85,77.45,13.10,77.75', center: { lat: 12.9716, lng: 77.5946 } },
-  { slug: 'mumbai',    name: 'Mumbai',    bbox: '18.90,72.75,19.30,73.05', center: { lat: 19.0760, lng: 72.8777 } },
-  { slug: 'delhi',     name: 'Delhi',     bbox: '28.45,76.90,28.85,77.35', center: { lat: 28.6139, lng: 77.2090 } },
-  { slug: 'chennai',   name: 'Chennai',   bbox: '12.90,80.15,13.20,80.30', center: { lat: 13.0827, lng: 80.2707 } },
-  { slug: 'hyderabad', name: 'Hyderabad', bbox: '17.30,78.30,17.55,78.60', center: { lat: 17.3850, lng: 78.4867 } },
-  { slug: 'kolkata',   name: 'Kolkata',   bbox: '22.45,88.25,22.65,88.45', center: { lat: 22.5726, lng: 88.3639 } },
-  { slug: 'pune',      name: 'Pune',      bbox: '18.45,73.75,18.65,73.95', center: { lat: 18.5204, lng: 73.8567 } },
-  { slug: 'ahmedabad', name: 'Ahmedabad', bbox: '23.00,72.50,23.15,72.65', center: { lat: 23.0225, lng: 72.5714 } },
-  { slug: 'jaipur',    name: 'Jaipur',    bbox: '26.80,75.70,27.00,75.90', center: { lat: 26.9124, lng: 75.7873 } },
-  { slug: 'lucknow',   name: 'Lucknow',   bbox: '26.75,80.85,26.95,81.05', center: { lat: 26.8467, lng: 80.9462 } },
+  // ── Andhra Pradesh ──
+  { slug: 'vijayawada',    name: 'Vijayawada',           state: 'Andhra Pradesh',    bbox: '16.45,80.55,16.60,80.75', center: { lat: 16.5062, lng: 80.6480 } },
+  { slug: 'visakhapatnam', name: 'Visakhapatnam',        state: 'Andhra Pradesh',    bbox: '17.65,83.15,17.80,83.35', center: { lat: 17.6868, lng: 83.2185 } },
+  // ── Arunachal Pradesh ──
+  { slug: 'itanagar',      name: 'Itanagar',             state: 'Arunachal Pradesh', bbox: '27.05,93.55,27.15,93.70', center: { lat: 27.1000, lng: 93.6167 } },
+  // ── Assam ──
+  { slug: 'guwahati',      name: 'Guwahati',             state: 'Assam',             bbox: '26.10,91.65,26.25,91.85', center: { lat: 26.1445, lng: 91.7362 } },
+  // ── Bihar ──
+  { slug: 'patna',         name: 'Patna',                state: 'Bihar',             bbox: '25.55,85.05,25.70,85.25', center: { lat: 25.5941, lng: 85.1376 } },
+  // ── Chhattisgarh ──
+  { slug: 'raipur',        name: 'Raipur',               state: 'Chhattisgarh',      bbox: '21.15,81.55,21.30,81.75', center: { lat: 21.2514, lng: 81.6296 } },
+  // ── Goa ──
+  { slug: 'panaji',        name: 'Panaji',               state: 'Goa',               bbox: '15.45,73.75,15.55,73.90', center: { lat: 15.4909, lng: 73.8278 } },
+  // ── Gujarat ──
+  { slug: 'ahmedabad',     name: 'Ahmedabad',            state: 'Gujarat',           bbox: '22.95,72.45,23.15,72.70', center: { lat: 23.0225, lng: 72.5714 } },
+  { slug: 'surat',         name: 'Surat',                state: 'Gujarat',           bbox: '21.10,72.75,21.25,72.90', center: { lat: 21.1702, lng: 72.8311 } },
+  // ── Haryana ──
+  { slug: 'gurugram',      name: 'Gurugram',             state: 'Haryana',           bbox: '28.40,76.95,28.55,77.15', center: { lat: 28.4595, lng: 77.0266 } },
+  // ── Himachal Pradesh ──
+  { slug: 'shimla',        name: 'Shimla',               state: 'Himachal Pradesh',  bbox: '31.05,77.10,31.15,77.25', center: { lat: 31.1048, lng: 77.1734 } },
+  // ── Jharkhand ──
+  { slug: 'ranchi',        name: 'Ranchi',               state: 'Jharkhand',         bbox: '23.30,85.25,23.45,85.40', center: { lat: 23.3441, lng: 85.3096 } },
+  // ── Karnataka ──
+  { slug: 'bangalore',     name: 'Bangalore',            state: 'Karnataka',         bbox: '12.85,77.45,13.10,77.75', center: { lat: 12.9716, lng: 77.5946 } },
+  // ── Kerala ──
+  { slug: 'thiruvananthapuram', name: 'Thiruvananthapuram', state: 'Kerala',         bbox: '8.45,76.85,8.60,77.05',   center: { lat: 8.5241,  lng: 76.9366 } },
+  { slug: 'kochi',         name: 'Kochi',                state: 'Kerala',            bbox: '9.90,76.20,10.05,76.35',  center: { lat: 9.9312,  lng: 76.2673 } },
+  // ── Madhya Pradesh ──
+  { slug: 'bhopal',        name: 'Bhopal',               state: 'Madhya Pradesh',    bbox: '23.15,77.30,23.35,77.50', center: { lat: 23.2599, lng: 77.4126 } },
+  { slug: 'indore',        name: 'Indore',               state: 'Madhya Pradesh',    bbox: '22.65,75.75,22.80,75.95', center: { lat: 22.7196, lng: 75.8577 } },
+  // ── Maharashtra ──
+  { slug: 'mumbai',        name: 'Mumbai',               state: 'Maharashtra',       bbox: '18.90,72.75,19.30,73.05', center: { lat: 19.0760, lng: 72.8777 } },
+  { slug: 'pune',          name: 'Pune',                 state: 'Maharashtra',       bbox: '18.45,73.75,18.65,73.95', center: { lat: 18.5204, lng: 73.8567 } },
+  { slug: 'nagpur',        name: 'Nagpur',               state: 'Maharashtra',       bbox: '21.05,78.95,21.20,79.15', center: { lat: 21.1458, lng: 79.0882 } },
+  // ── Manipur ──
+  { slug: 'imphal',        name: 'Imphal',               state: 'Manipur',           bbox: '24.75,93.85,24.85,94.00', center: { lat: 24.8170, lng: 93.9368 } },
+  // ── Meghalaya ──
+  { slug: 'shillong',      name: 'Shillong',             state: 'Meghalaya',         bbox: '25.55,91.85,25.65,92.00', center: { lat: 25.5788, lng: 91.8933 } },
+  // ── Mizoram ──
+  { slug: 'aizawl',        name: 'Aizawl',               state: 'Mizoram',           bbox: '23.70,92.65,23.80,92.80', center: { lat: 23.7307, lng: 92.7173 } },
+  // ── Nagaland ──
+  { slug: 'kohima',        name: 'Kohima',               state: 'Nagaland',          bbox: '25.65,94.05,25.75,94.20', center: { lat: 25.6751, lng: 94.1086 } },
+  // ── Odisha ──
+  { slug: 'bhubaneswar',   name: 'Bhubaneswar',          state: 'Odisha',            bbox: '20.20,85.75,20.35,85.90', center: { lat: 20.2961, lng: 85.8245 } },
+  // ── Punjab ──
+  { slug: 'amritsar',      name: 'Amritsar',             state: 'Punjab',            bbox: '31.55,74.80,31.70,74.95', center: { lat: 31.6340, lng: 74.8723 } },
+  { slug: 'ludhiana',      name: 'Ludhiana',             state: 'Punjab',            bbox: '30.85,75.75,31.00,75.95', center: { lat: 30.9010, lng: 75.8573 } },
+  // ── Rajasthan ──
+  { slug: 'jaipur',        name: 'Jaipur',               state: 'Rajasthan',         bbox: '26.80,75.70,27.00,75.90', center: { lat: 26.9124, lng: 75.7873 } },
+  { slug: 'jodhpur',       name: 'Jodhpur',              state: 'Rajasthan',         bbox: '26.20,72.95,26.35,73.10', center: { lat: 26.2389, lng: 73.0243 } },
+  { slug: 'udaipur',       name: 'Udaipur',              state: 'Rajasthan',         bbox: '24.55,73.65,24.65,73.75', center: { lat: 24.5854, lng: 73.7125 } },
+  // ── Sikkim ──
+  { slug: 'gangtok',       name: 'Gangtok',              state: 'Sikkim',            bbox: '27.30,88.55,27.40,88.70', center: { lat: 27.3389, lng: 88.6065 } },
+  // ── Tamil Nadu ──
+  { slug: 'chennai',       name: 'Chennai',              state: 'Tamil Nadu',        bbox: '12.90,80.15,13.20,80.30', center: { lat: 13.0827, lng: 80.2707 } },
+  { slug: 'coimbatore',    name: 'Coimbatore',           state: 'Tamil Nadu',        bbox: '10.95,76.90,11.10,77.05', center: { lat: 11.0168, lng: 76.9558 } },
+  { slug: 'madurai',       name: 'Madurai',              state: 'Tamil Nadu',        bbox: '9.85,78.05,9.99,78.20',   center: { lat: 9.9252,  lng: 78.1198 } },
+  // ── Telangana ──
+  { slug: 'hyderabad',     name: 'Hyderabad',            state: 'Telangana',         bbox: '17.30,78.30,17.55,78.60', center: { lat: 17.3850, lng: 78.4867 } },
+  { slug: 'warangal',      name: 'Warangal',             state: 'Telangana',         bbox: '17.95,79.50,18.05,79.65', center: { lat: 17.9689, lng: 79.5941 } },
+  // ── Tripura ──
+  { slug: 'agartala',      name: 'Agartala',             state: 'Tripura',           bbox: '23.80,91.25,23.90,91.35', center: { lat: 23.8315, lng: 91.2868 } },
+  // ── Uttar Pradesh ──
+  { slug: 'lucknow',       name: 'Lucknow',              state: 'Uttar Pradesh',     bbox: '26.75,80.85,26.95,81.05', center: { lat: 26.8467, lng: 80.9462 } },
+  { slug: 'varanasi',      name: 'Varanasi',             state: 'Uttar Pradesh',     bbox: '25.25,82.90,25.40,83.05', center: { lat: 25.3176, lng: 82.9739 } },
+  { slug: 'kanpur',        name: 'Kanpur',               state: 'Uttar Pradesh',     bbox: '26.40,80.25,26.55,80.40', center: { lat: 26.4499, lng: 80.3319 } },
+  { slug: 'agra',          name: 'Agra',                 state: 'Uttar Pradesh',     bbox: '27.10,77.95,27.25,78.10', center: { lat: 27.1767, lng: 78.0081 } },
+  { slug: 'noida',         name: 'Noida',                state: 'Uttar Pradesh',     bbox: '28.50,77.30,28.65,77.45', center: { lat: 28.5355, lng: 77.3910 } },
+  // ── Uttarakhand ──
+  { slug: 'dehradun',      name: 'Dehradun',             state: 'Uttarakhand',       bbox: '30.25,77.95,30.40,78.10', center: { lat: 30.3165, lng: 78.0322 } },
+  // ── West Bengal ──
+  { slug: 'kolkata',       name: 'Kolkata',              state: 'West Bengal',       bbox: '22.45,88.25,22.65,88.45', center: { lat: 22.5726, lng: 88.3639 } },
+  { slug: 'siliguri',      name: 'Siliguri',             state: 'West Bengal',       bbox: '26.65,88.35,26.80,88.50', center: { lat: 26.7271, lng: 88.3953 } },
+  // ── Delhi (UT) ──
+  { slug: 'delhi',         name: 'Delhi',                state: 'Delhi',             bbox: '28.45,76.90,28.85,77.35', center: { lat: 28.6139, lng: 77.2090 } },
+  // ── Chandigarh (UT, shared capital of Punjab + Haryana) ──
+  { slug: 'chandigarh',    name: 'Chandigarh',           state: 'Chandigarh',        bbox: '30.65,76.70,30.80,76.85', center: { lat: 30.7333, lng: 76.7794 } },
+  // ── Puducherry (UT) ──
+  { slug: 'puducherry',    name: 'Puducherry',           state: 'Puducherry',        bbox: '11.85,79.75,11.99,79.90', center: { lat: 11.9416, lng: 79.8083 } },
+  // ── Jammu & Kashmir (UT) ──
+  { slug: 'srinagar',      name: 'Srinagar',             state: 'Jammu & Kashmir',   bbox: '34.05,74.75,34.15,74.90', center: { lat: 34.0837, lng: 74.7973 } },
+  // ── Ladakh (UT) — sparse road network, small bbox on purpose ──
+  { slug: 'leh',           name: 'Leh',                  state: 'Ladakh',            bbox: '34.10,77.55,34.20,77.65', center: { lat: 34.1526, lng: 77.5771 } },
+  // ── Andaman & Nicobar (UT) — small port town, tight bbox ──
+  { slug: 'port-blair',    name: 'Port Blair',           state: 'Andaman & Nicobar', bbox: '11.60,92.70,11.70,92.80', center: { lat: 11.6234, lng: 92.7265 } },
+  // ── Lakshadweep (UT) — tiny atoll, tightest bbox in the catalogue ──
+  { slug: 'kavaratti',     name: 'Kavaratti',            state: 'Lakshadweep',       bbox: '10.53,72.60,10.60,72.67', center: { lat: 10.5626, lng: 72.6363 } },
+  // ── Dadra & Nagar Haveli and Daman & Diu (UT) ──
+  { slug: 'silvassa',      name: 'Silvassa',             state: 'Dadra & Nagar Haveli', bbox: '20.20,72.95,20.30,73.05', center: { lat: 20.2666, lng: 72.9866 } },
 ];
 
 const CATALOG_BY_SLUG = new Map(CITY_CATALOG.map((c) => [c.slug, c]));
@@ -617,6 +711,7 @@ export const listCities = (_req, res) => {
       return {
         slug: c.slug,
         name: c.name,
+        state: c.state || null,    // grouping key for the FE picker
         bbox: c.bbox,
         center: c.center,
         node_count: r?.node_count ?? 0,
