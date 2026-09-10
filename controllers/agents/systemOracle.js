@@ -96,9 +96,11 @@ export async function getSystemOracleContext(_req, res) {
 // hardcoded to stream: false. Duplicating the fetch call is cheaper than
 // refactoring the whole helper for a single new caller.
 export async function postSystemOracleStream(req, res) {
-  const question = String(req.body?.question || '').trim();
+  // Accept `message` (matches /api/chat, /api/groq, /api/gemini shape) OR
+  // `question` (original Oracle contract) so the FE can use either.
+  const question = String(req.body?.message || req.body?.question || '').trim();
   if (!question) {
-    return res.status(400).json({ error: 'question is required' });
+    return res.status(400).json({ error: 'message is required' });
   }
   if (!GROQ_API_KEY) {
     return res.status(503).json({ error: 'Groq API key not configured' });
