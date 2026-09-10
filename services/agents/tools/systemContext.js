@@ -37,9 +37,10 @@ import { summarizeEndpoints, totalsForWindow } from '../../metrics/apiMetrics.js
 // not a live discovery. Update alongside services/groq.js when Groq rotates
 // their offering.
 const GROQ_MODEL_CATALOG = [
-  { id: 'llama-3.1-8b-instant',     tier: 'fast',     provider: 'Groq' },
-  { id: 'llama-3.3-70b-versatile',  tier: 'balanced', provider: 'Groq' },
+  { id: 'openai/gpt-oss-20b',       tier: 'fast',      provider: 'Groq' },
   { id: 'openai/gpt-oss-120b',      tier: 'reasoning', provider: 'Groq' },
+  { id: 'qwen/qwen3.8-27b',         tier: 'balanced',  provider: 'Groq' },
+  { id: 'groq/compound',            tier: 'agentic',   provider: 'Groq' },
 ];
 
 const __filename = fileURLToPath(import.meta.url);

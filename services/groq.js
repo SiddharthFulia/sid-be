@@ -2,10 +2,19 @@ import { GROQ_API_KEY } from '../helpers/constants.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
+// Legacy aliases → current Groq catalog. Groq deprecated every Llama-3.x
+// text model in Sep 2026 (only meta-llama vision variants survived). Map
+// old FE strings onto the OpenAI GPT-OSS family so nothing on the site
+// dies with a 400 "model does not exist".
 const MODELS = {
-  'llama-3.1-8b': 'llama-3.1-8b-instant',
-  'llama-3.3-70b': 'llama-3.3-70b-versatile',
-  'gpt-oss-120b': 'openai/gpt-oss-120b',
+  'llama-3.1-8b':          'openai/gpt-oss-20b',
+  'llama-3.1-8b-instant':  'openai/gpt-oss-20b',
+  'llama-3.3-70b':         'openai/gpt-oss-120b',
+  'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
+  'gpt-oss-20b':           'openai/gpt-oss-20b',
+  'gpt-oss-120b':          'openai/gpt-oss-120b',
+  'qwen':                  'qwen/qwen3.8-27b',
+  'compound':              'groq/compound',
 };
 
 // Gemini-alias → Groq text model mapping. Lets `/api/gemini` accept the
@@ -13,12 +22,12 @@ const MODELS = {
 // `gemini-pro`, `gemini-flash-lite`) and quietly route them through Groq.
 // Tiered by latency/quality so 'flash' stays fast and 'pro' gets quality.
 const GEMINI_ALIAS_TO_GROQ = {
-  'gemini-flash':       'llama-3.1-8b-instant',
-  'gemini-flash-lite':  'llama-3.1-8b-instant',
-  'gemini-pro':         'llama-3.3-70b-versatile',
-  'gemini-2.5-flash':   'llama-3.1-8b-instant',
-  'gemini-2.5-pro':     'llama-3.3-70b-versatile',
-  'gemini-2.5-flash-lite': 'llama-3.1-8b-instant',
+  'gemini-flash':       'openai/gpt-oss-20b',
+  'gemini-flash-lite':  'openai/gpt-oss-20b',
+  'gemini-pro':         'openai/gpt-oss-120b',
+  'gemini-2.5-flash':   'openai/gpt-oss-20b',
+  'gemini-2.5-pro':     'openai/gpt-oss-120b',
+  'gemini-2.5-flash-lite': 'openai/gpt-oss-20b',
 };
 
 // Groq's current multimodal (vision-capable) model. Llama-4 Scout replaced
@@ -27,7 +36,7 @@ const GEMINI_ALIAS_TO_GROQ = {
 export const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL
   || 'meta-llama/llama-4-scout-17b-16e-instruct';
 
-export async function chatGroq(message, history = [], model = 'llama-3.1-8b', options = {}) {
+export async function chatGroq(message, history = [], model = 'openai/gpt-oss-20b', options = {}) {
   if (!GROQ_API_KEY) throw new Error('Groq API key not configured');
 
   const modelId = MODELS[model] || model;
@@ -84,7 +93,7 @@ export async function chatGroq(message, history = [], model = 'llama-3.1-8b', op
 export async function chatGroqAsGemini(message, history = [], model = 'gemini-flash', options = {}) {
   if (!GROQ_API_KEY) throw new Error('Groq API key not configured');
 
-  const groqModelId = GEMINI_ALIAS_TO_GROQ[model] || MODELS[model] || 'llama-3.1-8b-instant';
+  const groqModelId = GEMINI_ALIAS_TO_GROQ[model] || MODELS[model] || 'openai/gpt-oss-20b';
 
   const messages = [
     { role: 'system', content: options.system || 'You are a helpful AI assistant. Be concise and direct.' },

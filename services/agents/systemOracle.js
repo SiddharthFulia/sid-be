@@ -27,10 +27,10 @@ const DEFAULT_MODEL = 'openai/gpt-oss-120b';
 // default. Keeps the FE from accidentally driving up cost by asking for a
 // model we don't want to expose.
 const ALLOWED_MODELS = new Set([
-  'llama-3.1-8b-instant',
-  'llama-3.3-70b-versatile',   // legacy — Groq deprecated, kept for BC
-  'openai/gpt-oss-20b',
   'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b',
+  'qwen/qwen3.8-27b',
+  'groq/compound',   // agentic — includes web search
 ]);
 
 export const spec = {

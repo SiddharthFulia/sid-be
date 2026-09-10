@@ -9,10 +9,10 @@ import { chatGroq } from '../../groq.js';
 import logger from '../../../helpers/logger.js';
 
 const MODEL_DEFAULTS = {
-  'llama-3.1-8b-instant':   { temperature: 0.2, maxTokens: 2000 },
-  'llama-3.3-70b':          { temperature: 0.1, maxTokens: 4000 },
-  'llama-3.3-70b-versatile':{ temperature: 0.1, maxTokens: 4000 },
+  'openai/gpt-oss-20b':     { temperature: 0.2, maxTokens: 2000 },
   'openai/gpt-oss-120b':    { temperature: 0.1, maxTokens: 4000 },
+  'qwen/qwen3.8-27b':       { temperature: 0.1, maxTokens: 4000 },
+  'groq/compound':          { temperature: 0.1, maxTokens: 4000 },
 };
 
 /**
@@ -20,13 +20,13 @@ const MODEL_DEFAULTS = {
  * @param {string} prompt   the user turn
  * @param {object} opts
  * @param {string} opts.system   system prompt
- * @param {string} [opts.model='llama-3.3-70b']
+ * @param {string} [opts.model='openai/gpt-oss-120b']
  * @param {number} [opts.temperature]
  * @param {number} [opts.maxTokens]
  * @returns {Promise<{ parsed: object, raw: string, model: string }>}
  */
-export async function askGroqJson(prompt, { system, model = 'llama-3.3-70b', temperature, maxTokens } = {}) {
-  const defaults = MODEL_DEFAULTS[model] || MODEL_DEFAULTS['llama-3.3-70b'];
+export async function askGroqJson(prompt, { system, model = 'openai/gpt-oss-120b', temperature, maxTokens } = {}) {
+  const defaults = MODEL_DEFAULTS[model] || MODEL_DEFAULTS['openai/gpt-oss-120b'];
   const opts = {
     system,
     temperature: temperature ?? defaults.temperature,

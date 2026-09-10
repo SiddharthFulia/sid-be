@@ -260,13 +260,13 @@ export async function askGroqForSql(question, { focusTable = null } = {}) {
   const tables = getSchema();
   const system = buildGroqSystemPrompt(tables, focusTable);
 
-  // chatGroq exists in services/groq.js. We pass model='llama-3.3-70b'
-  // (the alias is mapped to llama-3.3-70b-versatile inside chatGroq).
-  // Lower temperature for SQL accuracy; higher max_tokens for JSON room.
+  // chatGroq exists in services/groq.js. gpt-oss-120b for SQL generation —
+  // Groq deprecated the Llama 3.x family in Sep 2026; gpt-oss-120b is the
+  // strongest survivor and its `reasoning` mode is well-suited to SQL.
   const out = await chatGroq(
     String(question || '').trim(),
     [],
-    'llama-3.3-70b',
+    'openai/gpt-oss-120b',
     { system, maxTokens: 4000, temperature: 0.1 },
   );
   const text = String(out?.reply || '').trim();
@@ -293,7 +293,7 @@ export async function askGroqForSql(question, { focusTable = null } = {}) {
     sql:         String(parsed.sql || '').trim(),
     explanation: String(parsed.explanation || '').trim(),
     chart:       sanitizeChartSpec(parsed.chart),
-    model:       out?.model || 'llama-3.3-70b-versatile',
+    model:       out?.model || 'openai/gpt-oss-120b',
   };
 }
 
