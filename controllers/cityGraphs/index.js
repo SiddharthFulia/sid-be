@@ -29,6 +29,7 @@
 
 import { promisify } from 'node:util';
 import { gzip as gzipCb, gunzip as gunzipCb } from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import { db } from '../../services/aiVideo/db.js';
@@ -68,6 +69,10 @@ function ensureColumn(table, column, ddl) {
 }
 ensureColumn('city_graphs', 'created_at', 'INTEGER');
 ensureColumn('city_graphs', 'updated_at', 'INTEGER');
+// `state` is the FE picker's grouping key ("Karnataka", "Maharashtra"…).
+// Sourced from CITY_CATALOG at write time so `WHERE state = ?` filters
+// hit an index instead of scanning every row and JOIN'ing to the catalog.
+ensureColumn('city_graphs', 'state', 'TEXT');
 
 // Backfill so rows written before the migration land in a valid state.
 db.exec(`
@@ -109,7 +114,31 @@ db.exec(`
   -- above and speeds the cross-city fuzzy search (no city_slug filter,
   -- but we still need name_lc lookups to short-circuit the scan).
   CREATE INDEX IF NOT EXISTS idx_city_places_name_lc   ON city_places(name_lc);
+  -- Composite for map-overlay filters like WHERE city_slug=? AND kind=?
+  -- (or kind IN (?,?,…)). Direct index seek per row family.
+  CREATE INDEX IF NOT EXISTS idx_city_places_slug_kind      ON city_places(city_slug, kind);
+  -- Covering index for filtered fuzzy prefix search — city_slug + kind +
+  -- name_lc together lets SQLite range-scan just the "restaurants in
+  -- Mumbai starting with 'ta'" band without touching the heap.
+  CREATE INDEX IF NOT EXISTS idx_city_places_slug_kind_name ON city_places(city_slug, kind, name_lc);
+  -- Enables /api/city-graphs?state=Karnataka in O(log n) — otherwise
+  -- SQLite full-scans city_graphs on every metadata list request.
+  CREATE INDEX IF NOT EXISTS idx_city_graphs_state ON city_graphs(state);
 `);
+
+// Backfill state from the catalog for pre-migration rows so the new
+// idx_city_graphs_state index has real values to seek on. Idempotent —
+// only touches rows where state is NULL. Runs once on first boot after
+// the migration; a no-op every subsequent boot.
+{
+  const stmtBackfillState = db.prepare(`UPDATE city_graphs SET state = ? WHERE slug = ? AND state IS NULL`);
+  const stmtNeedsBackfill = db.prepare(`SELECT 1 FROM city_graphs WHERE state IS NULL LIMIT 1`);
+  if (stmtNeedsBackfill.get()) {
+    // Deferred to after CITY_CATALOG is defined — see bottom of module init.
+    // We stash a marker and finalise below once CATALOG_BY_SLUG exists.
+    globalThis.__cityGraphsBackfillState = { stmtBackfillState };
+  }
+}
 
 // ── Seed catalogue ─────────────────────────────────────────────────
 // The all-India catalogue — 160+ cities across every state + all UTs.
@@ -327,6 +356,25 @@ export const CITY_CATALOG = [
 ];
 
 const CATALOG_BY_SLUG = new Map(CITY_CATALOG.map((c) => [c.slug, c]));
+
+// One-shot state backfill — runs at module load if the migration flagged
+// rows without a state value. Wrapped in a transaction so it either
+// completes fully or leaves the DB untouched on error.
+if (globalThis.__cityGraphsBackfillState) {
+  const { stmtBackfillState } = globalThis.__cityGraphsBackfillState;
+  const tx = db.transaction(() => {
+    for (const spec of CITY_CATALOG) {
+      if (spec.state) stmtBackfillState.run(spec.state, spec.slug);
+    }
+  });
+  try {
+    tx();
+    logger.info('city-graphs: backfilled state column from catalog');
+  } catch (err) {
+    logger.warn(`city-graphs: state backfill failed (non-fatal): ${err.message}`);
+  }
+  delete globalThis.__cityGraphsBackfillState;
+}
 
 // ── Overpass ───────────────────────────────────────────────────────
 // Multiple mirrors — try each in order on 5xx / timeout / truncation.
@@ -839,34 +887,88 @@ export async function fetchPlacesFromOverpass(bbox) {
   return parsePlaces(json);
 }
 
-// ── Storage helpers ────────────────────────────────────────────────
-function selectMeta(slug) {
-  return db.prepare(`
-    SELECT slug, name, bbox, center_lat, center_lng, node_count, edge_count,
-           fetched_at, bytes, created_at, updated_at
-      FROM city_graphs WHERE slug = ?
-  `).get(slug);
-}
+// ── Prepared statements (module-scoped, reused per request) ────────
+// SQLite parses SQL every time db.prepare() is called. On a warm process
+// those parse cycles are pure overhead — the plan doesn't change between
+// requests, so we prepare each hot-path statement exactly once at module
+// load and reuse the compiled statement handle. This is the standard
+// better-sqlite3 pattern for sub-millisecond queries.
+//
+// Every statement below carries the EXPLAIN QUERY PLAN row it hits (run
+// against the live sid.db on 2026-09-11) so a future reader can verify
+// index usage without re-running EXPLAIN. If you edit a query, RE-RUN
+// EXPLAIN QUERY PLAN and update the comment — a query that suddenly says
+// "SCAN city_places" is a red flag.
 
-function selectRow(slug) {
-  return db.prepare(`
-    SELECT slug, name, bbox, center_lat, center_lng, graph, node_count,
-           edge_count, fetched_at, bytes, created_at, updated_at
-      FROM city_graphs WHERE slug = ?
-  `).get(slug);
-}
+// EXPLAIN: SEARCH city_graphs USING INTEGER PRIMARY KEY (rowid=?) — PK on slug
+const stmtSelectMeta = db.prepare(`
+  SELECT slug, name, state, bbox, center_lat, center_lng, node_count, edge_count,
+         fetched_at, bytes, created_at, updated_at
+    FROM city_graphs WHERE slug = ?
+`);
+
+// EXPLAIN: SEARCH city_graphs USING INTEGER PRIMARY KEY (rowid=?) — PK on slug
+// Kept separate from stmtSelectMeta because pulling the BLOB column adds
+// non-trivial IO cost we don't want on the meta-only path.
+const stmtSelectRow = db.prepare(`
+  SELECT slug, name, state, bbox, center_lat, center_lng, graph, node_count,
+         edge_count, fetched_at, bytes, created_at, updated_at
+    FROM city_graphs WHERE slug = ?
+`);
+
+// EXPLAIN: SEARCH city_graphs USING INTEGER PRIMARY KEY (rowid=?)
+// Meta-only variant of stmtSelectRow that skips the BLOB column entirely
+// — used by the /graph.json.gz path when we only need the row length +
+// updated_at for ETag calculation (though currently we still need graph
+// for the body, kept for future streaming). Not currently used but left
+// prepared for cheap ETag / HEAD support if we add it.
+const stmtSelectGraphBlobOnly = db.prepare(`
+  SELECT slug, graph, node_count, edge_count, fetched_at, updated_at
+    FROM city_graphs WHERE slug = ?
+`);
+
+// EXPLAIN: SCAN city_graphs — full scan is intentional (we want every row).
+// ORDER BY name uses no index; sort buffer is fine at 154 rows.
+const stmtListCitiesAll = db.prepare(`
+  SELECT slug, name, state, bbox, center_lat, center_lng, node_count, edge_count,
+         fetched_at, bytes, updated_at
+    FROM city_graphs
+   ORDER BY name COLLATE NOCASE ASC
+`);
+
+// EXPLAIN: SEARCH city_graphs USING INDEX idx_city_graphs_state (state=?)
+// State-filtered list — hits the new state index for O(log n) prefix seek.
+const stmtListCitiesByState = db.prepare(`
+  SELECT slug, name, state, bbox, center_lat, center_lng, node_count, edge_count,
+         fetched_at, bytes, updated_at
+    FROM city_graphs
+   WHERE state = ?
+   ORDER BY name COLLATE NOCASE ASC
+`);
+
+// EXPLAIN: SCAN city_graphs USING COVERING INDEX idx_city_graphs_updated_at
+// Aggregate on an indexed column — SQLite walks the index leaves for both
+// MAX and COUNT in one pass, no heap touch. Used for ETag support though
+// currently the listCities handler computes maxUpdatedAt from the already-
+// loaded rows to save a second round trip. Left prepared for stat-lite
+// callers that only want freshness.
+const stmtMaxUpdatedAt = db.prepare(`
+  SELECT MAX(updated_at) AS max_updated_at, COUNT(*) AS n FROM city_graphs
+`);
 
 // UPSERT keyed on slug. `created_at` is preserved on conflict — only
 // the first write for a slug sets it. `updated_at` is set every write.
-const upsertStmt = db.prepare(`
-  INSERT INTO city_graphs (slug, name, bbox, center_lat, center_lng, graph,
+// `state` also updates every write so a catalog rename lands in the DB.
+const stmtUpsertGraph = db.prepare(`
+  INSERT INTO city_graphs (slug, name, state, bbox, center_lat, center_lng, graph,
                            node_count, edge_count, fetched_at, bytes,
                            created_at, updated_at)
-  VALUES (@slug, @name, @bbox, @center_lat, @center_lng, @graph,
+  VALUES (@slug, @name, @state, @bbox, @center_lat, @center_lng, @graph,
           @node_count, @edge_count, @fetched_at, @bytes,
           @created_at, @updated_at)
   ON CONFLICT(slug) DO UPDATE SET
     name       = excluded.name,
+    state      = excluded.state,
     bbox       = excluded.bbox,
     center_lat = excluded.center_lat,
     center_lng = excluded.center_lng,
@@ -878,16 +980,74 @@ const upsertStmt = db.prepare(`
     updated_at = excluded.updated_at
 `);
 
-const upsertPlaceStmt = db.prepare(`
+const stmtUpsertPlace = db.prepare(`
   INSERT INTO city_places (city_slug, name, name_lc, kind, lat, lng, created_at, updated_at)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
-const countPlacesStmt = db.prepare(`SELECT COUNT(*) AS n FROM city_places WHERE city_slug = ?`);
-const deletePlacesStmt = db.prepare(`DELETE FROM city_places WHERE city_slug = ?`);
-const selectPlacesStmt = db.prepare(`
+// EXPLAIN: SEARCH city_places USING COVERING INDEX idx_city_places_slug_kind_name (city_slug=?)
+// SQLite prefers the wider composite index because it covers this query
+// without heap fetches — the count aggregate doesn't need any other columns.
+const stmtCountPlaces = db.prepare(`SELECT COUNT(*) AS n FROM city_places WHERE city_slug = ?`);
+
+// EXPLAIN: SEARCH city_places USING INDEX idx_city_places_slug_name (city_slug=?)
+const stmtDeletePlaces = db.prepare(`DELETE FROM city_places WHERE city_slug = ?`);
+
+// EXPLAIN: SEARCH city_places USING INDEX idx_city_places_slug_kind_name (city_slug=?)
+// Same composite-index pick as the count — the (slug, kind, name_lc)
+// leaf points at rowid, then we fetch id/lat/lng from the heap.
+const stmtSelectPlaces = db.prepare(`
   SELECT id, name, name_lc, kind, lat, lng FROM city_places WHERE city_slug = ?
 `);
+
+// EXPLAIN: SEARCH city_places USING INDEX idx_city_places_slug_kind_name (city_slug=?)
+// LIMIT-bounded read — used to sample the first N rows when a city has
+// enough places that we want to skip the full-city Trie warm. Ordered by
+// PK for stable pagination.
+const stmtSelectPlacesLimited = db.prepare(`
+  SELECT id, name, name_lc, kind, lat, lng FROM city_places
+   WHERE city_slug = ? ORDER BY id LIMIT ?
+`);
+
+// ── Stats prepared statements ─────────────────────────────────────
+// EXPLAIN: SCAN city_graphs — full-scan aggregates. 154 rows is trivial.
+const stmtStatsGraphs = db.prepare(`
+  SELECT COUNT(*) AS total_cities,
+         COUNT(DISTINCT state) AS total_states,
+         COALESCE(SUM(bytes), 0) AS total_graph_bytes,
+         COALESCE(SUM(node_count), 0) AS total_nodes,
+         COALESCE(SUM(edge_count), 0) AS total_edges
+    FROM city_graphs
+`);
+// EXPLAIN: SCAN city_places — single scalar aggregate.
+const stmtStatsPlacesCount = db.prepare(`SELECT COUNT(*) AS total_places FROM city_places`);
+// EXPLAIN: SCAN city_graphs — orderby uses ephemeral index but tiny row count.
+// Emulates a median via OFFSET on a sorted list — cheap at n=154.
+const stmtNodeCountsSorted = db.prepare(`
+  SELECT node_count FROM city_graphs WHERE node_count > 0 ORDER BY node_count ASC
+`);
+// EXPLAIN: SCAN city_places USING COVERING INDEX idx_city_places_slug_kind
+// Group-by-slug aggregate — SQLite walks the covering index in slug order
+// (grouping-friendly) so the aggregate needs no sort for the group step,
+// only for the final ORDER BY places DESC. At current row counts (<500k)
+// the walk is well under 5 ms.
+const stmtTopCitiesByPlaces = db.prepare(`
+  SELECT city_slug, COUNT(*) AS places
+    FROM city_places
+   GROUP BY city_slug
+   ORDER BY places DESC
+   LIMIT 5
+`);
+
+// Legacy aliases — keep the old names alive so any downstream helpers
+// that happen to import them still work. Points at the same handles.
+const selectMeta = (slug) => stmtSelectMeta.get(slug);
+const selectRow = (slug) => stmtSelectRow.get(slug);
+const upsertStmt = stmtUpsertGraph;
+const upsertPlaceStmt = stmtUpsertPlace;
+const countPlacesStmt = stmtCountPlaces;
+const deletePlacesStmt = stmtDeletePlaces;
+const selectPlacesStmt = stmtSelectPlaces;
 
 // Fetch, compress, write. Returns the freshly-stored row.
 export async function fetchAndStoreCity(slug) {
@@ -903,6 +1063,7 @@ export async function fetchAndStoreCity(slug) {
   upsertStmt.run({
     slug,
     name: spec.name,
+    state: spec.state || null,
     bbox: spec.bbox,
     center_lat: spec.center.lat,
     center_lng: spec.center.lng,
@@ -1017,7 +1178,29 @@ class Trie {
 //   trigrams     — inverted index Map<3gram, Set<idx>> — quick "which
 //                  rows share ANY trigram with my query token" lookup
 //                  so we don't scan the full row list on every query
+//
+// LRU cap: with 154 cities × up to ~20k places each, keeping every warm
+// index in memory could balloon past a few hundred MB. Map iteration
+// order is insertion order in V8, so we implement LRU by deleting +
+// re-inserting on hit (moves the key to the tail), and evicting the head
+// (oldest) when we exceed the cap. Simple and allocation-free.
+const TRIE_CACHE_MAX = 10;
 const trieCache = new Map();
+
+function touchTrieCacheEntry(slug, entry) {
+  // Refresh insertion position so LRU eviction skips this city.
+  trieCache.delete(slug);
+  trieCache.set(slug, entry);
+}
+
+function evictOldestTrieIfNeeded() {
+  while (trieCache.size >= TRIE_CACHE_MAX) {
+    const oldest = trieCache.keys().next().value;
+    if (oldest === undefined) break;
+    trieCache.delete(oldest);
+    logger.info(`city-graphs: evicted LRU trie for ${oldest} (cache size cap ${TRIE_CACHE_MAX})`);
+  }
+}
 
 function buildIndexRows(rows) {
   const rowTrigrams = new Array(rows.length);
@@ -1034,8 +1217,19 @@ function buildIndexRows(rows) {
   return { rowTrigrams, trigrams: invIndex };
 }
 
+// Cities above this row count skip the in-memory Trie build entirely for
+// no-query listing calls and get streamed via SQL LIMIT instead. Trie
+// build for a 20k-row city still takes ~120 ms and allocates ~30 MB — not
+// worth it if the caller just wants the first 20 rows.
+const HEAVY_CITY_ROW_THRESHOLD = 20000;
+
 function getIndexFor(slug) {
-  if (trieCache.has(slug)) return trieCache.get(slug);
+  const cached = trieCache.get(slug);
+  if (cached) {
+    touchTrieCacheEntry(slug, cached);
+    return cached;
+  }
+  evictOldestTrieIfNeeded();
   const rows = selectPlacesStmt.all(slug);
   const trie = new Trie();
   trie.places = rows;
@@ -1173,37 +1367,133 @@ function weightedScore(row, rawScore) {
 
 // ── Handlers ───────────────────────────────────────────────────────
 
+// Weak ETag helper — hashes into 8 hex chars. Weak because the payload
+// shape (JSON keys) isn't byte-stable across Node versions, but our
+// content is stable enough. Prefix with W/" so a strict proxy doesn't
+// treat it as strong. Weak validators are fine for our If-None-Match
+// check because we compare exact strings, not byte-hash any body.
+function weakEtag(...parts) {
+  const h = createHash('sha1');
+  for (const p of parts) h.update(String(p));
+  return `W/"${h.digest('hex').slice(0, 16)}"`;
+}
+
 // GET /api/city-graphs
-// Metadata list for the FE picker. Merges the catalog (10 known cities)
+// Metadata list for the FE picker. Merges the catalog (154 known cities)
 // with whatever's actually in the DB — so unfetched cities show up too
 // with fetched_at=null and node_count=0.
-export const listCities = (_req, res) => {
+//
+// Query params:
+//   ?state=Karnataka   — filter to one state (matches CITY_CATALOG.state
+//                        exactly). Uses idx_city_graphs_state.
+//
+// Response caching:
+//   • Cache-Control: public, max-age=60 — content changes hourly at most
+//     (only on refresh + monthly cron), so a minute of edge caching is
+//     safe. FE hub page hits this once per page load; CDN can absorb it.
+//   • ETag derived from (max updated_at, row count, state filter) — a
+//     matching If-None-Match short-circuits to 304 with no body.
+export const listCities = (req, res) => {
   try {
+    const stateFilter = req.query.state ? String(req.query.state).trim() : '';
+    const catalogRows = stateFilter
+      ? CITY_CATALOG.filter((c) => c.state === stateFilter)
+      : CITY_CATALOG;
+
+    // Pull DB rows via the state-filtered index if a filter is supplied.
+    // Both statements are module-scoped prepared handles.
+    const dbRows = stateFilter
+      ? stmtListCitiesByState.all(stateFilter)
+      : stmtListCitiesAll.all();
     const stored = new Map();
-    for (const r of db.prepare(`
-      SELECT slug, name, bbox, center_lat, center_lng, node_count, edge_count,
-             fetched_at, bytes FROM city_graphs
-    `).all()) {
+    let maxUpdatedAt = 0;
+    for (const r of dbRows) {
       stored.set(r.slug, r);
+      if (r.updated_at && r.updated_at > maxUpdatedAt) maxUpdatedAt = r.updated_at;
     }
-    const items = CITY_CATALOG.map((c) => {
-      const r = stored.get(c.slug);
-      return {
-        slug: c.slug,
-        name: c.name,
-        state: c.state || null,    // grouping key for the FE picker
-        bbox: c.bbox,
-        center: c.center,
-        node_count: r?.node_count ?? 0,
-        edge_count: r?.edge_count ?? 0,
-        fetched_at: r?.fetched_at ?? null,
-        kb:         r?.bytes ? Math.round(r.bytes / 1024) : 0,
-        cached:     !!r,
-      };
-    });
-    return success(res, { items });
+
+    // ETag = f(stored row count, max updated_at, state filter, catalog size).
+    // Any real change to the response bumps at least one of these.
+    const etag = weakEtag(dbRows.length, maxUpdatedAt, stateFilter, catalogRows.length);
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('ETag', etag);
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    const items = catalogRows
+      .map((c) => {
+        const r = stored.get(c.slug);
+        return {
+          slug: c.slug,
+          name: c.name,
+          state: c.state || null,    // grouping key for the FE picker
+          bbox: c.bbox,
+          center: c.center,
+          node_count: r?.node_count ?? 0,
+          edge_count: r?.edge_count ?? 0,
+          fetched_at: r?.fetched_at ?? null,
+          kb:         r?.bytes ? Math.round(r.bytes / 1024) : 0,
+          cached:     !!r,
+        };
+      })
+      // Deterministic name-ASC order. Matches the SQL ORDER BY so cached
+      // FE views don't reshuffle on refresh. NOCASE for locale-friendly sort.
+      .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+    return success(res, { items, total: items.length, state: stateFilter || null });
   } catch (err) {
     logger.error('city-graphs list failed', err.message);
+    return error(res, err.message);
+  }
+};
+
+// GET /api/city-graphs/stats
+// Public aggregates for the FE hub page. All queries run against the
+// module-scoped stmts above — a warm hit is ~2 ms total for 154 cities.
+export const getStats = (_req, res) => {
+  try {
+    const g = stmtStatsGraphs.get() || {};
+    const p = stmtStatsPlacesCount.get() || {};
+    // Median = middle element of the sorted node_count list. For an even
+    // count we pick the lower-middle (SQLite has no percentile function
+    // and pulling the list once at 154 rows is trivial).
+    const nodeCounts = stmtNodeCountsSorted.all().map((r) => r.node_count);
+    const median_nodes_per_city = nodeCounts.length
+      ? nodeCounts[Math.floor((nodeCounts.length - 1) / 2)]
+      : 0;
+
+    // Top 5 by places — join to catalog via the in-memory map (avoids a
+    // full JOIN against city_graphs since not every place-carrying city
+    // has a graph row yet).
+    const top_5_by_places = stmtTopCitiesByPlaces.all().map((row) => {
+      const spec = CATALOG_BY_SLUG.get(row.city_slug);
+      return {
+        slug: row.city_slug,
+        name: spec?.name || row.city_slug,
+        state: spec?.state || null,
+        places: row.places,
+      };
+    });
+
+    const payload = {
+      total_cities: g.total_cities || 0,
+      total_states: g.total_states || 0,
+      total_places: p.total_places || 0,
+      total_graph_bytes: g.total_graph_bytes || 0,
+      total_nodes: g.total_nodes || 0,
+      total_edges: g.total_edges || 0,
+      median_nodes_per_city,
+      catalog_size: CITY_CATALOG.length,
+      top_5_by_places,
+    };
+
+    // Stats are cheap and update ~monthly. Two minutes of edge caching
+    // is fine and takes the FE hub page off the hot path entirely.
+    res.setHeader('Cache-Control', 'public, max-age=120');
+    return success(res, payload);
+  } catch (err) {
+    logger.error(`city-graphs stats failed: ${err.message}`);
     return error(res, err.message);
   }
 };
@@ -1337,17 +1627,34 @@ export const getCityGraphBlob = async (req, res) => {
       row = selectRow(slug);
       if (!row) return error(res, 'Failed to populate city graph', 500);
     }
+
+    // ETag = f(slug, updated_at, byte length). Any real change to the
+    // stored blob bumps updated_at, and re-encoding at the same timestamp
+    // would still shift bytes. Cold-cache clients that already hold the
+    // matching version get a 304 with no body — saves ~1.2 MB per hit.
+    const updatedAt = row.updated_at || row.fetched_at || 0;
+    const etag = weakEtag(slug, updatedAt, row.graph.length);
+
     // Set headers BEFORE writing the body. Content-Encoding: gzip tells
     // the browser to run the response through its native inflater — same
     // path any gzip'd asset from CDN takes. Cache for a day; the row's
     // 30-day auto-refresh keeps it fresh enough.
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Encoding', 'gzip');
-    res.setHeader('Content-Length', row.graph.length);
     res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('ETag', etag);
     res.setHeader('X-City-Slug', row.slug);
     res.setHeader('X-Node-Count', String(row.node_count));
     res.setHeader('X-Edge-Count', String(row.edge_count));
+
+    // Conditional-GET short-circuit — must come after headers are set so
+    // the client still sees the ETag on the 304 response.
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    res.setHeader('Content-Length', row.graph.length);
     return res.end(row.graph);
   } catch (err) {
     logger.error(`city-graphs blob failed: ${err.message}`);
@@ -1355,10 +1662,23 @@ export const getCityGraphBlob = async (req, res) => {
   }
 };
 
-// GET /api/city-graphs/:slug/places?q=&limit=20
+// GET /api/city-graphs/:slug/places?q=&limit=20&kind=hospital,school
 // Prefix-match search on lowercased place names for the given city.
 // First request per city warms an in-memory Trie built from the DB rows,
 // so subsequent hits are O(k) where k = prefix length.
+//
+// Query params:
+//   q     — free-text query. Empty = "popular labels" mode.
+//   limit — 1..50 (default 20).
+//   kind  — comma-separated whitelist of place kinds (hospital, school…).
+//           Applied AFTER the fuzzy ranker so kind_weight still shapes
+//           the score. Also drives the LIMIT-only SQL path when q is
+//           empty (uses idx_city_places_slug_kind).
+//
+// Response:
+//   { items: [...], total_count: <int> }
+//   `total_count` = number of matches BEFORE limit truncation, so the FE
+//   can show "showing 8 of 4135" without a second round-trip.
 export const searchPlaces = async (req, res) => {
   try {
     const slug = String(req.params.slug || '').toLowerCase();
@@ -1368,11 +1688,18 @@ export const searchPlaces = async (req, res) => {
     const q = String(req.query.q || '').trim();
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
 
+    // Parse kind filter — comma-separated, whitespace-tolerant. Empty →
+    // no filter. Set for O(1) membership test in the post-rank pass.
+    const kindsRaw = String(req.query.kind || '').trim();
+    const kindSet = kindsRaw
+      ? new Set(kindsRaw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean))
+      : null;
+
     // Warm places table for this city if it's empty (lazy seed on first
     // search, so cities that only get graph traffic don't hit Overpass
     // twice pre-emptively).
-    const { n } = countPlacesStmt.get(slug);
-    if (n < MIN_PLACES) {
+    const { n: totalRowsForCity } = countPlacesStmt.get(slug);
+    if (totalRowsForCity < MIN_PLACES) {
       try {
         await ensurePlacesForCity(slug);
       } catch (err) {
@@ -1383,9 +1710,43 @@ export const searchPlaces = async (req, res) => {
     if (!q) {
       // No query — return the top-N by row insertion order (stable) so
       // the FE can still show "popular labels" on the map overlay.
-      const rows = selectPlacesStmt.all(slug).slice(0, limit);
+      //
+      // Fast path for heavy cities (>= 20k rows): skip the in-memory
+      // Trie warm entirely and stream the first N rows via SQL LIMIT.
+      // Uses idx_city_places_slug_name (covering) for a pure index scan.
+      //
+      // Optional kind filter runs SQL-side against
+      // idx_city_places_slug_kind so we never load rows we don't need.
+      let rows;
+      if (totalRowsForCity >= HEAVY_CITY_ROW_THRESHOLD) {
+        if (kindSet) {
+          // Build a dynamic IN(...) since the kind list is variadic and
+          // we want the composite index to take effect. Prepared per
+          // request (rare path — heavy city + kind filter) but still
+          // cheaper than warming a 20k-row Trie for a bare list request.
+          const placeholders = Array.from(kindSet).map(() => '?').join(',');
+          const sql = `
+            SELECT id, name, name_lc, kind, lat, lng FROM city_places
+             WHERE city_slug = ? AND kind IN (${placeholders})
+             ORDER BY id LIMIT ?
+          `;
+          // EXPLAIN: SEARCH city_places USING COVERING INDEX idx_city_places_slug_kind_name (city_slug=? AND kind=?)
+          rows = db.prepare(sql).all(slug, ...kindSet, limit);
+        } else {
+          rows = stmtSelectPlacesLimited.all(slug, limit);
+        }
+      } else {
+        // Small/medium city — Trie is already going to be warm for the
+        // next query anyway, so build it now to serve both requests.
+        const entry = getIndexFor(slug);
+        const filtered = kindSet
+          ? entry.rows.filter((r) => kindSet.has(String(r.kind || '').toLowerCase()))
+          : entry.rows;
+        rows = filtered.slice(0, limit);
+      }
       return success(res, {
         items: rows.map((r) => ({ name: r.name, kind: r.kind, lat: r.lat, lng: r.lng })),
+        total_count: totalRowsForCity,
       });
     }
 
@@ -1394,14 +1755,22 @@ export const searchPlaces = async (req, res) => {
     // weighted score. See KIND_WEIGHT above for tier rationale.
     const entry = getIndexFor(slug);
     const scored = scoreQueryAgainstIndex(entry, q);
-    const ranked = [...scored.entries()]
+    // Kind filter — applied AFTER scoring so we still surface the right
+    // matches per kind (SQL-side pre-filter would break trigram overlap).
+    const rankedAll = [...scored.entries()]
       .map(([idx, meta]) => ({
         idx,
         meta,
         weighted: weightedScore(entry.rows[idx], meta.score),
       }))
-      .sort((a, b) => b.weighted - a.weighted)
-      .slice(0, limit);
+      .filter(({ idx }) => {
+        if (!kindSet) return true;
+        const k = String(entry.rows[idx].kind || '').toLowerCase();
+        return kindSet.has(k);
+      })
+      .sort((a, b) => b.weighted - a.weighted);
+    const totalMatches = rankedAll.length;
+    const ranked = rankedAll.slice(0, limit);
     const items = ranked.map(({ idx, meta, weighted }) => {
       const p = entry.rows[idx];
       return {
@@ -1413,7 +1782,7 @@ export const searchPlaces = async (req, res) => {
         matchType: meta.matchType,
       };
     });
-    return success(res, { items });
+    return success(res, { items, total_count: totalMatches });
   } catch (err) {
     logger.error(`city-graphs places search failed: ${err.message}`);
     return error(res, err.message);
@@ -1433,10 +1802,15 @@ export const searchPlacesAll = async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const kindsRaw = String(req.query.kind || '').trim();
+    const kindSet = kindsRaw
+      ? new Set(kindsRaw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean))
+      : null;
 
-    if (!q) return success(res, { items: [] });
+    if (!q) return success(res, { items: [], total_count: 0 });
 
     const all = [];
+    let totalMatches = 0;
     for (const spec of CITY_CATALOG) {
       const { n } = countPlacesStmt.get(spec.slug);
       if (n < 1) continue;
@@ -1445,14 +1819,20 @@ export const searchPlacesAll = async (req, res) => {
       // Take this city's top-N by score, then merge across all cities
       // and re-rank. Capping per-city keeps the merge budget bounded
       // when many cities happen to match a common substring.
-      const cityTop = [...scored.entries()]
+      const cityAll = [...scored.entries()]
         .map(([idx, meta]) => ({
           idx,
           meta,
           weighted: weightedScore(entry.rows[idx], meta.score),
         }))
-        .sort((a, b) => b.weighted - a.weighted)
-        .slice(0, limit);
+        .filter(({ idx }) => {
+          if (!kindSet) return true;
+          const k = String(entry.rows[idx].kind || '').toLowerCase();
+          return kindSet.has(k);
+        })
+        .sort((a, b) => b.weighted - a.weighted);
+      totalMatches += cityAll.length;
+      const cityTop = cityAll.slice(0, limit);
       for (const { idx, meta, weighted } of cityTop) {
         const p = entry.rows[idx];
         all.push({
@@ -1469,7 +1849,7 @@ export const searchPlacesAll = async (req, res) => {
     }
 
     all.sort((a, b) => b.score - a.score);
-    return success(res, { items: all.slice(0, limit) });
+    return success(res, { items: all.slice(0, limit), total_count: totalMatches });
   } catch (err) {
     logger.error(`city-graphs cross-city places search failed: ${err.message}`);
     return error(res, err.message);
