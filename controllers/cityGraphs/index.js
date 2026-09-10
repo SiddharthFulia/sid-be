@@ -1856,6 +1856,180 @@ export const searchPlacesAll = async (req, res) => {
   }
 };
 
+// ── Label bundle for the on-canvas overlay ────────────────────────
+// Tiered kind allow-list per zoom bucket. Top-tier always renders,
+// mid-tier turns on at zoom ≥ 3, bottom-tier at zoom ≥ 6. Matches the
+// LOD ladder the FE uses to hide labels at low canvas scales.
+const LABEL_KIND_TOP = new Set([
+  'landmark', 'mall', 'hospital', 'university', 'airport', 'heliport',
+  'train_station', 'stadium', 'museum', 'castle', 'monument',
+  'place_of_worship', 'observatory', 'lighthouse',
+  'suburb', 'neighbourhood', 'quarter', 'town',
+]);
+const LABEL_KIND_MID = new Set([
+  'hotel', 'park', 'office', 'bus_station', 'theatre', 'arts_centre',
+  'marketplace', 'zoo', 'theme_park', 'aquarium', 'gallery',
+  'courthouse', 'townhall', 'embassy', 'ferry_terminal', 'metro',
+  'tram_stop', 'community_centre', 'cinema', 'library', 'school',
+]);
+const LABEL_KIND_BOTTOM = new Set([
+  'restaurant', 'cafe', 'bar', 'bank', 'shop', 'supermarket',
+  'pharmacy', 'building', 'gym', 'spa', 'fuel', 'fast_food',
+  'nightclub', 'post_office', 'clothing', 'electronics',
+]);
+
+// EXPLAIN: SEARCH city_places USING INDEX idx_city_places_lat_lng
+// Bounded read — bbox filter on the (lat, lng) spatial index keeps
+// heavy cities (Mumbai has ~40k rows) from full-scanning per request.
+const stmtSelectPlacesBbox = db.prepare(`
+  SELECT name, kind, lat, lng FROM city_places
+   WHERE city_slug = ?
+     AND lat BETWEEN ? AND ?
+     AND lng BETWEEN ? AND ?
+`);
+
+// Same as above but pre-filtered to top-tier kinds via the composite
+// (city_slug, kind) index. Falls back to a per-row post-filter for
+// mid/bottom tiers so we can keep a single prepared handle.
+function parseBounds(raw) {
+  if (!raw) return null;
+  const parts = String(raw).split(',').map((s) => Number(s.trim()));
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
+  let [lat1, lng1, lat2, lng2] = parts;
+  const south = Math.min(lat1, lat2);
+  const north = Math.max(lat1, lat2);
+  const west  = Math.min(lng1, lng2);
+  const east  = Math.max(lng1, lng2);
+  return { south, north, west, east };
+}
+
+// GET /api/city-graphs/:slug/labels?bounds=lat1,lng1,lat2,lng2&zoom=N&limit=200
+// Returns places within the viewport bounds, tier-filtered by zoom, and
+// ranked by importance × distance-from-center. The FE feeds this to the
+// canvas label layer on every pan/zoom (debounced 200 ms).
+//
+// Query params:
+//   bounds — 'lat1,lng1,lat2,lng2' (any corner ordering — normalised).
+//            Missing = fall back to the whole-city bbox from CITY_CATALOG.
+//   zoom   — canvas scale (not OSM zoom). Drives the tier gate:
+//              zoom < 3         → top tier only
+//              3 ≤ zoom < 6     → top + mid tiers
+//              zoom ≥ 6         → all tiers
+//   limit  — 1..500, default 200. Enforced after the tier + rank step so
+//            the FE always gets the most-important N in the viewport.
+//
+// Response:
+//   { items: [{ name, kind, lat, lng, weight }], total_count }
+//   `weight` is the kind_weight (0..1) — the FE greedy-places labels in
+//   descending order so top-tier POIs anchor the layout.
+//
+// Cache: public, max-age=300 (5 min). The BE also serves an ETag derived
+// from (slug, bounds, zoom, limit) so a stationary viewport short-circuits
+// to 304 even inside the max-age window.
+export const getCityLabels = async (req, res) => {
+  try {
+    const slug = String(req.params.slug || '').toLowerCase();
+    const spec = CATALOG_BY_SLUG.get(slug);
+    if (!spec) return error(res, `Unknown city: ${slug}`, 404);
+
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+    const zoom  = Math.max(0, Number(req.query.zoom) || 1);
+
+    // Bounds — parse or fall back to the city's default bbox. A missing
+    // viewport (e.g. warm-up call before the projection resolves) returns
+    // the whole-city label bundle so the FE has something to draw on the
+    // very first paint.
+    let bounds = parseBounds(req.query.bounds);
+    if (!bounds) {
+      const [s, w, n, e] = String(spec.bbox).split(',').map(Number);
+      bounds = { south: s, west: w, north: n, east: e };
+    }
+
+    // Lazy seed if the city hasn't been populated yet. Cheap for warm
+    // cities (single COUNT), rare for cold ones.
+    const { n: totalRowsForCity } = countPlacesStmt.get(slug);
+    if (totalRowsForCity < MIN_PLACES) {
+      try { await ensurePlacesForCity(slug); }
+      catch (err) {
+        logger.warn(`city-graphs: on-demand places seed failed for ${slug}: ${err.message}`);
+      }
+    }
+
+    // Weak ETag derived from the request signature + the city's place
+    // row-count. If the viewport hasn't moved and the DB hasn't been
+    // re-seeded, we short-circuit to 304 even inside the max-age window.
+    const etag = weakEtag(
+      slug,
+      bounds.south.toFixed(4), bounds.west.toFixed(4),
+      bounds.north.toFixed(4), bounds.east.toFixed(4),
+      Math.round(zoom * 10), limit, totalRowsForCity,
+    );
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.setHeader('ETag', etag);
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    // Bbox read — index seek on (lat, lng). Even in Mumbai (~40k rows)
+    // a metro-tile viewport lands ~2-5k candidate rows.
+    const rows = stmtSelectPlacesBbox.all(
+      slug, bounds.south, bounds.north, bounds.west, bounds.east,
+    );
+
+    // Tier gate. LABEL_KIND_TOP is always in. Mid/bottom flip on with
+    // the canvas scale, matching the FE LOD ladder so the BE and FE
+    // agree on "what belongs on the map right now".
+    const useMid    = zoom >= 3;
+    const useBottom = zoom >= 6;
+
+    // Center of the viewport for the distance-from-center rank tie-break.
+    // Cheap Euclidean over lat/lng is fine at metro-tile scale — the
+    // pole distortion is negligible over ~10 km.
+    const cLat = (bounds.south + bounds.north) / 2;
+    const cLng = (bounds.west  + bounds.east)  / 2;
+
+    // Score = weight − 0.15 * normDist. Weight dominates (top-tier
+    // always beats mid-tier), distance only breaks ties inside a tier.
+    // Normalised so the max distance-from-center is 1.0.
+    const diagLat = Math.max(1e-6, (bounds.north - bounds.south) / 2);
+    const diagLng = Math.max(1e-6, (bounds.east  - bounds.west)  / 2);
+
+    const scored = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const kind = String(r.kind || '').toLowerCase();
+      // Tier gate — skip anything the current zoom shouldn't show.
+      if (LABEL_KIND_TOP.has(kind)) {
+        // always in
+      } else if (LABEL_KIND_MID.has(kind)) {
+        if (!useMid) continue;
+      } else if (LABEL_KIND_BOTTOM.has(kind)) {
+        if (!useBottom) continue;
+      } else {
+        // Unknown / low-tier kind — only surface at max zoom.
+        if (!useBottom) continue;
+      }
+      const w = weightForKind(kind);
+      const dLat = (r.lat - cLat) / diagLat;
+      const dLng = (r.lng - cLng) / diagLng;
+      const dist = Math.min(1, Math.sqrt(dLat * dLat + dLng * dLng));
+      const score = w - 0.15 * dist;
+      scored.push({ name: r.name, kind, lat: r.lat, lng: r.lng, weight: w, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const items = scored.slice(0, limit).map((r) => ({
+      name: r.name, kind: r.kind, lat: r.lat, lng: r.lng, weight: r.weight,
+    }));
+
+    return success(res, { items, total_count: scored.length });
+  } catch (err) {
+    logger.error(`city-graphs labels failed: ${err.message}`);
+    return error(res, err.message);
+  }
+};
+
 // POST /api/city-graphs/:slug/refresh  (vault-gated at the route level)
 // Forces a fresh Overpass hit. Returns the new metadata (no payload) so
 // the caller can flag its client cache as invalidated and re-download
