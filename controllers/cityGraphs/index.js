@@ -783,6 +783,98 @@ export const getCity = async (req, res) => {
   }
 };
 
+// GET /api/city-graphs/:slug/meta
+// Metadata-only sibling of getCity — same shape minus the `graph` payload.
+// Split so the FE can fire two parallel requests (meta + gzipped blob) and
+// the heavy blob rides the browser's own gzip decoder instead of our
+// gunzip-then-re-serialize-to-JSON round-trip. Cuts /api/city-graphs/:slug
+// wire time by roughly 3-5× on a ~6 MB city.
+//
+// Keeps the auto-refresh cadence intact: hitting this endpoint on a >30d
+// row still kicks off a background re-fetch. Callers that want the graph
+// itself should hit /:slug/graph.json.gz in parallel.
+export const getCityMeta = async (req, res) => {
+  try {
+    const slug = String(req.params.slug || '').toLowerCase();
+    if (!CATALOG_BY_SLUG.has(slug)) {
+      return error(res, `Unknown city: ${slug}`, 404);
+    }
+    let meta = selectMeta(slug);
+    if (!meta) {
+      // First-ever request for this city — do the Overpass hit inline
+      // just like getCity() does. ~5-15 s worst case, cached forever after.
+      await fetchAndStoreCity(slug);
+      meta = selectMeta(slug);
+      if (!meta) return error(res, 'Failed to populate city graph', 500);
+    } else {
+      // Auto-refresh > 30 days old rows in the background — same policy
+      // as the combined /:slug endpoint so callers using the split API
+      // still benefit from freshness maintenance.
+      const age = Date.now() - (meta.updated_at || meta.fetched_at);
+      if (age > AUTO_REFRESH_MS && !backgroundRefreshes.has(slug)) {
+        backgroundRefreshes.add(slug);
+        fetchAndStoreCity(slug)
+          .catch((e) => logger.warn(`city-graphs: bg refresh ${slug} failed: ${e.message}`))
+          .finally(() => backgroundRefreshes.delete(slug));
+      }
+    }
+    return success(res, {
+      slug: meta.slug,
+      name: meta.name,
+      bbox: meta.bbox,
+      center: { lat: meta.center_lat, lng: meta.center_lng },
+      node_count: meta.node_count,
+      edge_count: meta.edge_count,
+      fetched_at: meta.fetched_at,
+      kb: Math.round(meta.bytes / 1024),
+      stale: (Date.now() - (meta.updated_at || meta.fetched_at)) > AUTO_REFRESH_MS,
+    });
+  } catch (err) {
+    logger.error(`city-graphs meta failed: ${err.message}`);
+    return error(res, err.message);
+  }
+};
+
+// GET /api/city-graphs/:slug/graph.json.gz
+// Streams the raw gzipped SQLite BLOB straight to the client with
+// Content-Encoding: gzip. Browsers transparently decode it, so the FE
+// just does `fetch(url).then(r => r.json())` — no manual gunzip, no
+// re-serialize on the server. ~6 MB JSON → ~1.2 MB on the wire.
+//
+// The global compression middleware is opted out for this path (see
+// NO_COMPRESSION_PATHS in app.js) so we don't double-encode. If the row
+// is missing we populate it synchronously first — same slow-path shape
+// as the combined /:slug endpoint.
+export const getCityGraphBlob = async (req, res) => {
+  try {
+    const slug = String(req.params.slug || '').toLowerCase();
+    if (!CATALOG_BY_SLUG.has(slug)) {
+      return error(res, `Unknown city: ${slug}`, 404);
+    }
+    let row = selectRow(slug);
+    if (!row) {
+      await fetchAndStoreCity(slug);
+      row = selectRow(slug);
+      if (!row) return error(res, 'Failed to populate city graph', 500);
+    }
+    // Set headers BEFORE writing the body. Content-Encoding: gzip tells
+    // the browser to run the response through its native inflater — same
+    // path any gzip'd asset from CDN takes. Cache for a day; the row's
+    // 30-day auto-refresh keeps it fresh enough.
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Content-Length', row.graph.length);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('X-City-Slug', row.slug);
+    res.setHeader('X-Node-Count', String(row.node_count));
+    res.setHeader('X-Edge-Count', String(row.edge_count));
+    return res.end(row.graph);
+  } catch (err) {
+    logger.error(`city-graphs blob failed: ${err.message}`);
+    return error(res, err.message);
+  }
+};
+
 // GET /api/city-graphs/:slug/places?q=&limit=20
 // Prefix-match search on lowercased place names for the given city.
 // First request per city warms an in-memory Trie built from the DB rows,

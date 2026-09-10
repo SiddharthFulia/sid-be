@@ -8,17 +8,20 @@ import { Router } from 'express';
 import { requireVault } from '../../services/auth/vault.js';
 import {
   listCities, getCity, refreshCity, searchPlaces, searchPlacesAll,
+  getCityMeta, getCityGraphBlob,
 } from '../../controllers/cityGraphs/index.js';
 
 const router = Router();
 
-router.get( '/city-graphs',                  listCities);
-// NOTE — order matters. Fixed segments (/places, /:slug/places) must
-// come BEFORE the bare /:slug route or Express will swallow the
-// "/places" segment into the :slug param.
-router.get( '/city-graphs/places',           searchPlacesAll);
-router.get( '/city-graphs/:slug/places',     searchPlaces);
-router.get( '/city-graphs/:slug',            getCity);
-router.post('/city-graphs/:slug/refresh',    requireVault, refreshCity);
+router.get( '/city-graphs',                       listCities);
+// NOTE — order matters. Fixed segments (/places, /:slug/places, /:slug/meta,
+// /:slug/graph.json.gz) must come BEFORE the bare /:slug route or Express
+// will swallow the trailing segment into the :slug param.
+router.get( '/city-graphs/places',                searchPlacesAll);
+router.get( '/city-graphs/:slug/places',          searchPlaces);
+router.get( '/city-graphs/:slug/meta',            getCityMeta);
+router.get( '/city-graphs/:slug/graph.json.gz',   getCityGraphBlob);
+router.get( '/city-graphs/:slug',                 getCity);
+router.post('/city-graphs/:slug/refresh',         requireVault, refreshCity);
 
 export default router;

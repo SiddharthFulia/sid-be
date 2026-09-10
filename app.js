@@ -19,16 +19,46 @@ app.use(cors(corsOptions));
 
 // Gzip / deflate response compression. Browsers send `Accept-Encoding: gzip,
 // deflate, br` automatically and the middleware picks the best one. Heavy
-// JSON endpoints (job logs with 80 entries, video lists, queue snapshots)
-// shrink ~70-85% on the wire — saves bandwidth on the 1.5s status poll and
-// makes the FE feel snappier. Tiny responses (<1 KB) stay uncompressed
-// (compression overhead would dominate). Set threshold=1024 to skip them.
+// JSON endpoints (city graphs at 6 MB, api-catalog with 321 entries, osint
+// tools manifest, video lists, queue snapshots) shrink ~70-85% on the wire.
+// Tiny responses (<1 KB) stay uncompressed — compression overhead dominates.
+//
+// The `NO_COMPRESSION_PATHS` list opts out endpoint families that either:
+//   • stream (SSE — Content-Encoding: gzip would buffer until close, killing
+//     the whole point of server-sent events)
+//   • are pre-encoded (city-graphs binary blob route — we set the header
+//     manually and stream the raw gzipped SQLite BLOB)
+//   • poll at sub-second cadence where the CPU cost isn't worth the shrink
+//     (job-logs is polled at 500 ms, health/stats are trivially small)
+//   • return base64 payloads that don't compress well (qr-saves png_data_url)
+const NO_COMPRESSION_PATHS = [
+  /^\/api\/events\//,                              // SSE — server-sent events
+  /^\/api\/agents\/[^/]+\/stream$/,                // SSE — agent output stream
+  /^\/api\/city-graphs\/[^/]+\/graph\.json\.gz$/,  // pre-gzipped BLOB (manual header)
+  /^\/api\/qr-saves\/[^/]+$/,                      // base64 png_data_url — poor ratio
+  /^\/api\/job-logs\//,                            // polled at 500 ms — keep raw
+  /^\/api\/[^/]+\/status\//,                       // small poll payloads
+  /^\/api\/health$/,                               // tiny, poll-heavy
+  /^\/api\/stats$/,                                // tiny, poll-heavy
+];
+
 app.use(compression({
-  threshold: 1024,
+  threshold: 1024,   // 1 KB minimum — smaller responses cost more CPU than they save
+  level: 6,          // balanced CPU vs ratio (compression's default)
   filter: (req, res) => {
-    // Don't compress mp4/image streams — Cloudinary already serves those
-    // pre-compressed and re-compressing hurts more than it helps.
-    if (res.getHeader('Content-Type')?.toString().match(/^(video|image)\//)) return false;
+    // Don't recompress pre-encoded responses (city-graphs blob route sets
+    // Content-Encoding: gzip manually before res.end()).
+    if (res.getHeader('Content-Encoding')) return false;
+    // SSE streams — never buffer or compress; kills real-time delivery.
+    const ct = res.getHeader('Content-Type')?.toString() || '';
+    if (ct.includes('text/event-stream')) return false;
+    // Don't compress mp4/image streams — Cloudinary/ffmpeg already serve
+    // those pre-compressed and re-compressing hurts more than it helps.
+    if (/^(video|image)\//.test(ct)) return false;
+    // Path-based opt-outs — streaming/polling/pre-encoded endpoint families.
+    for (const rx of NO_COMPRESSION_PATHS) if (rx.test(req.path)) return false;
+    // Fall through to the library's default filter (respects x-no-compression
+    // header, checks the mime-db table for compressible content types).
     return compression.filter(req, res);
   },
 }));
