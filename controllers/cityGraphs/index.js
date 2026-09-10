@@ -274,18 +274,39 @@ out body;`;
 // each way's member nodes in the same payload; parsePlaces walks those
 // to compute a centroid per way.
 function buildPlacesQL(bbox) {
-  return `[out:json][timeout:60];
+  // Amenity coverage — food, transport, finance, health, education,
+  // culture, public services, leisure, worship. Only rows with `name`.
+  const AMENITY = 'hospital|clinic|doctors|dentist|pharmacy|veterinary|school|college|university|kindergarten|library|police|fire_station|post_office|courthouse|townhall|embassy|community_centre|marketplace|theatre|cinema|arts_centre|studio|fuel|charging_station|restaurant|cafe|fast_food|bar|pub|biergarten|food_court|ice_cream|bank|atm|bureau_de_change|hotel|nightclub|casino|place_of_worship|bus_station|taxi|parking|ferry_terminal|car_rental|car_wash|motorcycle_rental|bicycle_rental|gym|spa|fountain|clock|social_facility|shelter|childcare|conference_centre|events_venue|internet_cafe|coworking_space';
+  const TOURISM = 'attraction|museum|hostel|guest_house|motel|apartment|camp_site|viewpoint|gallery|zoo|theme_park|aquarium|information|artwork|picnic_site';
+  const SHOP    = 'mall|supermarket|department_store|convenience|clothes|shoes|electronics|mobile_phone|computer|bakery|butcher|jewelry|hardware|bookshop|books|gift|sports|furniture|car|car_parts|bicycle|toys|florist|pet|beauty|hairdresser|optician|chemist|greengrocer|deli|alcohol|wine|cheese|coffee|tea|photo|music|watches|art|stationery';
+  const LEISURE = 'park|garden|playground|sports_centre|fitness_centre|stadium|swimming_pool|water_park|marina|golf_course|ice_rink|nature_reserve|beach_resort|bowling_alley|dance|escape_game|amusement_arcade';
+  const HISTORIC = 'monument|memorial|castle|ruins|archaeological_site|fort|city_gate|tomb|wayside_shrine|wayside_cross|manor|church|cathedral|temple|mosque';
+  const AEROWAY  = 'aerodrome|terminal|heliport';
+  const RAILWAY  = 'station|halt|tram_stop|subway_entrance';
+  const MAN_MADE = 'lighthouse|tower|water_tower|silo|windmill|bridge|pier|observatory|telescope';
+  return `[out:json][timeout:90];
 (
-  node["place"~"^(suburb|neighbourhood|quarter|square|town|village)$"](${bbox});
-  node["tourism"="attraction"](${bbox});
+  node["place"~"^(suburb|neighbourhood|quarter|square|town|village|hamlet|city_block|locality)$"](${bbox});
   node["building"]["name"](${bbox});
-  node["amenity"~"^(hospital|school|university|college|clinic|library|police|fire_station|marketplace|theatre|cinema)$"]["name"](${bbox});
-  node["shop"="mall"]["name"](${bbox});
-  node["office"]["name"](${bbox});
   way["building"]["name"](${bbox});
-  way["amenity"~"^(hospital|school|university|college|clinic|library|police|fire_station|marketplace|theatre|cinema)$"]["name"](${bbox});
-  way["shop"="mall"]["name"](${bbox});
+  node["amenity"~"^(${AMENITY})$"]["name"](${bbox});
+  way["amenity"~"^(${AMENITY})$"]["name"](${bbox});
+  node["tourism"~"^(${TOURISM})$"]["name"](${bbox});
+  way["tourism"~"^(${TOURISM})$"]["name"](${bbox});
+  node["shop"~"^(${SHOP})$"]["name"](${bbox});
+  way["shop"~"^(${SHOP})$"]["name"](${bbox});
+  node["office"]["name"](${bbox});
   way["office"]["name"](${bbox});
+  node["leisure"~"^(${LEISURE})$"]["name"](${bbox});
+  way["leisure"~"^(${LEISURE})$"]["name"](${bbox});
+  node["historic"~"^(${HISTORIC})$"]["name"](${bbox});
+  way["historic"~"^(${HISTORIC})$"]["name"](${bbox});
+  node["aeroway"~"^(${AEROWAY})$"]["name"](${bbox});
+  way["aeroway"~"^(${AEROWAY})$"]["name"](${bbox});
+  node["railway"~"^(${RAILWAY})$"]["name"](${bbox});
+  way["railway"~"^(${RAILWAY})$"]["name"](${bbox});
+  node["man_made"~"^(${MAN_MADE})$"]["name"](${bbox});
+  way["man_made"~"^(${MAN_MADE})$"]["name"](${bbox});
 );
 (._;>;);
 out body;`;
@@ -363,21 +384,194 @@ function kindForTags(t) {
   if (t.amenity) {
     switch (t.amenity) {
       case 'hospital':
-      case 'clinic':        return 'hospital';
+      case 'clinic':
+      case 'doctors':
+      case 'dentist':       return 'hospital';
+      case 'pharmacy':      return 'pharmacy';
+      case 'veterinary':    return 'veterinary';
       case 'school':
       case 'college':       return 'school';
       case 'university':    return 'university';
+      case 'kindergarten':  return 'kindergarten';
       case 'library':       return 'library';
       case 'theatre':
       case 'cinema':        return t.amenity;
+      case 'arts_centre':
+      case 'studio':        return 'arts_centre';
       case 'police':
       case 'fire_station':
-      case 'marketplace':   return t.amenity;
+      case 'marketplace':
+      case 'post_office':
+      case 'courthouse':
+      case 'townhall':
+      case 'embassy':
+      case 'community_centre': return t.amenity;
+      // Fuel + transport
+      case 'fuel':          return 'fuel';
+      case 'charging_station': return 'charging_station';
+      case 'bus_station':   return 'bus_station';
+      case 'taxi':          return 'taxi';
+      case 'parking':       return 'parking';
+      case 'ferry_terminal': return 'ferry_terminal';
+      case 'car_rental':
+      case 'car_wash':
+      case 'motorcycle_rental':
+      case 'bicycle_rental': return 'transport_service';
+      // Food & drink
+      case 'restaurant':    return 'restaurant';
+      case 'cafe':          return 'cafe';
+      case 'fast_food':     return 'fast_food';
+      case 'bar':
+      case 'pub':
+      case 'biergarten':    return 'bar';
+      case 'food_court':    return 'food_court';
+      case 'ice_cream':     return 'ice_cream';
+      // Finance
+      case 'bank':          return 'bank';
+      case 'atm':           return 'atm';
+      case 'bureau_de_change': return 'bank';
+      // Hospitality + leisure
+      case 'hotel':         return 'hotel';
+      case 'nightclub':     return 'nightclub';
+      case 'casino':        return 'casino';
+      case 'place_of_worship': return 'place_of_worship';
+      case 'gym':
+      case 'fitness_centre': return 'gym';
+      case 'spa':           return 'spa';
+      // Working spaces
+      case 'coworking_space':
+      case 'internet_cafe': return 'coworking';
+      case 'conference_centre':
+      case 'events_venue':  return 'venue';
       default:              break;
     }
   }
-  if (t.shop === 'mall') return 'mall';
+  if (t.tourism) {
+    switch (t.tourism) {
+      case 'attraction':    return 'landmark';
+      case 'museum':        return 'museum';
+      case 'gallery':       return 'gallery';
+      case 'hotel':
+      case 'hostel':
+      case 'guest_house':
+      case 'motel':
+      case 'apartment':     return 'hotel';
+      case 'camp_site':     return 'camp_site';
+      case 'viewpoint':     return 'viewpoint';
+      case 'zoo':           return 'zoo';
+      case 'theme_park':    return 'theme_park';
+      case 'aquarium':      return 'aquarium';
+      case 'artwork':       return 'artwork';
+      case 'information':   return 'information';
+      case 'picnic_site':   return 'park';
+      default:              break;
+    }
+  }
+  if (t.shop) {
+    switch (t.shop) {
+      case 'mall':          return 'mall';
+      case 'supermarket':
+      case 'convenience':
+      case 'department_store': return 'supermarket';
+      case 'clothes':
+      case 'shoes':
+      case 'jewelry':
+      case 'watches':       return 'clothing';
+      case 'electronics':
+      case 'mobile_phone':
+      case 'computer':      return 'electronics';
+      case 'bakery':
+      case 'butcher':
+      case 'greengrocer':
+      case 'deli':          return 'grocery';
+      case 'alcohol':
+      case 'wine':          return 'alcohol';
+      case 'bookshop':
+      case 'books':         return 'bookshop';
+      case 'sports':        return 'sports_shop';
+      case 'furniture':
+      case 'hardware':      return 'hardware';
+      case 'car':
+      case 'car_parts':
+      case 'bicycle':       return 'auto_shop';
+      case 'beauty':
+      case 'hairdresser':
+      case 'optician':      return 'beauty';
+      default:              return 'shop';
+    }
+  }
   if (t.office)          return 'office';
+  if (t.leisure) {
+    switch (t.leisure) {
+      case 'park':
+      case 'garden':
+      case 'nature_reserve': return 'park';
+      case 'playground':    return 'playground';
+      case 'stadium':       return 'stadium';
+      case 'sports_centre':
+      case 'fitness_centre': return 'sports_centre';
+      case 'swimming_pool':
+      case 'water_park':    return 'pool';
+      case 'marina':        return 'marina';
+      case 'golf_course':   return 'golf';
+      case 'ice_rink':      return 'ice_rink';
+      case 'beach_resort':  return 'beach';
+      case 'amusement_arcade':
+      case 'bowling_alley':
+      case 'escape_game':
+      case 'dance':         return 'entertainment';
+      default:              return 'leisure';
+    }
+  }
+  if (t.historic) {
+    switch (t.historic) {
+      case 'castle':
+      case 'fort':
+      case 'city_gate':     return 'castle';
+      case 'monument':
+      case 'memorial':
+      case 'tomb':          return 'monument';
+      case 'ruins':
+      case 'archaeological_site': return 'ruins';
+      case 'church':
+      case 'cathedral':
+      case 'temple':
+      case 'mosque':
+      case 'wayside_shrine':
+      case 'wayside_cross': return 'place_of_worship';
+      case 'manor':         return 'manor';
+      default:              return 'historic';
+    }
+  }
+  if (t.aeroway) {
+    switch (t.aeroway) {
+      case 'aerodrome':
+      case 'terminal':      return 'airport';
+      case 'heliport':      return 'heliport';
+      default:              break;
+    }
+  }
+  if (t.railway) {
+    switch (t.railway) {
+      case 'station':
+      case 'halt':          return 'train_station';
+      case 'tram_stop':     return 'tram_stop';
+      case 'subway_entrance': return 'metro';
+      default:              break;
+    }
+  }
+  if (t.man_made) {
+    switch (t.man_made) {
+      case 'lighthouse':    return 'lighthouse';
+      case 'tower':
+      case 'water_tower':   return 'tower';
+      case 'bridge':        return 'bridge';
+      case 'windmill':      return 'windmill';
+      case 'observatory':
+      case 'telescope':     return 'observatory';
+      default:              break;
+    }
+  }
   // 4) Generic named buildings — apartments, offices, tech parks that
   //    have a name but no more-specific function tag.
   if (t.building) return 'building';
@@ -828,27 +1022,39 @@ function scoreQueryAgainstIndex(entry, q) {
 // Any kind not in this map defaults to 1.0 (fail-open) — safer than
 // silently zero-weighting an unfamiliar tag that Overpass might send.
 const KIND_WEIGHT = {
-  // top tier
-  suburb:        1.0,
-  neighbourhood: 1.0,
-  quarter:       1.0,
-  square:        1.0,
-  town:          1.0,
-  village:       1.0,
-  landmark:      1.0,
-  hospital:      1.0,
-  university:    1.0,
-  mall:          1.0,
-  // slightly demoted — still returned, just not as loud
-  building:      0.75,
-  office:        0.75,
-  school:        0.75,
-  library:       0.75,
-  theatre:       0.75,
-  cinema:        0.75,
-  police:        0.75,
-  fire_station:  0.75,
-  marketplace:   0.75,
+  // top tier — administrative + iconic named places
+  suburb: 1.0, neighbourhood: 1.0, quarter: 1.0, square: 1.0,
+  town: 1.0, village: 1.0, hamlet: 1.0, city_block: 1.0, locality: 1.0,
+  landmark: 1.0, museum: 1.0, gallery: 1.0,
+  hospital: 1.0, university: 1.0, mall: 1.0,
+  airport: 1.0, heliport: 1.0, train_station: 1.0,
+  castle: 1.0, monument: 1.0, ruins: 1.0, place_of_worship: 1.0, manor: 1.0,
+  stadium: 1.0, park: 1.0, zoo: 1.0, theme_park: 1.0, aquarium: 1.0,
+  observatory: 1.0, lighthouse: 1.0, viewpoint: 1.0,
+  // mid tier — commonly searched, still prominent
+  bus_station: 0.9, tram_stop: 0.9, metro: 0.9, ferry_terminal: 0.9,
+  hotel: 0.9, marina: 0.9, marketplace: 0.9,
+  fuel: 0.85, charging_station: 0.85,
+  townhall: 0.9, embassy: 0.9, courthouse: 0.9, community_centre: 0.85,
+  arts_centre: 0.85, theatre: 0.85, cinema: 0.85,
+  beach: 0.9, historic: 0.85, tower: 0.85, bridge: 0.9, windmill: 0.85,
+  // background — searchable but not "loud" against a same-name suburb
+  building: 0.75, office: 0.75, school: 0.75, kindergarten: 0.7,
+  library: 0.75, casino: 0.75, nightclub: 0.75, venue: 0.75,
+  restaurant: 0.7, cafe: 0.65, fast_food: 0.6, bar: 0.7,
+  food_court: 0.7, ice_cream: 0.55,
+  bank: 0.7, atm: 0.5,
+  pharmacy: 0.7, veterinary: 0.65,
+  supermarket: 0.7, grocery: 0.55, clothing: 0.55, electronics: 0.55,
+  bookshop: 0.6, alcohol: 0.6, sports_shop: 0.55, hardware: 0.55,
+  auto_shop: 0.55, beauty: 0.5, shop: 0.5,
+  gym: 0.65, spa: 0.6, pool: 0.65, sports_centre: 0.7, ice_rink: 0.7,
+  golf: 0.75, playground: 0.6, leisure: 0.55, entertainment: 0.6,
+  police: 0.75, fire_station: 0.75, post_office: 0.7,
+  parking: 0.5, taxi: 0.55, transport_service: 0.55,
+  camp_site: 0.75, coworking: 0.7, artwork: 0.7,
+  information: 0.55, fountain: 0.5, clock: 0.4,
+  childcare: 0.6, social_facility: 0.6, shelter: 0.6,
 };
 
 function weightForKind(k) {
