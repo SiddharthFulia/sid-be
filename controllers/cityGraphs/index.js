@@ -255,12 +255,39 @@ out body;`;
 // Places query — suburbs, neighbourhoods, quarters, squares, small
 // towns/villages within the metro bbox, plus tourist attractions so
 // well-known landmarks are searchable ("Cubbon Park", "Vidhana Soudha").
+//
+// Widened Sep 2026 to also include named buildings — apartments,
+// hospitals, malls, tech parks, universities, schools, offices — so
+// users can type a building name in the Pathfinding composer and find
+// it. Buildings can be tagged either as a single node (rare, usually
+// just an entrance) or as a way (the polygon footprint) — we ask for
+// both. Way-buildings get their centroid computed from member nodes,
+// so we still hand back a single {lat, lng} per row.
+//
+// Amenity / shop / office filters are a redundant safety net: many
+// large public buildings (hospitals, universities, malls) aren't tagged
+// building=* at all in OSM but ARE tagged by function. Querying both
+// tag families roughly doubles coverage without much overlap because
+// we de-dupe on (name_lc, coarse_lat, coarse_lng) downstream.
+//
+// `(._;>;)` — recurse-down after the way selectors so Overpass includes
+// each way's member nodes in the same payload; parsePlaces walks those
+// to compute a centroid per way.
 function buildPlacesQL(bbox) {
   return `[out:json][timeout:60];
 (
   node["place"~"^(suburb|neighbourhood|quarter|square|town|village)$"](${bbox});
   node["tourism"="attraction"](${bbox});
+  node["building"]["name"](${bbox});
+  node["amenity"~"^(hospital|school|university|college|clinic|library|police|fire_station|marketplace|theatre|cinema)$"]["name"](${bbox});
+  node["shop"="mall"]["name"](${bbox});
+  node["office"]["name"](${bbox});
+  way["building"]["name"](${bbox});
+  way["amenity"~"^(hospital|school|university|college|clinic|library|police|fire_station|marketplace|theatre|cinema)$"]["name"](${bbox});
+  way["shop"="mall"]["name"](${bbox});
+  way["office"]["name"](${bbox});
 );
+(._;>;);
 out body;`;
 }
 
@@ -310,28 +337,127 @@ function parseOverpass(json) {
   return { nodes, edges };
 }
 
-// Extract [{name, kind, lat, lng}] from Overpass places JSON. We de-dupe
-// by (name_lc, coarse_lat, coarse_lng) so a suburb tagged under two
-// close boundaries doesn't insert twice.
+// Map an OSM tag bag to our normalised `kind` enum. The order matters —
+// a hospital that's also tagged `building=hospital` should surface as
+// `hospital` (the more specific label), not `building`. Callers of this
+// helper only get a kind back if the row actually deserves one; nameless
+// or featureless elements return null and are skipped upstream.
+//
+// Enum values the FE knows about (Pathfinding.jsx KIND_ICON):
+//   suburb, neighbourhood, quarter, square, town, village   (place=*)
+//   landmark                                                 (tourism=attraction)
+//   hospital, school, university, mall, office, library,
+//   theatre, cinema, building                                (widened Sep 2026)
+function kindForTags(t) {
+  if (!t) return null;
+  // 1) `place=*` — highest-level administrative label wins over any
+  //    building tag if both are present (rare but happens with landmark
+  //    suburb centroids).
+  if (t.place && /^(suburb|neighbourhood|quarter|square|town|village)$/.test(t.place)) {
+    return t.place;
+  }
+  // 2) Tourist attractions — well-known landmarks that aren't buildings.
+  if (t.tourism === 'attraction') return 'landmark';
+  // 3) Function-tagged specific buildings — hospitals, schools, malls…
+  //    Grouped: college → school (same emoji), clinic → hospital.
+  if (t.amenity) {
+    switch (t.amenity) {
+      case 'hospital':
+      case 'clinic':        return 'hospital';
+      case 'school':
+      case 'college':       return 'school';
+      case 'university':    return 'university';
+      case 'library':       return 'library';
+      case 'theatre':
+      case 'cinema':        return t.amenity;
+      case 'police':
+      case 'fire_station':
+      case 'marketplace':   return t.amenity;
+      default:              break;
+    }
+  }
+  if (t.shop === 'mall') return 'mall';
+  if (t.office)          return 'office';
+  // 4) Generic named buildings — apartments, offices, tech parks that
+  //    have a name but no more-specific function tag.
+  if (t.building) return 'building';
+  return null;
+}
+
+// Extract [{name, kind, lat, lng}] from Overpass places JSON. Handles
+// both nodes (single point) and ways (polygon → centroid from member
+// nodes in the same payload). Ways emitted by Overpass include a
+// `nodes` array of node IDs; the corresponding node elements are in
+// the same response thanks to the `(._;>;)` recurse-down in the QL.
+//
+// De-dupe key is (name_lc, coarse_lat, coarse_lng) — 3 decimal places
+// ≈ 110 m grid. Prevents a hospital tagged as both a node (entrance
+// pin) and a way (footprint polygon) from inserting twice, and also
+// prevents suburb boundaries tagged under two admin levels from
+// double-inserting.
 function parsePlaces(json) {
+  const elements = json.elements || [];
+
+  // Pass 1: index every node's coords so we can centroid ways later.
+  // Not all nodes here are named place candidates — many are just
+  // structural nodes of a building polygon (no tags of their own).
+  const nodePos = new Map(); // id -> {lat, lng}
+  for (const el of elements) {
+    if (el.type === 'node' && typeof el.lat === 'number' && typeof el.lon === 'number') {
+      nodePos.set(el.id, { lat: el.lat, lng: el.lon });
+    }
+  }
+
   const out = [];
   const seen = new Set();
-  for (const el of json.elements || []) {
+
+  const push = (name, kind, lat, lng) => {
+    if (!name || !kind) return;
+    if (typeof lat !== 'number' || typeof lng !== 'number') return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    const key = `${name.toLowerCase()}|${lat.toFixed(3)}|${lng.toFixed(3)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ name, kind, lat, lng });
+  };
+
+  // Pass 2: named nodes.
+  for (const el of elements) {
     if (el.type !== 'node') continue;
     const t = el.tags || {};
     const name = t.name || t['name:en'];
     if (!name) continue;
-    let kind = null;
-    if (t.place)   kind = t.place;
-    else if (t.tourism === 'attraction') kind = 'landmark';
+    const kind = kindForTags(t);
     if (!kind) continue;
-    const lat = el.lat, lng = el.lon;
-    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
-    const key = `${name.toLowerCase()}|${lat.toFixed(3)}|${lng.toFixed(3)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ name, kind, lat, lng });
+    push(name, kind, el.lat, el.lon);
   }
+
+  // Pass 3: named ways — centroid = arithmetic mean of member node
+  // coords. Fine for search / marker placement at this zoom level
+  // (a mall footprint is at most ~300 m across; the centre-of-mass
+  // approximation is well within the 110 m de-dupe grid). We skip
+  // ways whose member nodes weren't included in the payload — that
+  // shouldn't happen with the `(._;>;)` recurse but is defensive.
+  for (const el of elements) {
+    if (el.type !== 'way' || !Array.isArray(el.nodes) || el.nodes.length === 0) continue;
+    const t = el.tags || {};
+    const name = t.name || t['name:en'];
+    if (!name) continue;
+    const kind = kindForTags(t);
+    if (!kind) continue;
+
+    let sumLat = 0, sumLng = 0, count = 0;
+    for (const nid of el.nodes) {
+      const p = nodePos.get(nid);
+      if (!p) continue;
+      sumLat += p.lat;
+      sumLng += p.lng;
+      count++;
+    }
+    if (count === 0) continue;
+    push(name, kind, sumLat / count, sumLng / count);
+  }
+
   return out;
 }
 
@@ -411,7 +537,7 @@ async function fetchFromOverpass(bbox) {
   return parseOverpass(json);
 }
 
-async function fetchPlacesFromOverpass(bbox) {
+export async function fetchPlacesFromOverpass(bbox) {
   const json = await overpassPost(buildPlacesQL(bbox));
   return parsePlaces(json);
 }
@@ -691,6 +817,51 @@ function scoreQueryAgainstIndex(entry, q) {
   return scored;
 }
 
+// Kind → prominence weight for the final ranker. Suburbs, hospitals,
+// universities and malls are "landmark-tier" and stay at 1.0 — they're
+// what a user typically means when the query matches both a suburb and
+// a nearby building of the same name (e.g. "Andheri" the suburb vs
+// "Andheri Apartments"). Generic buildings, small offices, schools and
+// libraries are still returned but scored 25 % lower so they don't
+// crowd out the tier-1 hits when both match.
+//
+// Any kind not in this map defaults to 1.0 (fail-open) — safer than
+// silently zero-weighting an unfamiliar tag that Overpass might send.
+const KIND_WEIGHT = {
+  // top tier
+  suburb:        1.0,
+  neighbourhood: 1.0,
+  quarter:       1.0,
+  square:        1.0,
+  town:          1.0,
+  village:       1.0,
+  landmark:      1.0,
+  hospital:      1.0,
+  university:    1.0,
+  mall:          1.0,
+  // slightly demoted — still returned, just not as loud
+  building:      0.75,
+  office:        0.75,
+  school:        0.75,
+  library:       0.75,
+  theatre:       0.75,
+  cinema:        0.75,
+  police:        0.75,
+  fire_station:  0.75,
+  marketplace:   0.75,
+};
+
+function weightForKind(k) {
+  return KIND_WEIGHT[k] != null ? KIND_WEIGHT[k] : 1.0;
+}
+
+// Apply the kind_weight bump on top of the raw match score. Kept as a
+// separate helper so both the single-city and cross-city rankers use
+// the exact same formula.
+function weightedScore(row, rawScore) {
+  return rawScore * weightForKind(row.kind);
+}
+
 // ── Handlers ───────────────────────────────────────────────────────
 
 // GET /api/city-graphs
@@ -910,20 +1081,26 @@ export const searchPlaces = async (req, res) => {
     }
 
     // Fuzzy pipeline: exact → prefix (Trie) → substring → trigram.
-    // Winner-per-row scoring, then top-N by score.
+    // Winner-per-row scoring, then kind_weight bump, then top-N by
+    // weighted score. See KIND_WEIGHT above for tier rationale.
     const entry = getIndexFor(slug);
     const scored = scoreQueryAgainstIndex(entry, q);
     const ranked = [...scored.entries()]
-      .sort((a, b) => b[1].score - a[1].score)
+      .map(([idx, meta]) => ({
+        idx,
+        meta,
+        weighted: weightedScore(entry.rows[idx], meta.score),
+      }))
+      .sort((a, b) => b.weighted - a.weighted)
       .slice(0, limit);
-    const items = ranked.map(([idx, meta]) => {
+    const items = ranked.map(({ idx, meta, weighted }) => {
       const p = entry.rows[idx];
       return {
         name: p.name,
         kind: p.kind,
         lat: p.lat,
         lng: p.lng,
-        score: meta.score,
+        score: Math.round(weighted),
         matchType: meta.matchType,
       };
     });
@@ -960,9 +1137,14 @@ export const searchPlacesAll = async (req, res) => {
       // and re-rank. Capping per-city keeps the merge budget bounded
       // when many cities happen to match a common substring.
       const cityTop = [...scored.entries()]
-        .sort((a, b) => b[1].score - a[1].score)
+        .map(([idx, meta]) => ({
+          idx,
+          meta,
+          weighted: weightedScore(entry.rows[idx], meta.score),
+        }))
+        .sort((a, b) => b.weighted - a.weighted)
         .slice(0, limit);
-      for (const [idx, meta] of cityTop) {
+      for (const { idx, meta, weighted } of cityTop) {
         const p = entry.rows[idx];
         all.push({
           name: p.name,
@@ -971,7 +1153,7 @@ export const searchPlacesAll = async (req, res) => {
           lng: p.lng,
           city_slug: spec.slug,
           city_name: spec.name,
-          score: meta.score,
+          score: Math.round(weighted),
           matchType: meta.matchType,
         });
       }
