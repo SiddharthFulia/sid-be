@@ -586,8 +586,40 @@ export const postRecommend = async (req, res) => {
       }
     }
 
+    // ── Attempt 3: last-ditch gpt-oss-20b with a stricter prompt ──
+    // Compound flaked AND gpt-oss-120b returned an unparseable / empty
+    // list. gpt-oss-20b is cheap + fast; give it one shot with the
+    // stricter retry prompt before we give up.
     if (!items || !items.length) {
-      return error(res, 'The recommender did not return a valid list — try rephrasing.', 502);
+      const lastDitchModel = 'openai/gpt-oss-20b';
+      if (primaryModel !== lastDitchModel) {
+        try {
+          const out = await tryLlm({ city, query, model: lastDitchModel });
+          if (out.items && out.items.length) {
+            items = out.items;
+            sources = [];
+            modelUsed = out.model || lastDitchModel;
+            usedWebSearch = false;
+          }
+        } catch (e) {
+          logger.warn(`recommend last-ditch ${lastDitchModel} failed: ${e.message}`);
+        }
+      }
+    }
+
+    // Still nothing — degrade gracefully. Return 200 with empty items
+    // + a friendly `message` so the FE can render "no matches — try
+    // rephrasing" inside the popover rather than a red error toast.
+    if (!items || !items.length) {
+      return success(res, {
+        ok: false,
+        recommendations: [],
+        sources: [],
+        model: modelUsed,
+        used_web_search: false,
+        cached: false,
+        message: 'No recommendations for this query — try being more specific (e.g. "italian in bandra" or "coffee near powai").',
+      });
     }
 
     // ── Normalise + trim to 5 ──
