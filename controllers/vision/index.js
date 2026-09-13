@@ -17,7 +17,7 @@
 //   • /deep-analyze    3 req/min  (CPU-heavy)
 //   • /face-verify     3 req/min  (two-image compute)
 //
-// Cache: SHA-256 of image bytes → 24h TTL. Same image never re-processes.
+// Cache: none — every request runs the full pipeline fresh.
 // The FE just uploads a file; the BE handles ALL model compute. Frontend
 // never sees the model names — those are exposed under `models_used[]` and
 // only surfaced to internal admin dashboards.
@@ -41,30 +41,9 @@ import {
 const MAX_BYTES = 8 * 1024 * 1024;
 const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
-// ─── SHA-256 cache (24h) — shared across all three POST endpoints ──
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const CACHE_MAX_ENTRIES = 200;
-const cache = new Map();
-
-function cacheGet(key) {
-  const hit = cache.get(key);
-  if (!hit) return null;
-  if (hit.expiresAt < Date.now()) {
-    cache.delete(key);
-    return null;
-  }
-  cache.delete(key);
-  cache.set(key, hit);
-  return hit.payload;
-}
-
-function cacheSet(key, payload) {
-  if (cache.size >= CACHE_MAX_ENTRIES) {
-    const first = cache.keys().next().value;
-    if (first) cache.delete(first);
-  }
-  cache.set(key, { payload, expiresAt: Date.now() + CACHE_TTL_MS });
-}
+// Vision endpoints are UNCACHED — every request runs the pipeline fresh
+// so users always see the latest models + processing. Prior SHA-256
+// hash-based memoisation was removed per product ask.
 
 // ─── Per-IP rate limits (independent buckets per endpoint) ────────
 const RATE_WINDOW_MS = 60 * 1000;
@@ -371,10 +350,6 @@ export const postVisionAnalyze = async (req, res) => {
   const { buffer, mimetype, size, originalname } = upload;
 
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-  const cached = cacheGet(`analyze:${hash}`);
-  if (cached) {
-    return success(res, { ...cached, cached: true, imageHash: hash }, 'Cached');
-  }
 
   const imageDataUri = `data:${mimetype};base64,${buffer.toString('base64')}`;
   const started = Date.now();
@@ -385,7 +360,6 @@ export const postVisionAnalyze = async (req, res) => {
     payload.imageHash = hash;
     payload.cached = false;
 
-    cacheSet(`analyze:${hash}`, payload);
     logger.info(
       `vision/analyze OK · ${originalname || 'unnamed'} · ${(size / 1024).toFixed(0)}KB · ${payload.elapsedMs}ms · backend=${payload.backend} obj=${payload.objects.length} face=${payload.faces.length} txt=${payload.text.length} col=${payload.dominant_colors.length}`,
     );
@@ -413,10 +387,6 @@ export const postVisionDeepAnalyze = async (req, res) => {
   const { buffer, mimetype, size, originalname } = upload;
 
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-  const cached = cacheGet(`deep:${hash}`);
-  if (cached) {
-    return success(res, { ...cached, cached: true, imageHash: hash }, 'Cached');
-  }
 
   const imageDataUri = `data:${mimetype};base64,${buffer.toString('base64')}`;
   const started = Date.now();
@@ -433,7 +403,6 @@ export const postVisionDeepAnalyze = async (req, res) => {
       payload.warnings = [...(payload.warnings || []), 'deep pipeline unavailable — served light backend'];
     }
 
-    cacheSet(`deep:${hash}`, payload);
     logger.info(
       `vision/deep-analyze OK · ${originalname || 'unnamed'} · ${(size / 1024).toFixed(0)}KB · ${payload.elapsedMs}ms · backend=${payload.backend} caption="${(payload.caption || '').slice(0, 60)}" tags=${payload.clip_tags.length} face=${payload.faces.length} obj=${payload.objects.length}`,
     );
@@ -471,16 +440,6 @@ export const postFaceVerify = async (req, res) => {
     }
   }
 
-  // Cache key = both hashes so the order matters (A→B and B→A hash differently
-  // even though the result is symmetric; that's a tiny cache miss, no bug).
-  const hashA = crypto.createHash('sha256').update(a.buffer).digest('hex');
-  const hashB = crypto.createHash('sha256').update(b.buffer).digest('hex');
-  const cacheKey = `verify:${hashA}:${hashB}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) {
-    return success(res, { ...cached, cached: true }, 'Cached');
-  }
-
   const uriA = `data:${a.mimetype};base64,${a.buffer.toString('base64')}`;
   const uriB = `data:${b.mimetype};base64,${b.buffer.toString('base64')}`;
   const started = Date.now();
@@ -500,7 +459,6 @@ export const postFaceVerify = async (req, res) => {
       elapsedMs: Date.now() - started,
       cached: false,
     };
-    cacheSet(cacheKey, payload);
     logger.info(
       `vision/face-verify OK · ${payload.same_person ? 'MATCH' : 'DIFF'} · sim=${payload.similarity} · thr=${payload.threshold} · ${payload.elapsedMs}ms`,
     );
@@ -535,11 +493,6 @@ export const postExtractSubject = async (req, res) => {
   const mode = ['auto', 'dark', 'depth'].includes(rawMode) ? rawMode : 'auto';
 
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-  const cacheKey = `extract:${mode}:${hash}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) {
-    return success(res, { ...cached, cached: true, imageHash: hash }, 'Cached');
-  }
 
   const imageDataUri = `data:${mimetype};base64,${buffer.toString('base64')}`;
   const started = Date.now();
@@ -565,7 +518,6 @@ export const postExtractSubject = async (req, res) => {
       imageHash: hash,
       cached: false,
     };
-    cacheSet(cacheKey, payload);
 
     const maskLen = payload.mask?.png_data_url?.length || 0;
     const thumbLen = payload.subject_thumbnail_url?.length || 0;
@@ -587,7 +539,7 @@ export const getVisionHealth = async (req, res) => {
     return success(res, {
       ok: !!detail,
       backend: detail?.deep ? 'deep-available' : 'light-only',
-      cacheSize: cache.size,
+      cached: false,
       maxBytes: MAX_BYTES,
       allowedMime: [...ALLOWED_MIME],
       rateLimit: {
