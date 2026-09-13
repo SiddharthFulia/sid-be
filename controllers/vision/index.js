@@ -185,6 +185,16 @@ function normaliseTags(raw) {
   }));
 }
 
+// Suppress internal-only traces from the FE-visible warnings array. Known
+// noisy patterns: OpenCV C++ shape assertions (paddleocr/opencv-python 4.6
+// vs YOLOv8 ONNX compat), tesseract binary-missing traces (superseded by
+// PaddleOCR), etc. Legitimate provider warnings still pass through.
+function filterInternalWarnings(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const NOISE = /OpenCV|shape_utils|Assertion failed|tesseract binary not found/i;
+  return arr.filter((w) => typeof w === 'string' ? !NOISE.test(w) : true);
+}
+
 // ─── Fanout fallback (older Python service without /vision-analyze) ─
 async function fanoutParallel(imageDataUri) {
   const [facesR, objectsR, ocrR, colorsR] = await Promise.allSettled([
@@ -254,7 +264,7 @@ async function analyzeUnified(imageDataUri, { preferDeep = true, options = {} } 
           depth: raw.depth || { preview_url: null, stats: null, available: false },
           aesthetic: raw.aesthetic || { vibe: 'neutral', brightness: 0.5, saturation: 0.5 },
           meta: raw.meta || {},
-          warnings: Array.isArray(raw.warnings) ? [...raw.warnings] : [],
+          warnings: filterInternalWarnings(raw.warnings),
           models_used: Array.isArray(raw.models_used) ? raw.models_used : [],
         };
       }
@@ -284,7 +294,7 @@ async function analyzeUnified(imageDataUri, { preferDeep = true, options = {} } 
       depth: { preview_url: null, stats: null, available: false },
       aesthetic: { vibe: 'neutral', brightness: 0.5, saturation: 0.5 },
       meta: raw.meta || {},
-      warnings: [...warnings, ...(Array.isArray(raw.warnings) ? raw.warnings : [])],
+      warnings: filterInternalWarnings([...warnings, ...(Array.isArray(raw.warnings) ? raw.warnings : [])]),
       models_used: ['MediaPipe', 'YOLOv8', 'Tesseract'],
     };
   } catch (lightErr) {
