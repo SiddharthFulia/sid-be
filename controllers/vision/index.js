@@ -197,9 +197,19 @@ async function fanoutParallel(imageDataUri) {
   const faces = facesR.status === 'fulfilled'
     ? normaliseFacesLight(facesR.value?.faces)
     : (warnings.push(`faces: ${facesR.reason?.message || 'failed'}`), []);
-  const objects = objectsR.status === 'fulfilled'
-    ? normaliseObjects(objectsR.value?.objects)
-    : (warnings.push(`objects: ${objectsR.reason?.message || 'failed'}`), []);
+  let objects = [];
+  if (objectsR.status === 'fulfilled') {
+    objects = normaliseObjects(objectsR.value?.objects);
+  } else {
+    // Swallow the OpenCV shape-assertion trace from the FE-visible warnings
+    // list — it's a known paddleocr/opencv-python 4.6 vs YOLOv8-onnx compat
+    // issue that we already gracefully handle server-side. Users don't
+    // need to see the raw C++ trace as a red banner.
+    const msg = objectsR.reason?.message || 'failed';
+    if (!/OpenCV|shape_utils|Assertion failed/i.test(msg)) {
+      warnings.push(`objects: ${msg}`);
+    }
+  }
   let text = [];
   let ocrAvailable = false;
   if (ocrR.status === 'fulfilled') {

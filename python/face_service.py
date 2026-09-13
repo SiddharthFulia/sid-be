@@ -377,6 +377,7 @@ load_yolo()
 
 @app.route('/detect-objects', methods=['POST'])
 def detect_objects():
+    global YOLO_MODEL
     if YOLO_MODEL is None:
         return jsonify({'error': 'YOLOv8 model not loaded', 'objects': [], 'count': 0}), 200
     try:
@@ -393,7 +394,25 @@ def detect_objects():
 
         blob = cv2.dnn.blobFromImage(img, 1/255.0, (640, 640), swapRB=True, crop=False)
         YOLO_MODEL.setInput(blob)
-        outputs = YOLO_MODEL.forward()
+        try:
+            outputs = YOLO_MODEL.forward()
+        except cv2.error as e:
+            # Known compat issue: paddleocr pins opencv-python 4.6.0.66 but
+            # YOLOv8-exported ONNX needs opencv-python ≥ 4.7 for its Reshape
+            # ops. When the assertion trips, disable YOLO for the rest of
+            # this process (so we don't spam the same failure) and return
+            # an empty result — better than shipping the raw OpenCV trace
+            # to the FE where it lands as an unhelpful red banner.
+            msg = str(e)
+            print(f'[yolo] forward() failed — disabling for session: {msg[:120]}')
+            YOLO_MODEL = None
+            return jsonify({
+                'objects': [],
+                'count': 0,
+                'imageSize': {'width': w, 'height': h},
+                'model': YOLO_MODEL_NAME,
+                'skipped': 'opencv-yolo-shape-compat',
+            }), 200
 
         out = outputs[0].T if len(outputs[0].shape) == 3 else outputs[0]
         if out.shape[0] == 84:
