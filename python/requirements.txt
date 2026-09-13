@@ -1,3 +1,4 @@
+# ─── Core (already used by the light lanes: MediaPipe + YOLO ONNX + Tesseract) ───
 opencv-python-headless>=4.9.0
 mediapipe==0.10.14
 numpy<2
@@ -10,3 +11,31 @@ flask-cors==4.0.0
 # module or the binary is missing.
 pytesseract>=0.3.10
 Pillow>=10.0.0
+
+# ─── Deep pipeline (loaded lazily on first request per endpoint) ─────────────────
+# Each of these is optional at runtime — the service starts even if any wheel
+# fails to install. The corresponding endpoint reports `{ available: false }`
+# with a `warning` describing the missing module.
+#
+# On ARM CPU (Oracle Cloud Ampere A1), install torch from the CPU wheel index:
+#   pip install torch==2.2.0 torchvision --index-url https://download.pytorch.org/whl/cpu
+# See python/README-vision-install.md for the full deploy runbook.
+
+# BLIP-1 base image captioning + CLIP zero-shot classification.
+transformers==4.40.0
+torch==2.2.0
+torchvision
+
+# PaddleOCR — better than Tesseract on messy real-world images.
+paddleocr==2.7.3
+paddlepaddle==2.6.0
+
+# InsightFace buffalo_s — 512-dim face embeddings + age/gender + landmarks.
+insightface==0.7.3
+onnxruntime==1.17.0
+
+# Depth-Anything-V2-Small is pulled from Hugging Face by `transformers`
+# on first hit — no extra dep needed here.
+
+# Convenience — SHA hashes for module-level cache keys, present already but
+# named explicitly so `pip check` doesn't complain if anything else drops it.

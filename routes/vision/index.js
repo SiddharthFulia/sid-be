@@ -1,21 +1,33 @@
-// /vision/* — Fully-offline vision analysis (no Gemini, no cloud).
+// /vision/* — deep + light vision analysis, all on the BE.
 //
-// POST /api/vision/analyze  multipart 'image' → YOLO + MediaPipe + Tesseract
-//                           + dominant colours + metadata → unified JSON
-// GET  /api/vision/health   backend + cache + rate-limit diagnostics
+// POST /api/vision/analyze        multipart 'image' → light or deep (auto-upgrade)
+// POST /api/vision/deep-analyze   multipart 'image' → forces the deep pipeline
+//                                 (BLIP caption + CLIP tags + InsightFace +
+//                                 YOLOv8 + PaddleOCR + Depth-Anything + palette)
+// POST /api/vision/face-verify    multipart 'imageA' + 'imageB' → InsightFace
+//                                 cosine similarity → { same_person, similarity }
+// GET  /api/vision/health         Python service + cache + rate-limit diagnostics
 //
-// Backed by the Python face-service at $FACE_SERVICE_URL (port 5000 locally,
-// same host+port on Oracle). See controllers/vision/index.js for the
-// per-lane fallback + cache + rate-limit logic.
+// See controllers/vision/index.js for the SHA-256 cache + per-endpoint rate
+// limits (analyze 5/min, deep 3/min, verify 3/min). Underlying model compute
+// runs in the Python face-service (FACE_SERVICE_URL, port 5000 locally, same
+// host on Oracle).
 
 import { Router } from 'express';
 import {
-  postVisionAnalyze, getVisionHealth, visionUploadMiddleware,
+  postVisionAnalyze,
+  postVisionDeepAnalyze,
+  postFaceVerify,
+  getVisionHealth,
+  visionUploadMiddleware,
+  visionVerifyUploadMiddleware,
 } from '../../controllers/vision/index.js';
 
 const router = Router();
 
-router.post('/vision/analyze', visionUploadMiddleware, postVisionAnalyze);
-router.get( '/vision/health',  getVisionHealth);
+router.post('/vision/analyze',       visionUploadMiddleware,       postVisionAnalyze);
+router.post('/vision/deep-analyze',  visionUploadMiddleware,       postVisionDeepAnalyze);
+router.post('/vision/face-verify',   visionVerifyUploadMiddleware, postFaceVerify);
+router.get( '/vision/health',        getVisionHealth);
 
 export default router;

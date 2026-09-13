@@ -1,25 +1,50 @@
-"""Face detection service using MediaPipe + OpenCV.
+"""Vision service — light + deep lanes on one Flask app.
 
-Also hosts the offline lanes that back /api/vision/analyze:
-  • /ocr             — Tesseract text recognition (soft-fails if tesseract
-                       binary or pytesseract module isn't installed)
-  • /dominant-colors — k-means on a downsampled image (top-6 clusters)
-  • /vision-analyze  — one-shot omnibus: faces + objects + ocr + colors + meta
+Light lanes (loaded eagerly at boot, always available):
+  • /analyze          — MediaPipe Face Mesh: 468 landmarks → 68 remap + mood
+  • /detect-objects   — YOLOv8-nano ONNX via OpenCV DNN (fast, no torch)
+  • /ocr              — Tesseract text recognition (soft-fails if binary missing)
+  • /dominant-colors  — k-means on a 64x64 downsample (top-K clusters)
+  • /vision-analyze   — omnibus of the four above
+
+Deep lanes (lazy-loaded on first hit, each guarded by an install probe so a
+missing wheel yields `{ available: false, warning }` instead of hard-failing
+the whole service):
+  • /caption          — BLIP-1 base           "describe what's in the image"
+  • /clip-tags        — CLIP ViT-B/32         zero-shot classification
+  • /face-embed       — InsightFace buffalo_s 512-dim embedding + age/gender
+  • /face-verify      — two images → cosine sim → { same_person, similarity }
+  • /paddle-ocr       — PaddleOCR PP-OCRv4    better than Tesseract on real photos
+  • /depth-map        — Depth-Anything-V2-S   monocular depth preview + stats
+  • /vision-deep      — omnibus of ALL the above (light + deep in one call)
+
+Design notes:
+  • Each deep model is wrapped in a `_LazyModel` singleton with a threading.Lock
+    so concurrent requests don't fire the (multi-GB) download twice.
+  • First hit on each endpoint blocks until the model downloads (2-10 min on
+    Oracle box). Subsequent requests hit warm memory.
+  • The service prints a startup summary listing which optional deps imported
+    cleanly so the admin can see what's available without spending a real call.
+  • Total warm-memory footprint: ~1.7 GB with all lanes hot (BLIP ~1 GB, CLIP
+    ~350 MB, Depth-Anything-V2-S ~100 MB, InsightFace buffalo_s ~150 MB,
+    YOLOv8n ~15 MB, PaddleOCR det+rec ~50 MB). Comfortable on the 12 GB Oracle
+    box; still fine on smaller VMs since deep lanes only load on demand.
 """
 
 import os
+import io
 import base64
 import math
 import time
+import hashlib
+import threading
+import traceback
 import numpy as np
 import cv2
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Optional deps for OCR — imported lazily so a missing tesseract binary
-# doesn't take down the whole service. The /ocr route reports back with
-# `{ ok: true, available: false, warning: '...' }` when pytesseract or
-# the tesseract binary aren't available.
+# ─── Optional deps: OCR (Tesseract) ──────────────────────────────
 try:
     import pytesseract  # type: ignore
     from PIL import Image  # type: ignore
@@ -32,11 +57,40 @@ except Exception as _ocr_err:  # pragma: no cover
 else:
     _OCR_IMPORT_ERR = None
 
+# ─── Optional deps: deep pipeline (probes only — real load is lazy) ────
+_DEEP_IMPORT_ERRORS = {}
+
+
+def _probe_import(name, importer):
+    """Try to import a module (or run a lambda) — return True on success.
+
+    We probe at boot so the /health endpoint can report which deep lanes will
+    plausibly work without actually loading multi-GB weights until a real
+    request arrives.
+    """
+    try:
+        importer()
+        return True
+    except Exception as e:  # pragma: no cover — depends on install
+        _DEEP_IMPORT_ERRORS[name] = f'{type(e).__name__}: {e}'
+        return False
+
+
+_HAS_TORCH = _probe_import('torch', lambda: __import__('torch'))
+_HAS_TRANSFORMERS = _probe_import('transformers', lambda: __import__('transformers'))
+_HAS_INSIGHTFACE = _probe_import('insightface', lambda: __import__('insightface'))
+_HAS_PADDLE = _probe_import('paddleocr', lambda: __import__('paddleocr'))
+
+# ─── Flask app + CORS ────────────────────────────────────────────
 app = Flask(__name__)
 CORS(app)
 
-# MediaPipe Face Mesh (468 landmarks)
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIGHT LANE 1: MediaPipe Face Mesh (kept from the previous build)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 import mediapipe as mp
+
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=True,
@@ -49,35 +103,23 @@ face_detector = mp_face_detection.FaceDetection(
     model_selection=0,
     min_detection_confidence=0.5,
 )
-print("MediaPipe Face Mesh + Detection loaded")
+print('[boot] MediaPipe Face Mesh + Detection loaded')
 
 # MediaPipe 468 → dlib 68 mapping (exactly 68 points)
 MP_TO_68 = [
-    # Jaw 0-16 (17 points): ear to ear along jawline
     234, 93, 132, 58, 172, 136, 150, 149, 176, 148, 152, 377, 400, 378, 365, 288, 323,
-    # Left eyebrow 17-21 (5 points)
     70, 63, 105, 66, 107,
-    # Right eyebrow 22-26 (5 points)
     336, 296, 334, 293, 300,
-    # Nose bridge 27-30 (4 points)
     168, 6, 197, 195,
-    # Nose tip 31-35 (5 points)
     5, 4, 45, 275, 1,
-    # Left eye 36-41 (6 points)
     33, 160, 158, 133, 153, 144,
-    # Right eye 42-47 (6 points)
     362, 385, 387, 263, 373, 380,
-    # Outer lip 48-59 (12 points): full loop around outer lip
     61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 321,
-    # Inner lip 60-67 (8 points): full loop around inner lip
     78, 82, 13, 312, 308, 317, 14, 87,
 ]
 
-# Full lip contours for better FE rendering (sent separately)
 OUTER_LIP_LOOP = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
 INNER_LIP_LOOP = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191]
-
-# For mood/feature detection
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 LEFT_EYEBROW = [70, 63, 105, 66, 107]
@@ -85,9 +127,15 @@ RIGHT_EYEBROW = [336, 296, 334, 293, 300]
 
 
 def decode_image(image_data):
+    """Accept base64 or a data:URI and return a BGR uint8 numpy array."""
+    if not isinstance(image_data, str):
+        return None
     if ',' in image_data:
-        image_data = image_data.split(',')[1]
-    img_bytes = base64.b64decode(image_data)
+        image_data = image_data.split(',', 1)[1]
+    try:
+        img_bytes = base64.b64decode(image_data)
+    except Exception:
+        return None
     arr = np.frombuffer(img_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
@@ -110,12 +158,10 @@ def eye_aspect_ratio(landmarks, indices, w, h):
 
 
 def detect_mood(landmarks, w, h):
-    """Mood detection using MediaPipe landmarks."""
     try:
         def pt(i):
             return (landmarks[i].x * w, landmarks[i].y * h)
 
-        # Mouth measurements
         mouth_top = pt(13)
         mouth_bottom = pt(14)
         mouth_left = pt(61)
@@ -125,30 +171,20 @@ def detect_mood(landmarks, w, h):
         mouth_width = abs(mouth_right[0] - mouth_left[0])
         mouth_ratio = mouth_open / max(mouth_width, 1)
 
-        # Smile score
         lip_center_y = (mouth_top[1] + mouth_bottom[1]) / 2
         corner_avg_y = (pt(61)[1] + pt(291)[1]) / 2
-        face_h = abs(pt(10)[1] - pt(152)[1])  # top of face to chin
+        face_h = abs(pt(10)[1] - pt(152)[1])
         smile_score = (lip_center_y - corner_avg_y) / max(face_h, 1)
 
-        # Eye openness
         left_ear = eye_aspect_ratio(landmarks, LEFT_EYE, w, h)
         right_ear = eye_aspect_ratio(landmarks, RIGHT_EYE, w, h)
         eye_openness = (left_ear + right_ear) / 2
 
-        # Eyebrow raise
         left_brow_y = np.mean([landmarks[i].y for i in LEFT_EYEBROW]) * h
         right_brow_y = np.mean([landmarks[i].y for i in RIGHT_EYEBROW]) * h
         eye_center_y = (landmarks[159].y * h + landmarks[386].y * h) / 2
         brow_raise = (eye_center_y - (left_brow_y + right_brow_y) / 2) / max(face_h, 1)
 
-        # Decision tree.
-        # NOTE: brow_raise threshold was 0.08 which fired on neutral faces
-        # (most people sit with brows slightly above eye center). Bumped to
-        # 0.16 so only a real frown / pulled-down brow registers as angry.
-        # Also require smile_score to be non-positive (genuine frown) — a
-        # raised brow with a faint smile is more often surprise/expressive
-        # than angry.
         if mouth_ratio > 0.35:
             return 'surprised', min(0.5 + mouth_ratio, 0.95)
         elif smile_score > 0.02:
@@ -166,14 +202,8 @@ def detect_mood(landmarks, w, h):
 
 
 def estimate_age(landmarks, w, h):
-    """Rough age estimator from facial proportions.
-
-    True age detection wants a CNN (DeepFace / InsightFace / age-net).
-    Until that's wired in, we return a heuristic age band based on:
-      • face length / width ratio (kids have rounder faces)
-      • eye-to-mouth distance vs face height (changes with bone growth)
-    Banded output ("20-29") keeps the UI honest about the precision.
-    """
+    """Heuristic age band from MediaPipe landmarks — replaced by InsightFace
+    when the deep face lane is used (see /face-embed)."""
     try:
         def pt(i):
             return (landmarks[i].x * w, landmarks[i].y * h)
@@ -183,13 +213,11 @@ def estimate_age(landmarks, w, h):
         right_cheek = pt(454)
         eye_y = (pt(33)[1] + pt(263)[1]) / 2.0
         mouth_y = (pt(13)[1] + pt(14)[1]) / 2.0
-
         face_h = abs(chin[1] - top[1])
         face_w = abs(right_cheek[0] - left_cheek[0])
-        ratio = face_h / max(face_w, 1e-3)             # 1.25–1.45 typical adult
-        eye_mouth = abs(mouth_y - eye_y) / max(face_h, 1e-3)   # 0.18–0.24 typical
+        ratio = face_h / max(face_w, 1e-3)
+        eye_mouth = abs(mouth_y - eye_y) / max(face_h, 1e-3)
 
-        # Heuristic banding. Tuned by inspection; not clinically accurate.
         if ratio < 1.10 and eye_mouth < 0.18:
             band, mid = '0-12', 8
         elif ratio < 1.25 and eye_mouth < 0.20:
@@ -228,46 +256,32 @@ def analyze():
 
         h, w = img.shape[:2]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # Face mesh for landmarks
         mesh_results = face_mesh.process(rgb)
-        # Face detection for bounding boxes
         det_results = face_detector.process(rgb)
 
         faces = []
-
         if mesh_results.multi_face_landmarks:
             for i, face_landmarks in enumerate(mesh_results.multi_face_landmarks):
                 lm = face_landmarks.landmark
-
-                # Bounding box from landmarks
                 xs = [l.x * w for l in lm]
                 ys = [l.y * h for l in lm]
                 x1, y1 = int(min(xs)), int(min(ys))
                 x2, y2 = int(max(xs)), int(max(ys))
 
-                # Get detection confidence if available
                 confidence = 0.9
                 if det_results.detections and i < len(det_results.detections):
                     confidence = det_results.detections[i].score[0]
 
-                # Build 68 landmark points using the mapping
                 points_68 = []
                 for idx in MP_TO_68[:68]:
                     points_68.append({'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)})
                 while len(points_68) < 68:
                     points_68.append(points_68[-1])
 
-                # Mood
                 mood, mood_conf = detect_mood(lm, w, h)
-
-                # Age (heuristic for now — see estimate_age docstring)
                 age_info = estimate_age(lm, w, h)
-
-                # Face angle
                 angle = get_face_angle(lm, w, h)
 
-                # Eye/mouth features
                 left_ear = eye_aspect_ratio(lm, LEFT_EYE, w, h)
                 right_ear = eye_aspect_ratio(lm, RIGHT_EYE, w, h)
                 mouth_top = lm[13].y * h
@@ -276,7 +290,6 @@ def analyze():
                 mouth_right = lm[291].x * w
                 mouth_open_ratio = abs(mouth_bottom - mouth_top) / max(abs(mouth_right - mouth_left), 1)
 
-                # Full contour points for better rendering
                 outer_lip_pts = [{'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)} for idx in OUTER_LIP_LOOP]
                 inner_lip_pts = [{'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)} for idx in INNER_LIP_LOOP]
                 left_eye_pts = [{'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)} for idx in LEFT_EYE]
@@ -319,9 +332,13 @@ def analyze():
         return jsonify({'error': str(e)}), 500
 
 
-# ═══ Object Detection (YOLOv8-nano via OpenCV DNN) ═══
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIGHT LANE 2: YOLOv8 (kept from previous build — nano ONNX default, upgraded
+# to `yolov8s.onnx` automatically if the file is present next to nano)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 YOLO_MODEL = None
+YOLO_MODEL_NAME = None
 YOLO_CLASSES = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
     'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse',
     'sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie',
@@ -332,14 +349,28 @@ YOLO_CLASSES = ['person','bicycle','car','motorcycle','airplane','bus','train','
     'remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book',
     'clock','vase','scissors','teddy bear','hair drier','toothbrush']
 
+
 def load_yolo():
-    global YOLO_MODEL
-    model_path = os.path.join(os.path.dirname(__file__), 'yolov8n.onnx')
-    if os.path.exists(model_path):
-        YOLO_MODEL = cv2.dnn.readNetFromONNX(model_path)
-        print(f"Loaded YOLOv8n from {model_path}")
-    else:
-        print(f"YOLOv8n not found at {model_path}")
+    """Prefer yolov8s.onnx (better mAP) if it exists, else fall back to yolov8n.
+
+    The `s` variant is ~22 MB vs ~13 MB for nano — still trivial on 12 GB RAM
+    and materially more accurate on small objects. We keep both loaders so a
+    box that hasn't downloaded `s` yet keeps working with the nano weights.
+    """
+    global YOLO_MODEL, YOLO_MODEL_NAME
+    here = os.path.dirname(__file__)
+    for candidate, label in (('yolov8s.onnx', 'YOLOv8s'), ('yolov8n.onnx', 'YOLOv8n')):
+        path = os.path.join(here, candidate)
+        if os.path.exists(path):
+            try:
+                YOLO_MODEL = cv2.dnn.readNetFromONNX(path)
+                YOLO_MODEL_NAME = label
+                print(f'[boot] Loaded {label} from {path}')
+                return
+            except Exception as e:
+                print(f'[boot] Failed to load {candidate}: {e}')
+    print('[boot] YOLOv8 model not found (looked for yolov8s.onnx / yolov8n.onnx)')
+
 
 load_yolo()
 
@@ -348,7 +379,6 @@ load_yolo()
 def detect_objects():
     if YOLO_MODEL is None:
         return jsonify({'error': 'YOLOv8 model not loaded', 'objects': [], 'count': 0}), 200
-
     try:
         data = request.json
         if not data or 'image' not in data:
@@ -376,13 +406,11 @@ def detect_objects():
             confidence = float(scores[class_id])
             if confidence < threshold:
                 continue
-
             cx, cy, bw, bh = detection[:4]
             x1 = int((cx - bw/2) * w / 640)
             y1 = int((cy - bh/2) * h / 640)
             x2 = int((cx + bw/2) * w / 640)
             y2 = int((cy + bh/2) * h / 640)
-
             class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else f'class_{class_id}'
             objects.append({
                 'class': class_name,
@@ -402,26 +430,23 @@ def detect_objects():
             'objects': objects[:20],
             'count': len(objects),
             'imageSize': {'width': w, 'height': h},
+            'model': YOLO_MODEL_NAME,
         })
 
     except Exception as e:
         return jsonify({'error': str(e), 'objects': [], 'count': 0}), 500
 
 
-# ═══ OCR (Tesseract) ═══
-# Cache the "does tesseract actually run" answer so we don't fork a subprocess
-# on every request just to fail.
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIGHT LANE 3: Tesseract OCR (kept from previous build)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 _TESSERACT_CHECKED = False
 _TESSERACT_OK = False
 _TESSERACT_ERR = None
 
 
 def _check_tesseract():
-    """Verify pytesseract module + tesseract binary are both usable.
-
-    Called on the first /ocr or /vision-analyze request. Result cached
-    for the process lifetime.
-    """
     global _TESSERACT_CHECKED, _TESSERACT_OK, _TESSERACT_ERR
     if _TESSERACT_CHECKED:
         return _TESSERACT_OK
@@ -440,37 +465,21 @@ def _check_tesseract():
 
 @app.route('/ocr', methods=['POST'])
 def ocr():
-    """Run Tesseract on the image, return per-word bboxes + confidences.
-
-    Contract:
-      request  : { image: <base64 or data-uri> }
-      response : { words: [{ text, confidence, bbox: [x, y, w, h] }],
-                   available: bool, warning?: str }
-    Always 200 — if tesseract isn't available we return an empty word list
-    plus a warning so the omnibus /vision-analyze caller can degrade
-    gracefully instead of surfacing a 5xx.
-    """
     try:
         data = request.get_json(silent=True) or {}
         image_data = data.get('image')
         if not image_data:
             return jsonify({'error': 'No image provided', 'words': [], 'available': False}), 400
-
         if not _check_tesseract():
             return jsonify({
-                'words': [],
-                'available': False,
+                'words': [], 'available': False,
                 'warning': _TESSERACT_ERR or 'tesseract unavailable',
             })
-
         img = decode_image(image_data)
         if img is None:
             return jsonify({'error': 'Invalid image', 'words': [], 'available': True}), 400
-
-        # PIL wants RGB. OpenCV gives BGR.
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-
         d = pytesseract.image_to_data(pil, output_type=pytesseract.Output.DICT)
         words = []
         n = len(d.get('text', []))
@@ -490,35 +499,25 @@ def ocr():
                 'bbox': [int(d['left'][i]), int(d['top'][i]),
                          int(d['width'][i]), int(d['height'][i])],
             })
-
         return jsonify({'words': words, 'available': True})
-
     except Exception as e:
         return jsonify({'error': str(e), 'words': [], 'available': True}), 500
 
 
-# ═══ Dominant colours (k-means on downsampled image) ═══
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIGHT LANE 4: Dominant colours (kept from previous build)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _extract_dominant_colors(bgr_img, k=6):
-    """Return the top-k colour clusters as { hex, rgb, weight } list.
-
-    Downsamples to 64x64 first so k-means converges in a few ms even on
-    4K photos. Weight is the fraction of sampled pixels in that cluster.
-    """
     small = cv2.resize(bgr_img, (64, 64), interpolation=cv2.INTER_AREA)
-    # OpenCV k-means wants float32 in shape (N, 3).
     Z = small.reshape(-1, 3).astype(np.float32)
-    # 10 iterations / eps 1.0 is plenty for a 4096-pixel palette; termination
-    # criteria bounds the CPU cost.
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-    # KMEANS_PP_CENTERS = k-means++ seeding — better clusters than random.
     _, labels, centers = cv2.kmeans(Z, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
     labels = labels.flatten()
     total = float(len(labels))
     clusters = []
     for i in range(k):
         weight = float(np.sum(labels == i)) / total if total else 0.0
-        # centers come back BGR (because Z was BGR) — swap to RGB for the API.
         b, g, r = [int(round(v)) for v in centers[i]]
         clusters.append({
             'hex': '#{:02x}{:02x}{:02x}'.format(r, g, b),
@@ -530,7 +529,6 @@ def _extract_dominant_colors(bgr_img, k=6):
 
 
 def _image_metadata(bgr_img):
-    """width, height, aspect_ratio, avg_brightness (0-1), contrast (stddev/128)."""
     h, w = bgr_img.shape[:2]
     gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
     mean = float(np.mean(gray))
@@ -540,8 +538,6 @@ def _image_metadata(bgr_img):
         'height': int(h),
         'aspect_ratio': round(w / max(h, 1), 4),
         'avg_brightness': round(mean / 255.0, 4),
-        # Normalise stddev by 128 (max meaningful spread for 0-255). Values
-        # >1 are possible but rare on real photos.
         'contrast': round(min(std / 128.0, 1.0), 4),
     }
 
@@ -555,24 +551,518 @@ def dominant_colors():
             return jsonify({'error': 'No image provided', 'colors': []}), 400
         k = int(data.get('k', 6))
         k = max(2, min(k, 10))
-
         img = decode_image(image_data)
         if img is None:
             return jsonify({'error': 'Invalid image', 'colors': []}), 400
-
         colors = _extract_dominant_colors(img, k=k)
         return jsonify({'colors': colors, 'meta': _image_metadata(img)})
     except Exception as e:
         return jsonify({'error': str(e), 'colors': []}), 500
 
 
-# ═══ /vision-analyze — omnibus: faces + objects + ocr + colours + meta ═══
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEEP-MODEL SINGLETONS (BLIP, CLIP, InsightFace, PaddleOCR, Depth-Anything)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Each `_LazyModel` wraps a single big model. First `.get()` triggers the load
+# under a lock; every subsequent call returns the warm handle. If load fails
+# we cache the error so we don't retry the download every request — an admin
+# has to fix the underlying issue (missing wheel, no disk space, etc.).
 
-def _run_face_analysis(img):
-    """Inline copy of /analyze's core so we can call it without a HTTP hop.
+class _LazyModel:
+    __slots__ = ('name', 'loader', '_obj', '_err', '_lock')
 
-    Returns the same shape as /analyze's response body.
-    """
+    def __init__(self, name, loader):
+        self.name = name
+        self.loader = loader
+        self._obj = None
+        self._err = None
+        self._lock = threading.Lock()
+
+    def get(self):
+        if self._obj is not None:
+            return self._obj
+        if self._err is not None:
+            raise self._err
+        with self._lock:
+            if self._obj is not None:
+                return self._obj
+            if self._err is not None:
+                raise self._err
+            try:
+                print(f'[lazy-load] {self.name} — starting (may take several minutes on first hit)')
+                t0 = time.monotonic()
+                self._obj = self.loader()
+                print(f'[lazy-load] {self.name} — ready ({time.monotonic() - t0:.1f}s)')
+                return self._obj
+            except Exception as e:
+                self._err = e
+                print(f'[lazy-load] {self.name} — FAILED: {e}')
+                raise
+
+    @property
+    def loaded(self):
+        return self._obj is not None
+
+    @property
+    def error(self):
+        return str(self._err) if self._err else None
+
+
+# ─── BLIP-1 base — image captioning ─────────────────────────────
+def _load_blip():
+    if not _HAS_TRANSFORMERS or not _HAS_TORCH:
+        raise RuntimeError('transformers + torch not installed')
+    from transformers import BlipProcessor, BlipForConditionalGeneration
+    processor = BlipProcessor.from_pretrained('Salesforce/blip-image-captioning-base')
+    model = BlipForConditionalGeneration.from_pretrained('Salesforce/blip-image-captioning-base')
+    model.eval()
+    return {'processor': processor, 'model': model}
+
+
+BLIP = _LazyModel('BLIP-1 base', _load_blip)
+
+
+# ─── CLIP ViT-B/32 — zero-shot classification ────────────────────
+def _load_clip():
+    if not _HAS_TRANSFORMERS or not _HAS_TORCH:
+        raise RuntimeError('transformers + torch not installed')
+    from transformers import CLIPProcessor, CLIPModel
+    processor = CLIPProcessor.from_pretrained('openai/clip-vit-base-patch32')
+    model = CLIPModel.from_pretrained('openai/clip-vit-base-patch32')
+    model.eval()
+    return {'processor': processor, 'model': model}
+
+
+CLIP = _LazyModel('CLIP ViT-B/32', _load_clip)
+
+
+# ─── InsightFace buffalo_s — 512-dim face embedding + attributes ─
+def _load_insightface():
+    if not _HAS_INSIGHTFACE:
+        raise RuntimeError('insightface not installed')
+    from insightface.app import FaceAnalysis
+    # buffalo_s is the smallest bundle — det10g + w600k_r50 + age/gender + landmark
+    # ~150 MB total on disk. `providers=['CPUExecutionProvider']` keeps ORT off
+    # any GPU that might sneak into the runtime.
+    fa = FaceAnalysis(name='buffalo_s', providers=['CPUExecutionProvider'])
+    fa.prepare(ctx_id=-1, det_size=(640, 640))  # ctx_id=-1 → CPU
+    return fa
+
+
+INSIGHT = _LazyModel('InsightFace buffalo_s', _load_insightface)
+
+
+# ─── PaddleOCR PP-OCRv4 ─────────────────────────────────────────
+def _load_paddle():
+    if not _HAS_PADDLE:
+        raise RuntimeError('paddleocr not installed')
+    from paddleocr import PaddleOCR
+    return PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+
+
+PADDLE = _LazyModel('PaddleOCR PP-OCRv4', _load_paddle)
+
+
+# ─── Depth-Anything-V2-Small ─────────────────────────────────────
+def _load_depth():
+    if not _HAS_TRANSFORMERS or not _HAS_TORCH:
+        raise RuntimeError('transformers + torch not installed')
+    from transformers import pipeline
+    # `depth-estimation` pipeline auto-picks the right head + processor.
+    return pipeline(task='depth-estimation', model='depth-anything/Depth-Anything-V2-Small-hf')
+
+
+DEPTH = _LazyModel('Depth-Anything-V2-Small', _load_depth)
+
+
+def _pil_from_bgr(bgr):
+    """OpenCV BGR ndarray → PIL RGB. Every deep pipeline wants PIL RGB."""
+    if Image is None:
+        # Pillow only gets imported when the OCR block succeeds — but the deep
+        # lanes also need it. Fall back to a direct import so an admin-only
+        # Tesseract failure doesn't take down BLIP/CLIP too.
+        import PIL.Image as _PILImage  # type: ignore
+        return _PILImage.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    return Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEEP ENDPOINT: /caption  — BLIP-1 base
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/caption', methods=['POST'])
+def caption():
+    try:
+        data = request.get_json(silent=True) or {}
+        image_data = data.get('image')
+        if not image_data:
+            return jsonify({'error': 'No image provided', 'available': False}), 400
+        img = decode_image(image_data)
+        if img is None:
+            return jsonify({'error': 'Invalid image', 'available': False}), 400
+
+        try:
+            b = BLIP.get()
+        except Exception as e:
+            return jsonify({'available': False, 'warning': f'BLIP unavailable: {e}',
+                            'caption': '', 'confidence': 0.0})
+
+        import torch  # local import — module-level `_HAS_TORCH` already verified
+        pil = _pil_from_bgr(img)
+        inputs = b['processor'](images=pil, return_tensors='pt')
+        # `generate` returns token IDs; we don't get per-token probs by default,
+        # but `output_scores=True` gives us the logits so we can approximate
+        # a per-caption confidence (mean softmax of top token at each step).
+        with torch.no_grad():
+            out = b['model'].generate(
+                **inputs, max_new_tokens=32, num_beams=3,
+                return_dict_in_generate=True, output_scores=True,
+            )
+        text = b['processor'].decode(out.sequences[0], skip_special_tokens=True).strip()
+
+        # Confidence proxy — mean of the max softmax value at each generation
+        # step. Beam search returns scores per beam; we take the winning beam
+        # (index 0). Clamp to [0, 1] just in case of numerical wobble.
+        confidence = 0.0
+        try:
+            if out.scores:
+                probs = [torch.softmax(step[0], dim=-1).max().item() for step in out.scores]
+                if probs:
+                    confidence = float(sum(probs) / len(probs))
+                    confidence = max(0.0, min(1.0, confidence))
+        except Exception:
+            confidence = 0.0
+
+        return jsonify({
+            'caption': text,
+            'confidence': round(confidence, 3),
+            'available': True,
+            'model': 'BLIP-1 base',
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'caption': '', 'available': True}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEEP ENDPOINT: /clip-tags  — CLIP zero-shot classification
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/clip-tags', methods=['POST'])
+def clip_tags():
+    try:
+        data = request.get_json(silent=True) or {}
+        image_data = data.get('image')
+        raw_labels = data.get('labels') or []
+        top_k = int(data.get('top_k', 5))
+        if not image_data:
+            return jsonify({'error': 'No image provided', 'available': False}), 400
+        if not isinstance(raw_labels, list) or not raw_labels:
+            return jsonify({'error': 'Provide a non-empty labels[] array', 'available': True}), 400
+
+        img = decode_image(image_data)
+        if img is None:
+            return jsonify({'error': 'Invalid image', 'available': False}), 400
+
+        try:
+            c = CLIP.get()
+        except Exception as e:
+            return jsonify({'available': False, 'warning': f'CLIP unavailable: {e}', 'tags': []})
+
+        import torch
+        pil = _pil_from_bgr(img)
+        # Prepend "a photo of" — CLIP was trained with this template and scores
+        # much better with it. Callers can pass their own already-templated
+        # strings if they want; we detect that heuristically (contains a space).
+        prompts = [str(l).strip() for l in raw_labels if l]
+        prompts = [p if ' ' in p else f'a photo of {p}' for p in prompts]
+
+        inputs = c['processor'](text=prompts, images=pil, return_tensors='pt', padding=True)
+        with torch.no_grad():
+            out = c['model'](**inputs)
+            # logits_per_image: (1, N_labels). Softmax across labels → prob mass.
+            probs = out.logits_per_image.softmax(dim=1)[0].tolist()
+
+        # Zip back the ORIGINAL labels (not the "a photo of" prompt), sort by score.
+        pairs = list(zip([str(l).strip() for l in raw_labels], probs))
+        pairs.sort(key=lambda p: p[1], reverse=True)
+        top_k = max(1, min(top_k, len(pairs)))
+        return jsonify({
+            'tags': [{'label': lbl, 'score': round(float(s), 4)} for lbl, s in pairs[:top_k]],
+            'available': True,
+            'model': 'CLIP ViT-B/32',
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'tags': [], 'available': True}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEEP ENDPOINT: /face-embed  — InsightFace buffalo_s
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _insight_face_records(img_bgr):
+    """Return list of raw InsightFace Face records. Loads the model lazily."""
+    fa = INSIGHT.get()
+    return fa.get(img_bgr)
+
+
+def _serialise_face(f, include_embedding=True):
+    """Convert an InsightFace Face → JSON-safe dict."""
+    def _f(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    bbox = getattr(f, 'bbox', None)
+    kps = getattr(f, 'kps', None)
+    emb = getattr(f, 'normed_embedding', None)
+    if emb is None:
+        emb = getattr(f, 'embedding', None)
+    gender = getattr(f, 'gender', None)
+    age = getattr(f, 'age', None)
+
+    return {
+        'bbox': [int(round(_f(x))) for x in (bbox if bbox is not None else [0, 0, 0, 0])],
+        'landmarks_5pt': [[_f(x), _f(y)] for x, y in (kps if kps is not None else [])],
+        'age': int(round(_f(age))) if age is not None else None,
+        # InsightFace gender is 0=F, 1=M
+        'gender': 'M' if gender == 1 else ('F' if gender == 0 else None),
+        'det_score': round(_f(getattr(f, 'det_score', 0)), 3),
+        'embedding_dim': int(len(emb)) if emb is not None else 0,
+        # Only ship the raw 512-dim vector when the caller wants it — it's
+        # ~2 KB of JSON per face which bloats the omnibus response.
+        'embedding': [round(_f(v), 6) for v in emb] if (include_embedding and emb is not None) else None,
+    }
+
+
+@app.route('/face-embed', methods=['POST'])
+def face_embed():
+    try:
+        data = request.get_json(silent=True) or {}
+        image_data = data.get('image')
+        include_embedding = bool(data.get('include_embedding', True))
+        if not image_data:
+            return jsonify({'error': 'No image provided', 'available': False}), 400
+        img = decode_image(image_data)
+        if img is None:
+            return jsonify({'error': 'Invalid image', 'available': False}), 400
+
+        try:
+            faces_raw = _insight_face_records(img)
+        except Exception as e:
+            return jsonify({'available': False, 'warning': f'InsightFace unavailable: {e}',
+                            'faces': [], 'faceCount': 0})
+
+        faces = [_serialise_face(f, include_embedding=include_embedding) for f in faces_raw]
+        return jsonify({
+            'faces': faces,
+            'faceCount': len(faces),
+            'available': True,
+            'model': 'InsightFace buffalo_s',
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'faces': [], 'available': True}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEEP ENDPOINT: /face-verify  — cosine similarity on two face embeddings
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _cosine(a, b):
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+# 0.5 is the InsightFace-recommended threshold for buffalo family models
+# (arcface cosine sim). Above → same person; below → different.
+FACE_VERIFY_THRESHOLD = 0.5
+
+
+@app.route('/face-verify', methods=['POST'])
+def face_verify():
+    try:
+        data = request.get_json(silent=True) or {}
+        image_a = data.get('imageA') or data.get('image_a') or data.get('image1')
+        image_b = data.get('imageB') or data.get('image_b') or data.get('image2')
+        threshold = float(data.get('threshold', FACE_VERIFY_THRESHOLD))
+
+        if not image_a or not image_b:
+            return jsonify({'error': 'Provide imageA and imageB', 'available': True}), 400
+        a = decode_image(image_a)
+        b = decode_image(image_b)
+        if a is None or b is None:
+            return jsonify({'error': 'Invalid image(s)', 'available': True}), 400
+
+        try:
+            fa = _insight_face_records(a)
+            fb = _insight_face_records(b)
+        except Exception as e:
+            return jsonify({'available': False, 'warning': f'InsightFace unavailable: {e}',
+                            'same_person': False, 'similarity': 0.0, 'threshold': threshold})
+
+        if not fa or not fb:
+            return jsonify({
+                'available': True,
+                'same_person': False,
+                'similarity': 0.0,
+                'threshold': threshold,
+                'warning': f'No face detected in image{"A" if not fa else "B"}',
+                'facesA': len(fa), 'facesB': len(fb),
+            })
+
+        # Highest-confidence face per image. If a caller wants a specific pair
+        # they should crop the source image before uploading.
+        top_a = max(fa, key=lambda f: getattr(f, 'det_score', 0))
+        top_b = max(fb, key=lambda f: getattr(f, 'det_score', 0))
+        emb_a = getattr(top_a, 'normed_embedding', None) or getattr(top_a, 'embedding', None)
+        emb_b = getattr(top_b, 'normed_embedding', None) or getattr(top_b, 'embedding', None)
+        if emb_a is None or emb_b is None:
+            return jsonify({
+                'available': True, 'same_person': False, 'similarity': 0.0,
+                'threshold': threshold, 'warning': 'Face has no embedding',
+            })
+
+        sim = _cosine(emb_a, emb_b)
+        return jsonify({
+            'available': True,
+            'same_person': bool(sim >= threshold),
+            'similarity': round(sim, 4),
+            'threshold': threshold,
+            'facesA': len(fa),
+            'facesB': len(fb),
+            'model': 'InsightFace buffalo_s',
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'available': True}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEEP ENDPOINT: /paddle-ocr  — PaddleOCR PP-OCRv4
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/paddle-ocr', methods=['POST'])
+def paddle_ocr():
+    try:
+        data = request.get_json(silent=True) or {}
+        image_data = data.get('image')
+        if not image_data:
+            return jsonify({'error': 'No image provided', 'available': False}), 400
+        img = decode_image(image_data)
+        if img is None:
+            return jsonify({'error': 'Invalid image', 'available': False}), 400
+
+        try:
+            ocr_engine = PADDLE.get()
+        except Exception as e:
+            return jsonify({'available': False, 'warning': f'PaddleOCR unavailable: {e}',
+                            'words': []})
+
+        # PaddleOCR accepts a numpy array (BGR or RGB — it handles both).
+        raw = ocr_engine.ocr(img, cls=True)
+        # Raw shape (PaddleOCR 2.7): [[ [ [ [x,y]*4 ], (text, conf) ], ... ]]
+        words = []
+        # `raw` is a list per image; we always pass a single image so index [0].
+        page = raw[0] if raw and raw[0] is not None else []
+        for line in page:
+            try:
+                pts = line[0]
+                text, conf = line[1]
+                text = str(text).strip()
+                if not text:
+                    continue
+                bbox_4pt = [[float(x), float(y)] for x, y in pts]
+                words.append({
+                    'text': text,
+                    'confidence': round(float(conf), 4),
+                    'bbox_4pt': bbox_4pt,
+                })
+            except Exception:
+                continue
+
+        return jsonify({
+            'words': words,
+            'count': len(words),
+            'available': True,
+            'model': 'PaddleOCR PP-OCRv4',
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'words': [], 'available': True}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEEP ENDPOINT: /depth-map  — Depth-Anything-V2-Small
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/depth-map', methods=['POST'])
+def depth_map():
+    try:
+        data = request.get_json(silent=True) or {}
+        image_data = data.get('image')
+        if not image_data:
+            return jsonify({'error': 'No image provided', 'available': False}), 400
+        img = decode_image(image_data)
+        if img is None:
+            return jsonify({'error': 'Invalid image', 'available': False}), 400
+
+        try:
+            depth_pipeline = DEPTH.get()
+        except Exception as e:
+            return jsonify({'available': False, 'warning': f'Depth-Anything unavailable: {e}',
+                            'depth_url': None, 'stats': None})
+
+        pil = _pil_from_bgr(img)
+        result = depth_pipeline(pil)
+        # `pipeline('depth-estimation')` returns { 'predicted_depth': tensor,
+        # 'depth': PIL grayscale image }. We serve the PIL image as a PNG
+        # data URL and hand back the raw tensor stats.
+        import torch
+        depth_tensor = result.get('predicted_depth')
+        if depth_tensor is not None:
+            arr = depth_tensor.detach().cpu().numpy()
+            stats = {
+                'min': round(float(arr.min()), 4),
+                'max': round(float(arr.max()), 4),
+                'mean': round(float(arr.mean()), 4),
+                'std': round(float(arr.std()), 4),
+            }
+        else:
+            stats = None
+
+        # PNG-encode the greyscale depth preview.
+        depth_img = result.get('depth')
+        preview_url = None
+        if depth_img is not None:
+            buf = io.BytesIO()
+            depth_img.save(buf, format='PNG')
+            b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+            preview_url = f'data:image/png;base64,{b64}'
+
+        return jsonify({
+            'depth_url': preview_url,
+            'stats': stats,
+            'available': True,
+            'model': 'Depth-Anything-V2-Small',
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'depth_url': None, 'available': True}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERNAL HELPERS — reused by /vision-analyze and /vision-deep omnibuses
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _run_face_analysis_light(img):
     h, w = img.shape[:2]
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     mesh_results = face_mesh.process(rgb)
@@ -586,53 +1076,40 @@ def _run_face_analysis(img):
             ys = [l.y * h for l in lm]
             x1, y1 = int(min(xs)), int(min(ys))
             x2, y2 = int(max(xs)), int(max(ys))
-
             confidence = 0.9
             if det_results.detections and i < len(det_results.detections):
                 confidence = det_results.detections[i].score[0]
-
             points_68 = []
             for idx in MP_TO_68[:68]:
                 points_68.append({'x': round(lm[idx].x * w, 1), 'y': round(lm[idx].y * h, 1)})
             while len(points_68) < 68:
                 points_68.append(points_68[-1])
-
             mood, mood_conf = detect_mood(lm, w, h)
             angle = get_face_angle(lm, w, h)
-
             faces.append({
-                'boundingBox': {
-                    'x': max(0, x1), 'y': max(0, y1),
-                    'width': x2 - x1, 'height': y2 - y1,
-                },
+                'boundingBox': {'x': max(0, x1), 'y': max(0, y1),
+                                'width': x2 - x1, 'height': y2 - y1},
                 'confidence': round(float(confidence), 3),
                 'landmarks': {'points': points_68},
                 'mood': mood,
                 'moodConfidence': round(mood_conf, 2),
                 'faceAngle': angle,
             })
-    return {
-        'faces': faces,
-        'faceCount': len(faces),
-        'imageSize': {'width': w, 'height': h},
-    }
+    return {'faces': faces, 'faceCount': len(faces),
+            'imageSize': {'width': w, 'height': h}}
 
 
 def _run_object_detection(img, threshold=0.5):
-    """Inline copy of /detect-objects's core."""
     if YOLO_MODEL is None:
         return {'objects': [], 'count': 0, 'available': False,
                 'warning': 'YOLOv8 model not loaded'}
-
     h, w = img.shape[:2]
     blob = cv2.dnn.blobFromImage(img, 1/255.0, (640, 640), swapRB=True, crop=False)
     YOLO_MODEL.setInput(blob)
     outputs = YOLO_MODEL.forward()
-
     out = outputs[0].T if len(outputs[0].shape) == 3 else outputs[0]
     if out.shape[0] == 84:
         out = out.T
-
     objects = []
     for detection in out:
         scores = detection[4:]
@@ -651,7 +1128,6 @@ def _run_object_detection(img, threshold=0.5):
             'confidence': round(confidence, 3),
             'bbox': [max(0, x1), max(0, y1), min(w, x2) - max(0, x1), min(h, y2) - max(0, y1)],
         })
-
     if objects:
         boxes = [o['bbox'] for o in objects]
         scores_list = [o['confidence'] for o in objects]
@@ -659,12 +1135,11 @@ def _run_object_detection(img, threshold=0.5):
         if len(indices) > 0:
             indices = indices.flatten() if hasattr(indices, 'flatten') else [i[0] if isinstance(i, (list, tuple)) else i for i in indices]
             objects = [objects[i] for i in indices]
+    return {'objects': objects[:20], 'count': len(objects), 'available': True,
+            'model': YOLO_MODEL_NAME}
 
-    return {'objects': objects[:20], 'count': len(objects), 'available': True}
 
-
-def _run_ocr(img):
-    """Inline copy of /ocr's core."""
+def _run_ocr_tesseract(img):
     if not _check_tesseract():
         return {'words': [], 'available': False,
                 'warning': _TESSERACT_ERR or 'tesseract unavailable'}
@@ -695,37 +1170,31 @@ def _run_ocr(img):
         return {'words': [], 'available': True, 'warning': f'ocr failed: {e}'}
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# /vision-analyze  — LIGHT omnibus (unchanged from prev build)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 @app.route('/vision-analyze', methods=['POST'])
 def vision_analyze():
-    """One-shot: faces + objects + OCR + dominant colours + metadata.
-
-    Each lane is wrapped so a single failure yields a `warnings[]` entry
-    rather than tanking the response. The Node BE proxies this endpoint
-    and adds its own SHA-256 cache + IP rate limit on top.
-    """
     started = time.monotonic()
     try:
         data = request.get_json(silent=True) or {}
         image_data = data.get('image')
         if not image_data:
             return jsonify({'ok': False, 'error': 'No image provided'}), 400
-
         img = decode_image(image_data)
         if img is None:
             return jsonify({'ok': False, 'error': 'Invalid image'}), 400
-
         threshold = float(data.get('threshold', 0.5))
         k = int(data.get('k', 6))
         k = max(2, min(k, 10))
 
         warnings = []
-        # Each lane is wrapped: on failure we log a warning and keep going.
         try:
-            face_out = _run_face_analysis(img)
+            face_out = _run_face_analysis_light(img)
         except Exception as e:
             face_out = {'faces': [], 'faceCount': 0}
             warnings.append(f'faces: {e}')
-
         try:
             obj_out = _run_object_detection(img, threshold=threshold)
             if obj_out.get('warning'):
@@ -733,21 +1202,18 @@ def vision_analyze():
         except Exception as e:
             obj_out = {'objects': [], 'count': 0, 'available': False}
             warnings.append(f'objects: {e}')
-
         try:
-            ocr_out = _run_ocr(img)
+            ocr_out = _run_ocr_tesseract(img)
             if ocr_out.get('warning'):
                 warnings.append(f'ocr: {ocr_out["warning"]}')
         except Exception as e:
             ocr_out = {'words': [], 'available': False}
             warnings.append(f'ocr: {e}')
-
         try:
             colors = _extract_dominant_colors(img, k=k)
         except Exception as e:
             colors = []
             warnings.append(f'colors: {e}')
-
         try:
             meta = _image_metadata(img)
         except Exception as e:
@@ -767,20 +1233,426 @@ def vision_analyze():
             'warnings': warnings,
             'elapsedMs': int((time.monotonic() - started) * 1000),
         })
-
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /vision-deep  — DEEP omnibus: caption + CLIP tags + faces + objects + OCR
+#                 + dominant colours + depth-map preview + meta
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Default CLIP label list — the Node BE can override via `labels[]`. Kept broad
+# so it works as a "figure out what kind of image this is" tagger out of the box.
+DEFAULT_CLIP_LABELS = [
+    'portrait photograph', 'landscape photograph', 'street photography',
+    'macro photograph', 'food photograph', 'product photograph',
+    'painting', 'illustration', 'digital art', 'sketch',
+    'tattoo art', 'graffiti', 'poster', 'screenshot', 'meme',
+    'indoor scene', 'outdoor scene', 'night scene',
+    'warm colour palette', 'cool colour palette', 'monochrome',
+    'happy vibe', 'moody vibe', 'romantic vibe', 'aggressive vibe',
+]
+
+
+def _aesthetic_summary(bgr_img, dominant):
+    """Cheap heuristic aesthetic tags derived from HSV + palette."""
+    try:
+        hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+        h_mean = float(hsv[:, :, 0].mean())
+        s_mean = float(hsv[:, :, 1].mean()) / 255.0
+        v_mean = float(hsv[:, :, 2].mean()) / 255.0
+        # OpenCV hue is 0-179; wrap into "warm" (red/yellow/orange) vs "cool" (green/blue).
+        # Warm ≈ [0..30] ∪ [150..179]; cool ≈ [30..150] roughly.
+        if h_mean < 30 or h_mean > 150:
+            vibe = 'warm'
+        else:
+            vibe = 'cool'
+        # If saturation is very low regardless of hue, call it neutral/mono.
+        if s_mean < 0.15:
+            vibe = 'neutral'
+        return {
+            'vibe': vibe,
+            'brightness': round(v_mean, 3),
+            'saturation': round(s_mean, 3),
+        }
+    except Exception:
+        return {'vibe': 'neutral', 'brightness': 0.5, 'saturation': 0.5}
+
+
+def _run_caption(img):
+    try:
+        b = BLIP.get()
+    except Exception as e:
+        return {'available': False, 'warning': f'BLIP unavailable: {e}',
+                'caption': '', 'confidence': 0.0}
+    try:
+        import torch
+        pil = _pil_from_bgr(img)
+        inputs = b['processor'](images=pil, return_tensors='pt')
+        with torch.no_grad():
+            out = b['model'].generate(
+                **inputs, max_new_tokens=32, num_beams=3,
+                return_dict_in_generate=True, output_scores=True,
+            )
+        text = b['processor'].decode(out.sequences[0], skip_special_tokens=True).strip()
+        conf = 0.0
+        try:
+            if out.scores:
+                probs = [torch.softmax(step[0], dim=-1).max().item() for step in out.scores]
+                if probs:
+                    conf = float(sum(probs) / len(probs))
+                    conf = max(0.0, min(1.0, conf))
+        except Exception:
+            conf = 0.0
+        return {'available': True, 'caption': text, 'confidence': round(conf, 3)}
+    except Exception as e:
+        return {'available': True, 'warning': f'caption failed: {e}',
+                'caption': '', 'confidence': 0.0}
+
+
+def _run_clip(img, labels, top_k=8):
+    try:
+        c = CLIP.get()
+    except Exception as e:
+        return {'available': False, 'warning': f'CLIP unavailable: {e}', 'tags': []}
+    try:
+        import torch
+        pil = _pil_from_bgr(img)
+        prompts = [p if ' ' in p else f'a photo of {p}' for p in labels]
+        inputs = c['processor'](text=prompts, images=pil, return_tensors='pt', padding=True)
+        with torch.no_grad():
+            out = c['model'](**inputs)
+            probs = out.logits_per_image.softmax(dim=1)[0].tolist()
+        pairs = list(zip(labels, probs))
+        pairs.sort(key=lambda p: p[1], reverse=True)
+        top_k = max(1, min(top_k, len(pairs)))
+        return {
+            'available': True,
+            'tags': [{'label': lbl, 'score': round(float(s), 4)} for lbl, s in pairs[:top_k]],
+        }
+    except Exception as e:
+        return {'available': True, 'warning': f'clip failed: {e}', 'tags': []}
+
+
+def _run_insightface(img, include_embedding=False):
+    try:
+        raw = _insight_face_records(img)
+    except Exception as e:
+        return {'available': False, 'warning': f'InsightFace unavailable: {e}',
+                'faces': [], 'faceCount': 0}
+    faces = [_serialise_face(f, include_embedding=include_embedding) for f in raw]
+    return {'available': True, 'faces': faces, 'faceCount': len(faces)}
+
+
+def _run_paddle(img):
+    try:
+        eng = PADDLE.get()
+    except Exception as e:
+        return {'available': False, 'warning': f'PaddleOCR unavailable: {e}', 'words': []}
+    try:
+        raw = eng.ocr(img, cls=True)
+        page = raw[0] if raw and raw[0] is not None else []
+        words = []
+        for line in page:
+            try:
+                pts = line[0]
+                text, conf = line[1]
+                text = str(text).strip()
+                if not text:
+                    continue
+                # Convert 4-pt polygon to bbox-style [x, y, w, h] for FE compat,
+                # keep 4pt in a separate field for callers that want the exact
+                # rotated rectangle.
+                xs = [float(x) for x, _ in pts]
+                ys = [float(y) for _, y in pts]
+                x, y = int(min(xs)), int(min(ys))
+                w, h = int(max(xs) - x), int(max(ys) - y)
+                words.append({
+                    'text': text,
+                    'confidence': round(float(conf), 4),
+                    'bbox': [x, y, w, h],
+                    'bbox_4pt': [[float(px), float(py)] for px, py in pts],
+                })
+            except Exception:
+                continue
+        return {'available': True, 'words': words}
+    except Exception as e:
+        return {'available': True, 'warning': f'paddle failed: {e}', 'words': []}
+
+
+def _run_depth(img):
+    try:
+        pipe = DEPTH.get()
+    except Exception as e:
+        return {'available': False, 'warning': f'Depth-Anything unavailable: {e}',
+                'preview_url': None, 'stats': None}
+    try:
+        pil = _pil_from_bgr(img)
+        result = pipe(pil)
+        stats = None
+        depth_tensor = result.get('predicted_depth')
+        if depth_tensor is not None:
+            arr = depth_tensor.detach().cpu().numpy()
+            stats = {
+                'min': round(float(arr.min()), 4),
+                'max': round(float(arr.max()), 4),
+                'mean': round(float(arr.mean()), 4),
+            }
+        depth_img = result.get('depth')
+        preview_url = None
+        if depth_img is not None:
+            # Downsize the preview aggressively — a 4K depth PNG bloats the
+            # response body to > 2 MB. 512px on the long edge is plenty for a
+            # UI thumbnail.
+            w, h = depth_img.size
+            long_edge = max(w, h)
+            if long_edge > 512:
+                scale = 512.0 / long_edge
+                new_size = (int(round(w * scale)), int(round(h * scale)))
+                depth_img = depth_img.resize(new_size)
+            buf = io.BytesIO()
+            depth_img.save(buf, format='PNG')
+            b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+            preview_url = f'data:image/png;base64,{b64}'
+        return {'available': True, 'preview_url': preview_url, 'stats': stats}
+    except Exception as e:
+        return {'available': True, 'warning': f'depth failed: {e}',
+                'preview_url': None, 'stats': None}
+
+
+@app.route('/vision-deep', methods=['POST'])
+def vision_deep():
+    """Omnibus: caption + CLIP tags + faces (InsightFace) + objects + OCR
+    (PaddleOCR first, Tesseract fallback) + palette + depth-map + meta.
+
+    Query params (JSON):
+      • image (required)          base64 or data-URI
+      • labels[]                  override CLIP label list (else DEFAULT_CLIP_LABELS)
+      • top_k                     CLIP top-K, default 8
+      • threshold                 YOLO min score, default 0.5
+      • k                         k-means K, default 6
+      • include_embedding         face embedding vector in response, default false
+      • skip                      list of lanes to skip (e.g. ['depth','caption'])
+
+    Any lane that fails degrades to `{ available: false, warning }` in its
+    subsection — the response body is always 200 unless the image itself is
+    invalid.
+    """
+    started = time.monotonic()
+    warnings = []
+    models_used = []
+
+    try:
+        data = request.get_json(silent=True) or {}
+        image_data = data.get('image')
+        if not image_data:
+            return jsonify({'ok': False, 'error': 'No image provided'}), 400
+        img = decode_image(image_data)
+        if img is None:
+            return jsonify({'ok': False, 'error': 'Invalid image'}), 400
+
+        threshold = float(data.get('threshold', 0.5))
+        k = int(data.get('k', 6))
+        k = max(2, min(k, 10))
+        top_k = int(data.get('top_k', 8))
+        include_embedding = bool(data.get('include_embedding', False))
+        labels = data.get('labels') or DEFAULT_CLIP_LABELS
+        if not isinstance(labels, list) or not labels:
+            labels = DEFAULT_CLIP_LABELS
+        skip = set(data.get('skip') or [])
+
+        # ── LIGHT LANES ────────────────────────────────────────────
+        try:
+            obj_out = _run_object_detection(img, threshold=threshold)
+            if obj_out.get('warning'):
+                warnings.append(f'objects: {obj_out["warning"]}')
+            elif obj_out.get('available'):
+                models_used.append(obj_out.get('model') or 'YOLOv8')
+        except Exception as e:
+            obj_out = {'objects': [], 'count': 0}
+            warnings.append(f'objects: {e}')
+
+        try:
+            colors = _extract_dominant_colors(img, k=k)
+        except Exception as e:
+            colors = []
+            warnings.append(f'colors: {e}')
+
+        try:
+            meta = _image_metadata(img)
+        except Exception as e:
+            meta = {}
+            warnings.append(f'meta: {e}')
+
+        aesthetic = _aesthetic_summary(img, colors)
+
+        # ── DEEP LANES ─────────────────────────────────────────────
+        # Caption (BLIP)
+        if 'caption' not in skip:
+            cap = _run_caption(img)
+            if cap.get('warning'):
+                warnings.append(f'caption: {cap["warning"]}')
+            if cap.get('available') and cap.get('caption'):
+                models_used.append('BLIP-1 base')
+        else:
+            cap = {'available': False, 'caption': '', 'confidence': 0.0}
+
+        # CLIP zero-shot tags
+        if 'clip' not in skip:
+            clip_out = _run_clip(img, labels, top_k=top_k)
+            if clip_out.get('warning'):
+                warnings.append(f'clip: {clip_out["warning"]}')
+            if clip_out.get('available') and clip_out.get('tags'):
+                models_used.append('CLIP ViT-B/32')
+        else:
+            clip_out = {'available': False, 'tags': []}
+
+        # Faces — try InsightFace first, fall back to MediaPipe light.
+        if 'faces' not in skip:
+            ifaces = _run_insightface(img, include_embedding=include_embedding)
+            if ifaces.get('available'):
+                faces_payload = ifaces
+                models_used.append('InsightFace buffalo_s')
+            else:
+                warnings.append(f'insightface: {ifaces.get("warning", "unavailable")}')
+                # Fall back to MediaPipe for landmarks — still gives us faces.
+                try:
+                    light = _run_face_analysis_light(img)
+                    faces_payload = {
+                        'available': True,
+                        'faces': [{
+                            'bbox': [f['boundingBox']['x'], f['boundingBox']['y'],
+                                     f['boundingBox']['width'], f['boundingBox']['height']],
+                            'landmarks_5pt': [],
+                            'age': None, 'gender': None,
+                            'det_score': f.get('confidence', 0.9),
+                            'embedding_dim': 0, 'embedding': None,
+                            'mood': f.get('mood'), 'faceAngle': f.get('faceAngle'),
+                            'fallback': 'mediapipe',
+                        } for f in light['faces']],
+                        'faceCount': light['faceCount'],
+                        'fallback': 'mediapipe',
+                    }
+                except Exception as e:
+                    faces_payload = {'available': False, 'faces': [], 'faceCount': 0}
+                    warnings.append(f'faces fallback: {e}')
+        else:
+            faces_payload = {'available': False, 'faces': [], 'faceCount': 0}
+
+        # OCR — try PaddleOCR first, fall back to Tesseract.
+        if 'ocr' not in skip:
+            paddle_out = _run_paddle(img)
+            if paddle_out.get('available') and paddle_out.get('words'):
+                ocr_out = paddle_out
+                models_used.append('PaddleOCR PP-OCRv4')
+            elif paddle_out.get('available') and not paddle_out.get('words'):
+                # Paddle loaded but found nothing — accept the empty result and
+                # skip the fallback (Tesseract is unlikely to find text Paddle
+                # missed on clean photos).
+                ocr_out = paddle_out
+                models_used.append('PaddleOCR PP-OCRv4')
+            else:
+                warnings.append(f'paddle-ocr: {paddle_out.get("warning", "unavailable")}')
+                tess = _run_ocr_tesseract(img)
+                if tess.get('warning'):
+                    warnings.append(f'tesseract: {tess["warning"]}')
+                ocr_out = tess
+                if tess.get('available'):
+                    models_used.append('Tesseract')
+        else:
+            ocr_out = {'available': False, 'words': []}
+
+        # Depth map (Depth-Anything)
+        if 'depth' not in skip:
+            depth_out = _run_depth(img)
+            if depth_out.get('warning'):
+                warnings.append(f'depth: {depth_out["warning"]}')
+            if depth_out.get('available') and depth_out.get('preview_url'):
+                models_used.append('Depth-Anything-V2-Small')
+        else:
+            depth_out = {'available': False, 'preview_url': None, 'stats': None}
+
+        return jsonify({
+            'ok': True,
+            'caption': cap.get('caption', ''),
+            'confidence': cap.get('confidence', 0.0),
+            'clip_tags': clip_out.get('tags', []),
+            'faces': faces_payload.get('faces', []),
+            'faceCount': faces_payload.get('faceCount', 0),
+            'face_backend': 'insightface' if faces_payload.get('available') and not faces_payload.get('fallback') else 'mediapipe',
+            'objects': obj_out.get('objects', []),
+            'objectCount': obj_out.get('count', 0),
+            'text': ocr_out.get('words', []),
+            'ocr_available': ocr_out.get('available', False),
+            'dominant_colors': colors,
+            'depth': {
+                'preview_url': depth_out.get('preview_url'),
+                'stats': depth_out.get('stats'),
+                'available': depth_out.get('available', False),
+            },
+            'aesthetic': aesthetic,
+            'meta': meta,
+            'warnings': warnings,
+            'models_used': models_used,
+            'backend': 'deep',
+            'elapsedMs': int((time.monotonic() - started) * 1000),
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e),
+                        'elapsedMs': int((time.monotonic() - started) * 1000)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /health — extended to report deep-model status
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         'status': 'ok',
+        # Light lanes
         'face_detection': 'mediapipe',
-        'yolo_loaded': YOLO_MODEL is not None,
-        'ocr_available': _check_tesseract(),
-        'ocr_error': _TESSERACT_ERR,
+        'yolo': {'loaded': YOLO_MODEL is not None, 'model': YOLO_MODEL_NAME},
+        'tesseract': {'available': _check_tesseract(), 'error': _TESSERACT_ERR},
+        # Deep lanes — import probe results (weights are still lazy).
+        'deep': {
+            'torch_available': _HAS_TORCH,
+            'transformers_available': _HAS_TRANSFORMERS,
+            'insightface_available': _HAS_INSIGHTFACE,
+            'paddle_available': _HAS_PADDLE,
+            'import_errors': _DEEP_IMPORT_ERRORS,
+            # Whether each model has been loaded into memory yet.
+            'loaded': {
+                'blip': BLIP.loaded,
+                'clip': CLIP.loaded,
+                'insightface': INSIGHT.loaded,
+                'paddle': PADDLE.loaded,
+                'depth_anything': DEPTH.loaded,
+            },
+            'errors': {
+                'blip': BLIP.error,
+                'clip': CLIP.error,
+                'insightface': INSIGHT.error,
+                'paddle': PADDLE.error,
+                'depth_anything': DEPTH.error,
+            },
+        },
     })
+
+
+# Startup summary — tell the operator which deep lanes are theoretically usable
+# before any request comes in. Actual weight downloads still happen lazily.
+print('[boot] Deep model probes:')
+print(f'  torch          = {_HAS_TORCH}')
+print(f'  transformers   = {_HAS_TRANSFORMERS}   (BLIP + CLIP + Depth-Anything need this)')
+print(f'  insightface    = {_HAS_INSIGHTFACE}   (face embeddings + verify)')
+print(f'  paddleocr      = {_HAS_PADDLE}   (better OCR than Tesseract)')
+if _DEEP_IMPORT_ERRORS:
+    print('[boot] Import errors — those lanes will report available=false:')
+    for k, v in _DEEP_IMPORT_ERRORS.items():
+        print(f'  {k}: {v}')
 
 
 if __name__ == '__main__':
