@@ -15,6 +15,8 @@ import multer from 'multer';
 import { success, error } from '../../helpers/res_helper.js';
 import logger from '../../helpers/logger.js';
 import { analyzeTattooWithGemini } from '../../services/tattoo/gemini.js';
+import { analyzeBufferOffline } from '../vision/index.js';
+import { offlineToTattooShape } from '../../services/tattoo/offlineFallback.js';
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -108,14 +110,45 @@ export const postAnalyzeTattoo = async (req, res) => {
       elapsedMs,
     }, 'Analyzed');
   } catch (e) {
-    logger.error('tattoo/analyze failed', e.message);
-    // GEMINI_DISABLED and GEMINI_MISSING_KEY are config errors → 503; a
-    // parse failure or upstream error is a 502 so the FE can distinguish
-    // "we're not set up for this" from "Gemini didn't cooperate".
-    if (e.code === 'GEMINI_DISABLED' || e.code === 'GEMINI_MISSING_KEY') {
-      return error(res, e.message, 503);
+    // Gemini failure → try the fully-offline vision pipeline (MediaPipe +
+    // YOLO + Tesseract + k-means colours) so the Tattoo Studio keeps
+    // working even when the Gemini key isn't configured. The offline
+    // analysis is materially less rich (no tattoo-style classifier, no
+    // subject description), so the response carries a warning + a
+    // `backend: 'offline'` marker the FE can surface to the user.
+    logger.warn(`tattoo/analyze Gemini failed (${e.code || 'error'}: ${e.message}) — falling back to offline vision`);
+    try {
+      const offlineStart = Date.now();
+      const raw = await analyzeBufferOffline(buffer, mimetype);
+      const analysis = offlineToTattooShape(raw);
+      const elapsedMs = Date.now() - offlineStart;
+      cacheSet(hash, analysis);
+      logger.info(
+        `tattoo/analyze OFFLINE OK · ${originalname || 'unnamed'} · ${(size / 1024).toFixed(0)}KB · ${elapsedMs}ms · ${analysis.motifs.length} motifs · ${analysis.dominant_colors.length} colors`,
+      );
+      return success(res, {
+        analysis,
+        cached: false,
+        imageHash: hash,
+        modelId: 'offline',
+        elapsedMs,
+        backend: 'offline',
+        warnings: [
+          e.code === 'GEMINI_DISABLED' || e.code === 'GEMINI_MISSING_KEY'
+            ? 'Gemini is not configured — running offline vision. Install a Gemini key for richer style/subject detection.'
+            : `Gemini call failed (${e.message}) — falling back to offline vision.`,
+          ...(Array.isArray(raw.warnings) ? raw.warnings : []),
+        ],
+      }, 'Analyzed (offline)');
+    } catch (offlineErr) {
+      logger.error('tattoo/analyze offline fallback also failed', offlineErr.message);
+      // Both lanes down — return the original Gemini error code so the FE
+      // can distinguish "not set up" (503) from "Gemini errored" (502).
+      if (e.code === 'GEMINI_DISABLED' || e.code === 'GEMINI_MISSING_KEY') {
+        return error(res, `${e.message} — offline fallback also failed: ${offlineErr.message}`, 503);
+      }
+      return error(res, `${e.message || 'Analysis failed'} — offline fallback: ${offlineErr.message}`, 502);
     }
-    return error(res, e.message || 'Analysis failed', 502);
   }
 };
 

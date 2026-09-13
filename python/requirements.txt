@@ -3,3 +3,10 @@ mediapipe==0.10.14
 numpy<2
 flask==3.0.3
 flask-cors==4.0.0
+# Optional — used by /ocr and /vision-analyze OCR lane.
+# pytesseract is a thin Python wrapper; the real work is done by the
+# `tesseract` binary which must be installed on the host (apt: tesseract-ocr).
+# Both routes gracefully return an empty result + warning when either the
+# module or the binary is missing.
+pytesseract>=0.3.10
+Pillow>=10.0.0

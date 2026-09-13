@@ -36,6 +36,7 @@ import cityGraphsRoutes    from './cityGraphs/index.js';
 import pathfindingRoutes   from './pathfinding/index.js';
 import qrSavesRoutes       from './qrSaves/index.js';
 import tattooRoutes        from './tattoo/index.js';
+import visionRoutes        from './vision/index.js';
 import codeRunRoutes       from './codeRun/index.js';
 
 const router = Router();
@@ -69,6 +70,7 @@ router.use('/', cityGraphsRoutes);
 router.use('/', pathfindingRoutes);
 router.use('/', qrSavesRoutes);
 router.use('/', tattooRoutes);
+router.use('/', visionRoutes);
 router.use('/', codeRunRoutes);
 
 export default router;
