@@ -34,6 +34,7 @@ import {
   detectObjects,
   ocrImage,
   dominantColors,
+  extractSubject as extractSubjectService,
   fetchHealthDetail,
 } from '../../services/face.js';
 
@@ -71,11 +72,13 @@ const RATE_LIMITS = {
   analyze: 5,
   deep: 3,
   verify: 3,
+  extract: 5,
 };
 const rateBuckets = {
   analyze: new Map(),
   deep: new Map(),
   verify: new Map(),
+  extract: new Map(),
 };
 
 function checkRate(bucket, ip) {
@@ -508,6 +511,74 @@ export const postFaceVerify = async (req, res) => {
   }
 };
 
+// ─── POST /api/vision/extract-subject ────────────────────────────
+// Isolate the tattoo / dark subject from its background — pure OpenCV on
+// the Python side, no model weights required for `auto` / `dark` modes.
+// Response carries a 1-bit alpha mask (PNG data URL, ≤ 256×256), bbox,
+// centroid, coverage, plus an RGBA thumbnail of the extracted subject.
+//
+// Query / body param: `mode` — 'auto' (default) | 'dark' | 'depth'
+export const postExtractSubject = async (req, res) => {
+  const ip = clientIp(req);
+  const rate = checkRate('extract', ip);
+  if (!rate.ok) {
+    res.setHeader('Retry-After', Math.ceil(rate.retryAfterMs / 1000));
+    return error(res, `Rate limit exceeded — ${rate.max} extract requests per minute. Retry in ${Math.ceil(rate.retryAfterMs / 1000)}s.`, 429);
+  }
+
+  const upload = readUploadedImage(req, res);
+  if (!upload) return;
+  const { buffer, mimetype, size, originalname } = upload;
+
+  // Mode may arrive via query string OR multipart form field.
+  const rawMode = String(req.query?.mode || req.body?.mode || 'auto').toLowerCase();
+  const mode = ['auto', 'dark', 'depth'].includes(rawMode) ? rawMode : 'auto';
+
+  const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+  const cacheKey = `extract:${mode}:${hash}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) {
+    return success(res, { ...cached, cached: true, imageHash: hash }, 'Cached');
+  }
+
+  const imageDataUri = `data:${mimetype};base64,${buffer.toString('base64')}`;
+  const started = Date.now();
+
+  try {
+    const raw = await extractSubjectService(imageDataUri, { mode });
+    if (!raw || raw.ok === false) {
+      // filterInternalWarnings tidies OpenCV C++ traces before they hit the FE.
+      const msg = filterInternalWarnings([raw?.error || 'extract failed'])[0] || 'Subject extraction failed';
+      return error(res, msg, 502);
+    }
+
+    const payload = {
+      ok: true,
+      mask: raw.mask || null,
+      source_bbox: Array.isArray(raw.source_bbox) ? raw.source_bbox : null,
+      source_centroid: Array.isArray(raw.source_centroid) ? raw.source_centroid : null,
+      source_size: raw.source_size || null,
+      subject_thumbnail_url: raw.subject_thumbnail_url || null,
+      backend: raw.backend || 'opencv-adaptive',
+      mode: raw.mode || mode,
+      elapsed_ms: Number(raw.elapsed_ms ?? (Date.now() - started)),
+      imageHash: hash,
+      cached: false,
+    };
+    cacheSet(cacheKey, payload);
+
+    const maskLen = payload.mask?.png_data_url?.length || 0;
+    const thumbLen = payload.subject_thumbnail_url?.length || 0;
+    logger.info(
+      `vision/extract-subject OK · ${originalname || 'unnamed'} · ${(size / 1024).toFixed(0)}KB · mode=${payload.mode} backend=${payload.backend} · coverage=${payload.mask?.coverage} · mask=${(maskLen / 1024).toFixed(1)}KB thumb=${(thumbLen / 1024).toFixed(1)}KB · ${payload.elapsed_ms}ms`,
+    );
+    return success(res, payload, 'Extracted');
+  } catch (e) {
+    logger.error('vision/extract-subject failed', e.message);
+    return error(res, e.message || 'Subject extraction failed', 502);
+  }
+};
+
 // ─── GET /api/vision/health ──────────────────────────────────────
 export const getVisionHealth = async (req, res) => {
   try {
@@ -524,6 +595,7 @@ export const getVisionHealth = async (req, res) => {
         analyze_per_min: RATE_LIMITS.analyze,
         deep_analyze_per_min: RATE_LIMITS.deep,
         face_verify_per_min: RATE_LIMITS.verify,
+        extract_subject_per_min: RATE_LIMITS.extract,
       },
       pythonService: detail,
     });

@@ -86,6 +86,12 @@ export async function depthMap(imageData, { timeoutMs = DEEP_TIMEOUT_MS } = {}) 
   return _post('/depth-map', { image: imageData }, { timeoutMs });
 }
 
+// Subject extraction — pure OpenCV, fast (no model weights needed for
+// `auto` / `dark`). `depth` mode piggybacks on Depth-Anything if it's loaded.
+export async function extractSubject(imageData, { mode = 'auto', timeoutMs = 30_000 } = {}) {
+  return _post('/extract-subject', { image: imageData, mode }, { timeoutMs });
+}
+
 // The deep omnibus — one call, all deep + light lanes. First hit on a fresh
 // Python service takes several minutes (weight downloads); warm hits are
 // 3-8 seconds on the ARM box.

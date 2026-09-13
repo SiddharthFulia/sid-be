@@ -1078,6 +1078,267 @@ def depth_map():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# /extract-subject — isolate dark ink / dark subject from background.
+#
+# Pure OpenCV (no torch / no extra weights) — tuned for tattoo photos where
+# a dark subject sits on lighter skin under uneven lighting. Returns a 1-bit
+# alpha mask (downsampled to fit 256×256) plus a bbox / centroid / coverage
+# and an RGBA thumbnail of the source cropped to the subject.
+#
+# Modes:
+#   • auto  (default) — adaptive threshold + morphology + largest CC.
+#   • dark            — Otsu inverse threshold (aggressive; grabs anything
+#                       darker than the frame average).
+#   • depth           — uses Depth-Anything if loaded: pixels closer than
+#                       the median depth become the subject. Falls back to
+#                       `auto` if the depth model isn't loaded.
+#
+# The FE uses the mask to (a) constrain QR module rendering to the subject
+# silhouette, and (b) drive a height map for a 3D scene, so the response is
+# aggressively downsampled to keep the data URL small (~4-8 KB).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_EXTRACT_MASK_MAX = 256    # cap mask edge — keeps the PNG data URL small
+_EXTRACT_THUMB_MAX = 512   # cap the RGBA subject thumbnail edge
+
+
+def _extract_auto(img_bgr):
+    """Adaptive threshold + morphology — the tattoo default."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    smooth = cv2.bilateralFilter(gray, 9, 75, 75)
+    binary = cv2.adaptiveThreshold(
+        smooth, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        blockSize=41, C=8,
+    )
+    kernel3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel3)
+    kernel7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel7)
+    return _keep_largest_cc(binary)
+
+
+def _extract_dark(img_bgr):
+    """Otsu inverse — grabs anything darker than the mean.
+
+    More aggressive than `auto`; useful when the subject is a solid dark
+    shape (silhouette / logo) rather than fine ink strokes.
+    """
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(
+        smooth, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU,
+    )
+    kernel5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel5)
+    return _keep_largest_cc(binary)
+
+
+def _extract_depth(img_bgr):
+    """Depth-Anything median split — subject = closer than median depth.
+
+    Returns None if the depth model isn't loaded; caller should fall back
+    to `auto`.
+    """
+    try:
+        depth_pipeline = DEPTH.get()
+    except Exception:
+        return None
+    if depth_pipeline is None:
+        return None
+    try:
+        import torch  # noqa: F401 — needed for tensor ops below
+        pil = _pil_from_bgr(img_bgr)
+        result = depth_pipeline(pil)
+        depth_tensor = result.get('predicted_depth')
+        if depth_tensor is None:
+            return None
+        arr = depth_tensor.detach().cpu().numpy()
+        # Resize depth to source resolution so the mask lines up.
+        h, w = img_bgr.shape[:2]
+        depth = cv2.resize(arr, (w, h), interpolation=cv2.INTER_LINEAR)
+        # Depth-Anything convention: LARGER value = CLOSER. Take everything
+        # above the median as the subject.
+        thresh = float(np.median(depth))
+        binary = np.where(depth > thresh, 255, 0).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        return _keep_largest_cc(binary)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _keep_largest_cc(binary):
+    """Drop border noise / speckles — keep only the biggest blob."""
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num <= 1:
+        return binary
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    biggest = 1 + int(np.argmax(areas))
+    return np.where(labels == biggest, 255, 0).astype(np.uint8)
+
+
+def _mask_stats(mask):
+    """Compute bbox / centroid / coverage from a uint8 {0, 255} mask.
+
+    Returns bbox as [x, y, w, h] in mask coords, centroid as [cx, cy],
+    coverage as fraction 0..1. All zero when the mask is empty.
+    """
+    ys, xs = np.where(mask > 0)
+    if xs.size == 0:
+        return {
+            'bbox': [0, 0, 0, 0],
+            'centroid': [0, 0],
+            'coverage': 0.0,
+        }
+    x1, x2 = int(xs.min()), int(xs.max())
+    y1, y2 = int(ys.min()), int(ys.max())
+    bw, bh = x2 - x1 + 1, y2 - y1 + 1
+    cx = int(round(float(xs.mean())))
+    cy = int(round(float(ys.mean())))
+    coverage = float(mask.sum()) / float(mask.size * 255)
+    return {
+        'bbox': [x1, y1, bw, bh],
+        'centroid': [cx, cy],
+        'coverage': round(coverage, 4),
+    }
+
+
+def _png_data_url(arr, mode='L'):
+    """Encode a numpy array as a PNG data URL. mode 'L' = grayscale, 'RGBA' = 4ch."""
+    if Image is None:
+        import PIL.Image as _PILImage  # type: ignore
+        pil = _PILImage.fromarray(arr, mode=mode)
+    else:
+        pil = Image.fromarray(arr, mode=mode)
+    buf = io.BytesIO()
+    pil.save(buf, format='PNG', optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+    return f'data:image/png;base64,{b64}'
+
+
+def _downsample_for_wire(mask, max_edge):
+    """Resize a binary mask to fit inside `max_edge×max_edge` while preserving aspect.
+
+    Uses nearest-neighbour so the mask stays crisp (no grey fringe).
+    """
+    h, w = mask.shape[:2]
+    if max(h, w) <= max_edge:
+        return mask
+    scale = max_edge / float(max(h, w))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+
+def _subject_thumbnail(img_bgr, mask_full, bbox):
+    """Crop source to bbox, apply mask as alpha, cap edge at _EXTRACT_THUMB_MAX.
+
+    Returns a PNG data URL (RGBA) — the FE renders this as a "hero" preview
+    of what was extracted. Empty bbox → returns None.
+    """
+    x, y, bw, bh = bbox
+    if bw <= 0 or bh <= 0:
+        return None
+    crop_bgr = img_bgr[y:y + bh, x:x + bw]
+    crop_mask = mask_full[y:y + bh, x:x + bw]
+    # Cap the thumbnail — use min(bbox * 2, 512) as the ceiling so tiny subjects
+    # still ship a usable preview, and huge ones don't blow up the response.
+    max_edge = min(max(bw, bh) * 2, _EXTRACT_THUMB_MAX)
+    if max(bw, bh) > max_edge:
+        scale = max_edge / float(max(bw, bh))
+        new_w = max(1, int(round(bw * scale)))
+        new_h = max(1, int(round(bh * scale)))
+        crop_bgr = cv2.resize(crop_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        crop_mask = cv2.resize(crop_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+    # Build RGBA — BGR → RGB, then stack the mask as alpha.
+    rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+    rgba = np.dstack([rgb, crop_mask])
+    return _png_data_url(rgba, mode='RGBA')
+
+
+@app.route('/extract-subject', methods=['POST'])
+def extract_subject():
+    started = time.monotonic()
+    try:
+        data = request.get_json(silent=True) or {}
+        image_data = data.get('image')
+        if not image_data:
+            return jsonify({'ok': False, 'error': 'No image provided'}), 400
+
+        img = decode_image(image_data)
+        if img is None:
+            return jsonify({'ok': False, 'error': 'Invalid image'}), 400
+
+        mode = str(data.get('mode') or 'auto').lower()
+        if mode not in ('auto', 'dark', 'depth'):
+            mode = 'auto'
+
+        backend = None
+        if mode == 'depth':
+            mask_full = _extract_depth(img)
+            if mask_full is None:
+                # Depth-Anything not loaded → fall back to auto.
+                mask_full = _extract_auto(img)
+                backend = 'opencv-adaptive (depth-fallback)'
+            else:
+                backend = 'depth-anything-median'
+        elif mode == 'dark':
+            mask_full = _extract_dark(img)
+            backend = 'opencv-otsu'
+        else:
+            mask_full = _extract_auto(img)
+            backend = 'opencv-adaptive'
+
+        if mask_full is None or mask_full.size == 0:
+            return jsonify({'ok': False, 'error': 'Extraction produced an empty mask'}), 500
+
+        # Stats are computed on the FULL-RES mask so bbox / centroid are in
+        # source pixel coordinates.
+        full_stats = _mask_stats(mask_full)
+
+        # Thumbnail also uses the FULL-RES mask + source, so the RGBA preview
+        # retains detail even after the wire mask is downsampled.
+        thumbnail_url = _subject_thumbnail(img, mask_full, full_stats['bbox'])
+
+        # Downsample the wire mask so the response stays small.
+        wire_mask = _downsample_for_wire(mask_full, _EXTRACT_MASK_MAX)
+        wire_stats = _mask_stats(wire_mask)
+        png_url = _png_data_url(wire_mask, mode='L')
+
+        elapsed = int((time.monotonic() - started) * 1000)
+        h, w = img.shape[:2]
+
+        return jsonify({
+            'ok': True,
+            'mask': {
+                'png_data_url': png_url,
+                'coverage': wire_stats['coverage'],
+                'bbox': wire_stats['bbox'],       # bbox in mask (downsampled) coords
+                'centroid': wire_stats['centroid'],
+                'width': int(wire_mask.shape[1]),
+                'height': int(wire_mask.shape[0]),
+            },
+            'source_bbox': full_stats['bbox'],    # bbox in original source coords
+            'source_centroid': full_stats['centroid'],
+            'source_size': {'width': w, 'height': h},
+            'subject_thumbnail_url': thumbnail_url,
+            'backend': backend,
+            'mode': mode,
+            'elapsed_ms': elapsed,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({
+            'ok': False,
+            'error': str(e),
+            'elapsed_ms': int((time.monotonic() - started) * 1000),
+        }), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # INTERNAL HELPERS — reused by /vision-analyze and /vision-deep omnibuses
 # ═══════════════════════════════════════════════════════════════════════════════
 
