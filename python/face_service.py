@@ -1655,5 +1655,39 @@ if _DEEP_IMPORT_ERRORS:
         print(f'  {k}: {v}')
 
 
+# ── Warm-up hook ─────────────────────────────────────────────────
+# Fire model loads in a background thread on service boot so the first
+# user request doesn't eat the 30-60s cold load per model. Each _LazyModel
+# has its own lock — this thread just triggers .get() to force the load
+# graph to run. Failures are already isolated per-model (they return None
+# and stamp _DEEP_IMPORT_ERRORS), so a broken model doesn't stall the rest.
+#
+# Set WARMUP=0 in env to skip (e.g. during dev with hot reload).
+def _warmup_models():
+    import time
+    if os.environ.get('WARMUP', '1') == '0':
+        print('[warmup] skipped (WARMUP=0)')
+        return
+    print('[warmup] preloading deep models in background…')
+    for name, model in [
+        ('BLIP',       BLIP),
+        ('CLIP',       CLIP),
+        ('InsightFace', INSIGHT),
+        ('PaddleOCR',  PADDLE),
+        ('Depth',      DEPTH),
+    ]:
+        t0 = time.time()
+        try:
+            m = model.get()
+            status = 'ok' if m is not None else 'unavailable'
+        except Exception as e:
+            status = f'error: {e.__class__.__name__}'
+        dt = time.time() - t0
+        print(f'[warmup] {name}: {status} ({dt:.1f}s)')
+    print('[warmup] done — first user request will be fast.')
+
+
 if __name__ == '__main__':
+    import threading
+    threading.Thread(target=_warmup_models, daemon=True).start()
     app.run(host='0.0.0.0', port=5000)

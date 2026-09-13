@@ -28,7 +28,7 @@ torchvision
 
 # PaddleOCR — better than Tesseract on messy real-world images.
 paddleocr==2.7.3
-paddlepaddle==2.6.0
+paddlepaddle==2.6.2
 
 # InsightFace buffalo_s — 512-dim face embeddings + age/gender + landmarks.
 insightface==0.7.3
